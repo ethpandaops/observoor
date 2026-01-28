@@ -1,0 +1,10 @@
+.git
+.gitignore
+.github
+bin/
+*.md
+LICENSE
+.idea/
+.vscode/
+e2e/
+deploy/

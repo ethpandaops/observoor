@@ -1,0 +1,103 @@
+services:
+  init:
+    image: alpine:3.19
+    command: >
+      sh -c "apk add --no-cache openssl &&
+             openssl rand -hex 32 > /shared/jwt-secret.hex"
+    volumes:
+      - shared:/shared
+
+  geth:
+    image: ethereum/client-go:stable
+    depends_on:
+      init:
+        condition: service_completed_successfully
+    command: >
+      --hoodi
+      --http
+      --http.addr=0.0.0.0
+      --http.port=8545
+      --http.api=eth,net,web3,engine
+      --http.vhosts=*
+      --authrpc.addr=0.0.0.0
+      --authrpc.port=8551
+      --authrpc.jwtsecret=/shared/jwt-secret.hex
+      --authrpc.vhosts=*
+      --syncmode=snap
+    ports:
+      - "8545:8545"
+      - "8551:8551"
+      - "30303:30303"
+    volumes:
+      - shared:/shared
+      - geth-data:/root/.ethereum
+
+  prysm:
+    image: gcr.io/prysmaticlabs/prysm/beacon-chain:stable
+    depends_on:
+      init:
+        condition: service_completed_successfully
+      geth:
+        condition: service_started
+    command: >
+      --hoodi
+      --execution-endpoint=http://geth:8551
+      --jwt-secret=/shared/jwt-secret.hex
+      --checkpoint-sync-url=https://checkpoint-sync.hoodi.ethpandaops.io
+      --genesis-beacon-api-url=https://checkpoint-sync.hoodi.ethpandaops.io
+      --grpc-gateway-host=0.0.0.0
+      --grpc-gateway-port=3500
+      --accept-terms-of-use
+    ports:
+      - "3500:3500"
+      - "4000:4000"
+    volumes:
+      - shared:/shared
+      - prysm-data:/data
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    command: ["--config=/etc/otel-collector-config.yaml"]
+    ports:
+      - "4317:4317"
+    volumes:
+      - ./configs/otel-collector-config.yaml:/etc/otel-collector-config.yaml:ro
+    depends_on:
+      clickhouse:
+        condition: service_started
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ./configs/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - clickhouse-data:/var/lib/clickhouse
+
+  observoor:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    depends_on:
+      prysm:
+        condition: service_started
+      otel-collector:
+        condition: service_started
+    privileged: true
+    pid: "host"
+    command: ["--config", "/etc/observoor/config.yaml"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./configs/observoor.yaml:/etc/observoor/config.yaml:ro
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /proc:/proc:ro
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+
+volumes:
+  shared:
+  geth-data:
+  prysm-data:
+  clickhouse-data:

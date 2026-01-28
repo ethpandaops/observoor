@@ -1,0 +1,37 @@
+log_level: debug
+
+beacon:
+  endpoint: "http://prysm:3500"
+  timeout: 10s
+
+pid:
+  process_names:
+    - geth
+    - beacon-chain
+
+sync_poll_interval: 30s
+ring_buffer_size: 4194304  # 4MB
+
+sinks:
+  raw:
+    enabled: false
+    clickhouse:
+      endpoint: "clickhouse:9000"
+      database: "observoor"
+      table: "raw_events"
+      batch_size: 10000
+      flush_interval: 1s
+  slot:
+    enabled: true
+    otlp:
+      endpoint: "otel-collector:4317"
+      insecure: true
+  window:
+    enabled: false
+    interval: 500ms
+    otlp:
+      endpoint: "otel-collector:4317"
+      insecure: true
+
+health:
+  addr: ":9090"

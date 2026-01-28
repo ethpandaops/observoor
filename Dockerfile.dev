@@ -1,0 +1,19 @@
+FROM golang:1.23-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    clang \
+    llvm \
+    libbpf-dev \
+    make \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Cache module downloads.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+# Generate BPF code, build binary, run tests.
+CMD ["bash", "-c", "make generate && go build -tags linux ./... && go test -race -count=1 ./..."]
