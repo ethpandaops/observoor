@@ -33,9 +33,6 @@ sinks:
     enabled: false
   slot:
     enabled: true
-    otlp:
-      endpoint: "otel-collector:4317"
-      insecure: true
   window:
     enabled: false
     interval: 500ms
@@ -60,7 +57,6 @@ ring_buffer_size: 8388608
 	)
 	assert.True(t, cfg.Sinks.Slot.Enabled)
 	assert.False(t, cfg.Sinks.Raw.Enabled)
-	assert.Equal(t, "otel-collector:4317", cfg.Sinks.Slot.OTLP.Endpoint)
 	assert.Equal(t, ":9091", cfg.Health.Addr)
 	assert.Equal(t, 8388608, cfg.RingBufferSize)
 }

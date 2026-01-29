@@ -23,15 +23,9 @@ sinks:
       flush_interval: 1s
   slot:
     enabled: true
-    otlp:
-      endpoint: "otel-collector:4317"
-      insecure: true
   window:
     enabled: false
     interval: 500ms
-    otlp:
-      endpoint: "otel-collector:4317"
-      insecure: true
 
 health:
   addr: ":9090"
