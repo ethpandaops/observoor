@@ -100,7 +100,11 @@ struct openat_val {
 
 // Block I/O request tracking.
 struct req_key {
-    __u64 req;
+    __u32 dev;
+    __u32 nr_sector;
+    __u64 sector;
+    __u8  rw;
+    __u8  pad[3];
 };
 
 struct req_val {

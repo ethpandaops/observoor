@@ -18,14 +18,16 @@ import (
 )
 
 type tracer struct {
-	log         logrus.FieldLogger
-	ringBufSize int
-	handlers    []EventHandler
-	links       []link.Link
-	reader      *ringbuf.Reader
-	objs        *observoorObjects
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
+	log           logrus.FieldLogger
+	ringBufSize   int
+	handlers      []EventHandler
+	errorHandlers []ErrorHandler
+	statsHandlers []RingbufStatsHandler
+	links         []link.Link
+	reader        *ringbuf.Reader
+	objs          *observoorObjects
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
 }
 
 // New creates a new BPF tracer.
@@ -34,14 +36,24 @@ func New(
 	ringBufSize int,
 ) Tracer {
 	return &tracer{
-		log:         log.WithField("component", "tracer"),
-		ringBufSize: ringBufSize,
-		handlers:    make([]EventHandler, 0, 4),
+		log:           log.WithField("component", "tracer"),
+		ringBufSize:   ringBufSize,
+		handlers:      make([]EventHandler, 0, 4),
+		errorHandlers: make([]ErrorHandler, 0, 2),
+		statsHandlers: make([]RingbufStatsHandler, 0, 2),
 	}
 }
 
 func (t *tracer) OnEvent(handler EventHandler) {
 	t.handlers = append(t.handlers, handler)
+}
+
+func (t *tracer) OnError(handler ErrorHandler) {
+	t.errorHandlers = append(t.errorHandlers, handler)
+}
+
+func (t *tracer) OnRingbufStats(handler RingbufStatsHandler) {
+	t.statsHandlers = append(t.statsHandlers, handler)
 }
 
 func (t *tracer) Start(ctx context.Context) error {
@@ -241,13 +253,17 @@ func (t *tracer) readLoop(ctx context.Context) {
 			}
 
 			t.log.WithError(err).Warn("Ring buffer read error")
+			t.reportError(err)
 
 			continue
 		}
 
+		t.reportRingbufStats(record.Remaining)
+
 		event, err := parseEvent(record.RawSample)
 		if err != nil {
 			t.log.WithError(err).Debug("Event parse error")
+			t.reportError(err)
 
 			continue
 		}
@@ -255,6 +271,33 @@ func (t *tracer) readLoop(ctx context.Context) {
 		for _, handler := range t.handlers {
 			handler(event)
 		}
+	}
+}
+
+func (t *tracer) reportError(err error) {
+	for _, handler := range t.errorHandlers {
+		handler(err)
+	}
+}
+
+func (t *tracer) reportRingbufStats(remaining int) {
+	if t.reader == nil {
+		return
+	}
+
+	size := t.reader.BufferSize()
+	used := size - remaining
+	if used < 0 {
+		used = 0
+	}
+
+	stats := RingbufStats{
+		UsedBytes: used,
+		SizeBytes: size,
+	}
+
+	for _, handler := range t.statsHandlers {
+		handler(stats)
 	}
 }
 

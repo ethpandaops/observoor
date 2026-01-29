@@ -24,6 +24,7 @@ type RawSink struct {
 	log    logrus.FieldLogger
 	cfg    RawConfig
 	writer *export.ClickHouseWriter
+	health *export.HealthMetrics
 
 	currentSlot atomic.Uint64
 
@@ -59,11 +60,13 @@ var _ Sink = (*RawSink)(nil)
 func NewRawSink(
 	log logrus.FieldLogger,
 	cfg RawConfig,
+	health *export.HealthMetrics,
 ) *RawSink {
 	return &RawSink{
 		log:     log.WithField("sink", "raw"),
 		cfg:     cfg,
 		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
+		health:  health,
 		batch:   make([]rawRow, 0, cfg.ClickHouse.BatchSize),
 		done:    make(chan struct{}),
 		eventCh: make(chan tracer.ParsedEvent, 4096),
@@ -87,10 +90,11 @@ func (s *RawSink) Start(ctx context.Context) error {
 }
 
 func (s *RawSink) Stop() error {
-	if s.cancel != nil {
-		s.cancel()
+	if s.cancel == nil {
+		return s.writer.Stop()
 	}
 
+	s.cancel()
 	<-s.done
 
 	// Flush remaining events.
@@ -102,6 +106,7 @@ func (s *RawSink) Stop() error {
 	if len(remaining) > 0 {
 		if err := s.flush(context.Background(), remaining); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
+			s.reportExportError()
 		}
 	}
 
@@ -113,6 +118,7 @@ func (s *RawSink) HandleEvent(event tracer.ParsedEvent) {
 	case s.eventCh <- event:
 	default:
 		s.log.Warn("Raw sink event channel full, dropping event")
+		s.reportDrop()
 	}
 }
 
@@ -159,6 +165,7 @@ func (s *RawSink) addEvent(
 	if shouldFlush {
 		if err := s.flush(ctx, toFlush); err != nil {
 			s.log.WithError(err).Error("Batch flush failed")
+			s.reportExportError()
 		}
 	}
 }
@@ -178,6 +185,7 @@ func (s *RawSink) tickFlush(ctx context.Context) {
 
 	if err := s.flush(ctx, toFlush); err != nil {
 		s.log.WithError(err).Error("Periodic flush failed")
+		s.reportExportError()
 	}
 }
 
@@ -267,4 +275,20 @@ func toRawRow(event tracer.ParsedEvent, slot uint64) rawRow {
 	}
 
 	return row
+}
+
+func (s *RawSink) reportDrop() {
+	if s.health == nil {
+		return
+	}
+
+	s.health.EventsDropped.Inc()
+}
+
+func (s *RawSink) reportExportError() {
+	if s.health == nil {
+		return
+	}
+
+	s.health.ExportErrors.Inc()
 }

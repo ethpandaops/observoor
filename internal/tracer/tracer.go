@@ -4,6 +4,14 @@ import "context"
 
 // EventHandler is called for each parsed event from the ring buffer.
 type EventHandler func(event ParsedEvent)
+type ErrorHandler func(err error)
+
+type RingbufStats struct {
+	UsedBytes int
+	SizeBytes int
+}
+
+type RingbufStatsHandler func(stats RingbufStats)
 
 // Tracer manages BPF program loading, attachment, and event reading.
 type Tracer interface {
@@ -20,4 +28,8 @@ type Tracer interface {
 	UpdateTIDs(tids []uint32, clientTypes map[uint32]ClientType) error
 	// OnEvent registers a handler for parsed events.
 	OnEvent(handler EventHandler)
+	// OnError registers a handler for read or parse errors.
+	OnError(handler ErrorHandler)
+	// OnRingbufStats registers a handler for ring buffer usage stats.
+	OnRingbufStats(handler RingbufStatsHandler)
 }

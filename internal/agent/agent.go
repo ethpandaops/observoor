@@ -58,7 +58,9 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	}
 
 	if cfg.Sinks.Raw.Enabled {
-		a.sinks = append(a.sinks, sink.NewRawSink(log, cfg.Sinks.Raw))
+		a.sinks = append(a.sinks, sink.NewRawSink(
+			log, cfg.Sinks.Raw, a.health,
+		))
 	}
 
 	if cfg.Sinks.Window.Enabled {
@@ -125,28 +127,9 @@ func (a *agent) Start(ctx context.Context) error {
 
 	a.health.PIDsTracked.Set(float64(len(pids)))
 
-	// 6-7. Load BPF programs and populate PID map.
-	if err := a.tracer.Start(ctx); err != nil {
-		return fmt.Errorf("starting BPF tracer: %w", err)
-	}
-
 	clientTypes := resolveClientTypes(pids)
 
-	if err := a.tracer.UpdatePIDs(pids, clientTypes); err != nil {
-		return fmt.Errorf("updating PIDs in BPF map: %w", err)
-	}
-
-	// 6b. Discover TIDs and populate tracked_tids map.
-	tids, tidClientTypes := a.discoverTIDs(pids, clientTypes)
-
-	if err := a.tracer.UpdateTIDs(tids, tidClientTypes); err != nil {
-		return fmt.Errorf("updating TIDs in BPF map: %w", err)
-	}
-
-	a.log.WithField("count", len(tids)).
-		Info("Updated tracked TIDs")
-
-	// 8. Start all enabled sinks.
+	// 6. Start all enabled sinks.
 	for _, s := range a.sinks {
 		if err := s.Start(ctx); err != nil {
 			return fmt.Errorf("starting sink %s: %w", s.Name(), err)
@@ -155,16 +138,7 @@ func (a *agent) Start(ctx context.Context) error {
 		a.log.WithField("sink", s.Name()).Info("Sink started")
 	}
 
-	// 9. Register event handler for fan-out to sinks.
-	a.tracer.OnEvent(func(event tracer.ParsedEvent) {
-		a.health.EventsReceived.Inc()
-
-		for _, s := range a.sinks {
-			s.HandleEvent(event)
-		}
-	})
-
-	// 10. Register slot change callback.
+	// 7. Register slot change callback.
 	a.clock.OnSlotChanged(func(slot uint64) {
 		a.health.CurrentSlot.Set(float64(slot))
 		a.health.SlotsFlushed.Inc()
@@ -174,17 +148,55 @@ func (a *agent) Start(ctx context.Context) error {
 		}
 	})
 
-	// 11. Start the clock.
+	// 8. Seed all sinks with the current slot so events arriving
+	// after handlers are registered get a valid slot immediately.
+	initialSlot := a.clock.CurrentSlot()
+	a.health.CurrentSlot.Set(float64(initialSlot))
+	for _, s := range a.sinks {
+		s.OnSlotChanged(initialSlot)
+	}
+
+	// 9. Start the clock.
 	if err := a.clock.Start(ctx); err != nil {
 		return fmt.Errorf("starting clock: %w", err)
 	}
 
-	// Seed all sinks with the current slot so events arriving
-	// before the first OnSlotChanged callback get a valid slot.
-	initialSlot := a.clock.CurrentSlot()
-	for _, s := range a.sinks {
-		s.OnSlotChanged(initialSlot)
+	// 10. Register tracer handlers for events, errors, and ringbuf stats.
+	a.tracer.OnEvent(func(event tracer.ParsedEvent) {
+		a.health.EventsReceived.Inc()
+
+		for _, s := range a.sinks {
+			s.HandleEvent(event)
+		}
+	})
+
+	a.tracer.OnError(func(err error) {
+		a.health.EventsDropped.Inc()
+		a.log.WithError(err).Debug("Tracer error")
+	})
+
+	a.tracer.OnRingbufStats(func(stats tracer.RingbufStats) {
+		a.health.RingBufUsed.Set(float64(stats.UsedBytes))
+	})
+
+	// 11. Load BPF programs and populate PID map.
+	if err := a.tracer.Start(ctx); err != nil {
+		return fmt.Errorf("starting BPF tracer: %w", err)
 	}
+
+	if err := a.tracer.UpdatePIDs(pids, clientTypes); err != nil {
+		return fmt.Errorf("updating PIDs in BPF map: %w", err)
+	}
+
+	// 11b. Discover TIDs and populate tracked_tids map.
+	tids, tidClientTypes := a.discoverTIDs(pids, clientTypes)
+
+	if err := a.tracer.UpdateTIDs(tids, tidClientTypes); err != nil {
+		return fmt.Errorf("updating TIDs in BPF map: %w", err)
+	}
+
+	a.log.WithField("count", len(tids)).
+		Info("Updated tracked TIDs")
 
 	// 12. Start sync state monitor.
 	a.wg.Add(1)
@@ -213,15 +225,15 @@ func (a *agent) Stop() error {
 		a.clock.Stop()
 	}
 
+	if a.tracer != nil {
+		a.tracer.Stop()
+	}
+
 	for _, s := range a.sinks {
 		if err := s.Stop(); err != nil {
 			a.log.WithError(err).WithField("sink", s.Name()).
 				Error("Error stopping sink")
 		}
-	}
-
-	if a.tracer != nil {
-		a.tracer.Stop()
 	}
 
 	if a.health != nil {

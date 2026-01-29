@@ -10,9 +10,11 @@ import (
 )
 
 type tracer struct {
-	log         logrus.FieldLogger
-	ringBufSize int
-	handlers    []EventHandler
+	log           logrus.FieldLogger
+	ringBufSize   int
+	handlers      []EventHandler
+	errorHandlers []ErrorHandler
+	statsHandlers []RingbufStatsHandler
 }
 
 // New creates a new BPF tracer.
@@ -22,14 +24,24 @@ func New(
 	ringBufSize int,
 ) Tracer {
 	return &tracer{
-		log:         log.WithField("component", "tracer"),
-		ringBufSize: ringBufSize,
-		handlers:    make([]EventHandler, 0, 4),
+		log:           log.WithField("component", "tracer"),
+		ringBufSize:   ringBufSize,
+		handlers:      make([]EventHandler, 0, 4),
+		errorHandlers: make([]ErrorHandler, 0, 2),
+		statsHandlers: make([]RingbufStatsHandler, 0, 2),
 	}
 }
 
 func (t *tracer) OnEvent(handler EventHandler) {
 	t.handlers = append(t.handlers, handler)
+}
+
+func (t *tracer) OnError(handler ErrorHandler) {
+	t.errorHandlers = append(t.errorHandlers, handler)
+}
+
+func (t *tracer) OnRingbufStats(handler RingbufStatsHandler) {
+	t.statsHandlers = append(t.statsHandlers, handler)
 }
 
 func (t *tracer) Start(_ context.Context) error {

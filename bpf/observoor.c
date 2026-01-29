@@ -379,8 +379,13 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
-    // Use the sector as a pseudo-request identifier.
-    struct req_key key = { .req = ctx->sector };
+    __u8 rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
+    struct req_key key = {
+        .dev = ctx->dev,
+        .nr_sector = ctx->nr_sector,
+        .sector = ctx->sector,
+        .rw = rw,
+    };
     struct req_val val = {
         .ts = bpf_ktime_get_ns(),
         .pid = pid,
@@ -393,7 +398,13 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx)
 SEC("tracepoint/block/block_rq_complete")
 int trace_block_rq_complete(struct trace_event_raw_block_rq *ctx)
 {
-    struct req_key key = { .req = ctx->sector };
+    __u8 rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
+    struct req_key key = {
+        .dev = ctx->dev,
+        .nr_sector = ctx->nr_sector,
+        .sector = ctx->sector,
+        .rw = rw,
+    };
     struct req_val *val = bpf_map_lookup_elem(&req_start, &key);
     if (!val)
         return 0;
@@ -405,8 +416,8 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq *ctx)
     fill_header(&e->hdr, EVENT_DISK_IO, val->client_type);
     e->hdr.pid = val->pid;
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->bytes = ctx->nr_sector * 512;
-    e->rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
+    e->bytes = ctx->bytes;
+    e->rw = rw;
 
     bpf_ringbuf_submit(e, 0);
 
