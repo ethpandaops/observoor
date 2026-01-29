@@ -143,8 +143,9 @@ func (a *agent) Start(ctx context.Context) error {
 		a.health.CurrentSlot.Set(float64(slot))
 		a.health.SlotsFlushed.Inc()
 
+		slotStart := a.clock.SlotStartTime(slot)
 		for _, s := range a.sinks {
-			s.OnSlotChanged(slot)
+			s.OnSlotChanged(slot, slotStart)
 		}
 	})
 
@@ -153,7 +154,7 @@ func (a *agent) Start(ctx context.Context) error {
 	initialSlot := a.clock.CurrentSlot()
 	a.health.CurrentSlot.Set(float64(initialSlot))
 	for _, s := range a.sinks {
-		s.OnSlotChanged(initialSlot)
+		s.OnSlotChanged(initialSlot, a.clock.SlotStartTime(initialSlot))
 	}
 
 	// 9. Start the clock.
@@ -189,9 +190,9 @@ func (a *agent) Start(ctx context.Context) error {
 	}
 
 	// 11b. Discover TIDs and populate tracked_tids map.
-	tids, tidClientTypes := a.discoverTIDs(pids, clientTypes)
+	tids, tidInfo := a.discoverTIDs(pids, clientTypes)
 
-	if err := a.tracer.UpdateTIDs(tids, tidClientTypes); err != nil {
+	if err := a.tracer.UpdateTIDs(tids, tidInfo); err != nil {
 		return fmt.Errorf("updating TIDs in BPF map: %w", err)
 	}
 
@@ -337,12 +338,12 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 					Warn("PID map update failed")
 			}
 
-			tids, tidClientTypes := a.discoverTIDs(
+			tids, tidInfo := a.discoverTIDs(
 				pids, clientTypes,
 			)
 
 			if err := a.tracer.UpdateTIDs(
-				tids, tidClientTypes,
+				tids, tidInfo,
 			); err != nil {
 				a.log.WithError(err).
 					Warn("TID map update failed")
@@ -359,10 +360,10 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 func (a *agent) discoverTIDs(
 	pids []uint32,
 	clientTypes map[uint32]tracer.ClientType,
-) ([]uint32, map[uint32]tracer.ClientType) {
+) ([]uint32, map[uint32]tracer.TrackedTidInfo) {
 	tids := make([]uint32, 0, len(pids)*64)
-	tidClientTypes := make(
-		map[uint32]tracer.ClientType, len(pids)*64,
+	tidInfo := make(
+		map[uint32]tracer.TrackedTidInfo, len(pids)*64,
 	)
 
 	for _, p := range pids {
@@ -390,11 +391,14 @@ func (a *agent) discoverTIDs(
 			}
 
 			tids = append(tids, tid)
-			tidClientTypes[tid] = ct
+			tidInfo[tid] = tracer.TrackedTidInfo{
+				PID:    p,
+				Client: ct,
+			}
 		}
 	}
 
-	return tids, tidClientTypes
+	return tids, tidInfo
 }
 
 // resolveClientTypes attempts to determine the Ethereum client type

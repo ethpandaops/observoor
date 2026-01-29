@@ -2,6 +2,7 @@ package sink
 
 import (
 	"context"
+	"time"
 
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -24,5 +25,5 @@ type Sink interface {
 	// HandleEvent processes a single parsed event.
 	HandleEvent(event tracer.ParsedEvent)
 	// OnSlotChanged is called at slot boundaries.
-	OnSlotChanged(newSlot uint64)
+	OnSlotChanged(newSlot uint64, slotStart time.Time)
 }

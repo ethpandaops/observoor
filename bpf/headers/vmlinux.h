@@ -75,12 +75,24 @@ struct pt_regs {
 /* Socket common. */
 struct __sk_common {
     unsigned short skc_family;
+    unsigned char skc_state;
     unsigned short skc_num;       /* source port */
     unsigned short skc_dport;     /* destination port (network byte order) */
 };
 
 struct sock {
     struct __sk_common __sk_common;
+    unsigned char sk_state;
+};
+
+struct sk_buff {
+    unsigned int len;
+};
+
+struct tcp_sock {
+    struct sock sk;
+    unsigned int snd_cwnd;
+    unsigned int srtt_us;
 };
 
 struct msghdr;
@@ -110,6 +122,15 @@ struct trace_event_raw_sched_switch {
     int next_prio;
 };
 
+struct trace_event_raw_sched_wakeup {
+    unsigned long long unused;
+    char comm[16];
+    int pid;
+    int prio;
+    int success;
+    int target_cpu;
+};
+
 struct trace_event_raw_block_rq {
     unsigned long long unused;
     unsigned int dev;
@@ -117,6 +138,14 @@ struct trace_event_raw_block_rq {
     unsigned int nr_sector;
     unsigned int bytes;
     char rwbs[8];
+};
+
+struct trace_event_raw_oom_kill {
+    unsigned long long unused;
+    char comm[16];
+    int pid;
+    int tgid;
+    unsigned long totalpages;
 };
 
 #pragma clang attribute pop

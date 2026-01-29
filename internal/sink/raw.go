@@ -3,11 +3,13 @@ package sink
 import (
 	"context"
 	"fmt"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sys/unix"
 
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/tracer"
@@ -17,6 +19,10 @@ import (
 type RawConfig struct {
 	Enabled    bool                    `yaml:"enabled"`
 	ClickHouse export.ClickHouseConfig `yaml:"clickhouse"`
+	SampleRate float64                 `yaml:"sample_rate"`
+	// IncludeFilenames controls whether fd_open filenames are stored.
+	// Defaults to true when unset.
+	IncludeFilenames *bool `yaml:"include_filenames"`
 }
 
 // RawSink writes every event to ClickHouse in batches.
@@ -26,7 +32,12 @@ type RawSink struct {
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
 
-	currentSlot atomic.Uint64
+	currentSlot       atomic.Uint64
+	currentSlotStart  atomic.Int64
+	monotonicOffsetNs atomic.Int64
+	sampleRate        float64
+	includeFilenames  bool
+	rng               *rand.Rand
 
 	mu      sync.Mutex
 	batch   []rawRow
@@ -38,6 +49,7 @@ type RawSink struct {
 type rawRow struct {
 	TimestampNs uint64
 	Slot        uint64
+	SlotStart   time.Time
 	PID         uint32
 	TID         uint32
 	EventType   string
@@ -52,6 +64,17 @@ type rawRow struct {
 	Major       bool
 	Address     uint64
 	OnCpuNs     uint64
+	RW          uint8
+	QueueDepth  uint32
+	RunqueueNs  uint64
+	OffCpuNs    uint64
+	TcpState    uint8
+	TcpOldState uint8
+	TcpSrttUs   uint32
+	TcpCwnd     uint32
+	Pages       uint64
+	ExitCode    uint32
+	TargetPID   uint32
 }
 
 var _ Sink = (*RawSink)(nil)
@@ -62,14 +85,27 @@ func NewRawSink(
 	cfg RawConfig,
 	health *export.HealthMetrics,
 ) *RawSink {
+	includeFilenames := true
+	if cfg.IncludeFilenames != nil {
+		includeFilenames = *cfg.IncludeFilenames
+	}
+
+	sampleRate := cfg.SampleRate
+	if sampleRate <= 0 || sampleRate > 1 {
+		sampleRate = 1
+	}
+
 	return &RawSink{
-		log:     log.WithField("sink", "raw"),
-		cfg:     cfg,
-		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
-		health:  health,
-		batch:   make([]rawRow, 0, cfg.ClickHouse.BatchSize),
-		done:    make(chan struct{}),
-		eventCh: make(chan tracer.ParsedEvent, 4096),
+		log:              log.WithField("sink", "raw"),
+		cfg:              cfg,
+		writer:           export.NewClickHouseWriter(log, cfg.ClickHouse),
+		health:           health,
+		batch:            make([]rawRow, 0, cfg.ClickHouse.BatchSize),
+		done:             make(chan struct{}),
+		eventCh:          make(chan tracer.ParsedEvent, 4096),
+		sampleRate:       sampleRate,
+		includeFilenames: includeFilenames,
+		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -78,6 +114,14 @@ func (s *RawSink) Name() string { return "raw" }
 func (s *RawSink) Start(ctx context.Context) error {
 	if err := s.writer.Start(ctx); err != nil {
 		return err
+	}
+
+	offset, err := monotonicOffsetNs()
+	if err != nil {
+		s.log.WithError(err).
+			Warn("Failed to compute monotonic offset")
+	} else {
+		s.monotonicOffsetNs.Store(offset)
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -122,8 +166,9 @@ func (s *RawSink) HandleEvent(event tracer.ParsedEvent) {
 	}
 }
 
-func (s *RawSink) OnSlotChanged(slot uint64) {
+func (s *RawSink) OnSlotChanged(slot uint64, slotStart time.Time) {
 	s.currentSlot.Store(slot)
+	s.currentSlotStart.Store(slotStart.UnixNano())
 }
 
 func (s *RawSink) runLoop(ctx context.Context) {
@@ -139,6 +184,7 @@ func (s *RawSink) runLoop(ctx context.Context) {
 		case event := <-s.eventCh:
 			s.addEvent(ctx, event)
 		case <-ticker.C:
+			s.refreshMonotonicOffset()
 			s.tickFlush(ctx)
 		}
 	}
@@ -148,7 +194,18 @@ func (s *RawSink) addEvent(
 	ctx context.Context,
 	event tracer.ParsedEvent,
 ) {
-	row := toRawRow(event, s.currentSlot.Load())
+	if s.sampleRate < 1 && s.rng.Float64() > s.sampleRate {
+		s.reportDrop()
+		return
+	}
+
+	row := toRawRow(
+		event,
+		s.currentSlot.Load(),
+		s.currentSlotStart.Load(),
+		s.monotonicOffsetNs.Load(),
+		s.includeFilenames,
+	)
 
 	s.mu.Lock()
 	s.batch = append(s.batch, row)
@@ -157,7 +214,7 @@ func (s *RawSink) addEvent(
 
 	if shouldFlush {
 		toFlush = s.batch
-		s.batch = make([]rawRow, 0, s.writer.Config().BatchSize)
+		s.batch = s.batch[:0]
 	}
 
 	s.mu.Unlock()
@@ -180,7 +237,7 @@ func (s *RawSink) tickFlush(ctx context.Context) {
 	}
 
 	toFlush := s.batch
-	s.batch = make([]rawRow, 0, s.writer.Config().BatchSize)
+	s.batch = s.batch[:0]
 	s.mu.Unlock()
 
 	if err := s.flush(ctx, toFlush); err != nil {
@@ -200,7 +257,10 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 
 	batch, err := conn.PrepareBatch(
 		ctx,
-		fmt.Sprintf("INSERT INTO %s", table),
+		fmt.Sprintf(
+			"INSERT INTO %s (timestamp_ns, slot, slot_start_date_time, pid, tid, event_type, client_type, latency_ns, bytes, src_port, dst_port, fd, filename, voluntary, major, address, on_cpu_ns, rw, queue_depth, runqueue_ns, off_cpu_ns, tcp_state, tcp_old_state, tcp_srtt_us, tcp_cwnd, pages, exit_code, target_pid)",
+			table,
+		),
 	)
 	if err != nil {
 		return fmt.Errorf("preparing batch: %w", err)
@@ -210,6 +270,7 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		if err := batch.Append(
 			row.TimestampNs,
 			row.Slot,
+			row.SlotStart,
 			row.PID,
 			row.TID,
 			row.EventType,
@@ -224,6 +285,17 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 			row.Major,
 			row.Address,
 			row.OnCpuNs,
+			row.RW,
+			row.QueueDepth,
+			row.RunqueueNs,
+			row.OffCpuNs,
+			row.TcpState,
+			row.TcpOldState,
+			row.TcpSrttUs,
+			row.TcpCwnd,
+			row.Pages,
+			row.ExitCode,
+			row.TargetPID,
 		); err != nil {
 			return fmt.Errorf("appending row: %w", err)
 		}
@@ -239,12 +311,24 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 	return nil
 }
 
-func toRawRow(event tracer.ParsedEvent, slot uint64) rawRow {
+func toRawRow(
+	event tracer.ParsedEvent,
+	slot uint64,
+	slotStartNs int64,
+	monotonicOffsetNs int64,
+	includeFilenames bool,
+) rawRow {
+	timestampNs := int64(event.Raw.TimestampNs) + monotonicOffsetNs
+	if timestampNs < 0 {
+		timestampNs = 0
+	}
+
 	row := rawRow{
 		// Use wall clock time for storage. The BPF ktime_get_ns()
 		// value is monotonic (since boot), not Unix epoch.
-		TimestampNs: uint64(time.Now().UnixNano()),
+		TimestampNs: uint64(timestampNs),
 		Slot:        slot,
+		SlotStart:   time.Unix(0, slotStartNs),
 		PID:         event.Raw.PID,
 		TID:         event.Raw.TID,
 		EventType:   event.Raw.Type.String(),
@@ -259,6 +343,8 @@ func toRawRow(event tracer.ParsedEvent, slot uint64) rawRow {
 	case tracer.DiskIOEvent:
 		row.LatencyNs = e.LatencyNs
 		row.Bytes = int64(e.Bytes)
+		row.RW = e.ReadWrite
+		row.QueueDepth = e.QueueDepth
 	case tracer.NetIOEvent:
 		row.Bytes = int64(e.Bytes)
 		row.SrcPort = e.SrcPort
@@ -266,15 +352,68 @@ func toRawRow(event tracer.ParsedEvent, slot uint64) rawRow {
 	case tracer.SchedEvent:
 		row.Voluntary = e.Voluntary
 		row.OnCpuNs = e.OnCpuNs
+	case tracer.SchedRunqueueEvent:
+		row.RunqueueNs = e.RunqueueNs
+		row.OffCpuNs = e.OffCpuNs
 	case tracer.PageFaultEvent:
 		row.Address = e.Address
 		row.Major = e.Major
 	case tracer.FDEvent:
 		row.FD = e.FD
-		row.Filename = e.Filename
+		if includeFilenames {
+			row.Filename = e.Filename
+		}
+	case tracer.BlockMergeEvent:
+		row.Bytes = int64(e.Bytes)
+		row.RW = e.ReadWrite
+	case tracer.TcpRetransmitEvent:
+		row.Bytes = int64(e.Bytes)
+		row.SrcPort = e.SrcPort
+		row.DstPort = e.DstPort
+	case tracer.TcpStateEvent:
+		row.SrcPort = e.SrcPort
+		row.DstPort = e.DstPort
+		row.TcpState = e.NewState
+		row.TcpOldState = e.OldState
+	case tracer.TcpMetricsEvent:
+		row.SrcPort = e.SrcPort
+		row.DstPort = e.DstPort
+		row.TcpSrttUs = e.SrttUs
+		row.TcpCwnd = e.Cwnd
+	case tracer.MemLatencyEvent:
+		row.LatencyNs = e.DurationNs
+	case tracer.SwapEvent:
+		row.Pages = e.Pages
+	case tracer.OOMKillEvent:
+		row.TargetPID = e.TargetPID
+	case tracer.ProcessExitEvent:
+		row.ExitCode = e.ExitCode
 	}
 
 	return row
+}
+
+func (s *RawSink) refreshMonotonicOffset() {
+	offset, err := monotonicOffsetNs()
+	if err != nil {
+		s.log.WithError(err).
+			Debug("Failed to refresh monotonic offset")
+		return
+	}
+
+	s.monotonicOffsetNs.Store(offset)
+}
+
+func monotonicOffsetNs() (int64, error) {
+	var ts unix.Timespec
+	if err := unix.ClockGettime(unix.CLOCK_MONOTONIC, &ts); err != nil {
+		return 0, err
+	}
+
+	mono := ts.Nano()
+	now := time.Now().UnixNano()
+
+	return now - mono, nil
 }
 
 func (s *RawSink) reportDrop() {

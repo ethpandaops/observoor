@@ -23,6 +23,20 @@ func TestEventType_String(t *testing.T) {
 		{EventTypePageFault, "page_fault"},
 		{EventTypeFDOpen, "fd_open"},
 		{EventTypeFDClose, "fd_close"},
+		{EventTypeSyscallFsync, "syscall_fsync"},
+		{EventTypeSyscallFdatasync, "syscall_fdatasync"},
+		{EventTypeSyscallPwrite, "syscall_pwrite"},
+		{EventTypeSchedRunqueue, "sched_runqueue"},
+		{EventTypeBlockMerge, "block_merge"},
+		{EventTypeTcpRetransmit, "tcp_retransmit"},
+		{EventTypeTcpState, "tcp_state"},
+		{EventTypeTcpMetrics, "tcp_metrics"},
+		{EventTypeMemReclaim, "mem_reclaim"},
+		{EventTypeMemCompaction, "mem_compaction"},
+		{EventTypeSwapIn, "swap_in"},
+		{EventTypeSwapOut, "swap_out"},
+		{EventTypeOOMKill, "oom_kill"},
+		{EventTypeProcessExit, "process_exit"},
 		{EventType(255), "unknown(255)"},
 	}
 
@@ -69,6 +83,20 @@ func TestEventTypeValues(t *testing.T) {
 	assert.Equal(t, EventType(10), EventTypePageFault)
 	assert.Equal(t, EventType(11), EventTypeFDOpen)
 	assert.Equal(t, EventType(12), EventTypeFDClose)
+	assert.Equal(t, EventType(13), EventTypeSyscallFsync)
+	assert.Equal(t, EventType(14), EventTypeSyscallFdatasync)
+	assert.Equal(t, EventType(15), EventTypeSyscallPwrite)
+	assert.Equal(t, EventType(16), EventTypeSchedRunqueue)
+	assert.Equal(t, EventType(17), EventTypeBlockMerge)
+	assert.Equal(t, EventType(18), EventTypeTcpRetransmit)
+	assert.Equal(t, EventType(19), EventTypeTcpState)
+	assert.Equal(t, EventType(20), EventTypeTcpMetrics)
+	assert.Equal(t, EventType(21), EventTypeMemReclaim)
+	assert.Equal(t, EventType(22), EventTypeMemCompaction)
+	assert.Equal(t, EventType(23), EventTypeSwapIn)
+	assert.Equal(t, EventType(24), EventTypeSwapOut)
+	assert.Equal(t, EventType(25), EventTypeOOMKill)
+	assert.Equal(t, EventType(26), EventTypeProcessExit)
 }
 
 func TestClientTypeValues(t *testing.T) {

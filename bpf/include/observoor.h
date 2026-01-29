@@ -15,6 +15,20 @@ enum event_type {
     EVENT_PAGE_FAULT         = 10,
     EVENT_FD_OPEN            = 11,
     EVENT_FD_CLOSE           = 12,
+    EVENT_SYSCALL_FSYNC      = 13,
+    EVENT_SYSCALL_FDATASYNC  = 14,
+    EVENT_SYSCALL_PWRITE     = 15,
+    EVENT_SCHED_RUNQUEUE     = 16,
+    EVENT_BLOCK_MERGE        = 17,
+    EVENT_TCP_RETRANSMIT     = 18,
+    EVENT_TCP_STATE          = 19,
+    EVENT_TCP_METRICS        = 20,
+    EVENT_MEM_RECLAIM        = 21,
+    EVENT_MEM_COMPACTION     = 22,
+    EVENT_SWAP_IN            = 23,
+    EVENT_SWAP_OUT           = 24,
+    EVENT_OOM_KILL           = 25,
+    EVENT_PROCESS_EXIT       = 26,
 };
 
 // Common event header (24 bytes, 8-byte aligned).
@@ -36,13 +50,15 @@ struct syscall_event {
     __s32 fd;
 };
 
-// Disk I/O event (40 bytes total).
+// Disk I/O event (48 bytes total).
 struct disk_io_event {
     struct event_header hdr;
     __u64 latency_ns;
     __u32 bytes;
     __u8  rw; // 0=read, 1=write
     __u8  pad[3];
+    __u32 queue_depth;
+    __u32 pad2;
 };
 
 // Network I/O event (40 bytes total).
@@ -80,6 +96,76 @@ struct fd_event {
     char  filename[64];
 };
 
+// Scheduler runqueue event (40 bytes total).
+struct sched_runqueue_event {
+    struct event_header hdr;
+    __u64 runqueue_ns;
+    __u64 off_cpu_ns;
+};
+
+// Block merge event (32 bytes total).
+struct block_merge_event {
+    struct event_header hdr;
+    __u32 bytes;
+    __u8  rw; // 0=read, 1=write
+    __u8  pad[3];
+};
+
+// TCP retransmit event (40 bytes total).
+struct tcp_retransmit_event {
+    struct event_header hdr;
+    __u32 bytes;
+    __u16 sport;
+    __u16 dport;
+    __u8  pad[8];
+};
+
+// TCP state change event (40 bytes total).
+struct tcp_state_event {
+    struct event_header hdr;
+    __u16 sport;
+    __u16 dport;
+    __u8  new_state;
+    __u8  old_state;
+    __u8  pad[10];
+};
+
+// TCP metrics event (40 bytes total).
+struct tcp_metrics_event {
+    struct event_header hdr;
+    __u32 srtt_us;
+    __u32 snd_cwnd;
+    __u16 sport;
+    __u16 dport;
+    __u8  pad[4];
+};
+
+// Memory reclaim/compaction event (32 bytes total).
+struct mem_latency_event {
+    struct event_header hdr;
+    __u64 duration_ns;
+};
+
+// Swap event (32 bytes total).
+struct swap_event {
+    struct event_header hdr;
+    __u64 pages;
+};
+
+// OOM kill event (32 bytes total).
+struct oom_kill_event {
+    struct event_header hdr;
+    __u32 target_pid;
+    __u8  pad[4];
+};
+
+// Process exit event (32 bytes total).
+struct process_exit_event {
+    struct event_header hdr;
+    __u32 exit_code;
+    __u8  pad[4];
+};
+
 // Syscall entry tracking key.
 struct syscall_key {
     __u64 pid_tgid;
@@ -110,6 +196,7 @@ struct req_key {
 struct req_val {
     __u64 ts;
     __u32 pid;
+    __u32 tid;
     __u8  client_type;
     __u8  pad[3];
 };

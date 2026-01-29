@@ -18,6 +18,20 @@ const (
 	EventTypePageFault        EventType = 10
 	EventTypeFDOpen           EventType = 11
 	EventTypeFDClose          EventType = 12
+	EventTypeSyscallFsync     EventType = 13
+	EventTypeSyscallFdatasync EventType = 14
+	EventTypeSyscallPwrite    EventType = 15
+	EventTypeSchedRunqueue    EventType = 16
+	EventTypeBlockMerge       EventType = 17
+	EventTypeTcpRetransmit    EventType = 18
+	EventTypeTcpState         EventType = 19
+	EventTypeTcpMetrics       EventType = 20
+	EventTypeMemReclaim       EventType = 21
+	EventTypeMemCompaction    EventType = 22
+	EventTypeSwapIn           EventType = 23
+	EventTypeSwapOut          EventType = 24
+	EventTypeOOMKill          EventType = 25
+	EventTypeProcessExit      EventType = 26
 )
 
 // String returns the human-readable name of the event type.
@@ -47,6 +61,34 @@ func (e EventType) String() string {
 		return "fd_open"
 	case EventTypeFDClose:
 		return "fd_close"
+	case EventTypeSyscallFsync:
+		return "syscall_fsync"
+	case EventTypeSyscallFdatasync:
+		return "syscall_fdatasync"
+	case EventTypeSyscallPwrite:
+		return "syscall_pwrite"
+	case EventTypeSchedRunqueue:
+		return "sched_runqueue"
+	case EventTypeBlockMerge:
+		return "block_merge"
+	case EventTypeTcpRetransmit:
+		return "tcp_retransmit"
+	case EventTypeTcpState:
+		return "tcp_state"
+	case EventTypeTcpMetrics:
+		return "tcp_metrics"
+	case EventTypeMemReclaim:
+		return "mem_reclaim"
+	case EventTypeMemCompaction:
+		return "mem_compaction"
+	case EventTypeSwapIn:
+		return "swap_in"
+	case EventTypeSwapOut:
+		return "swap_out"
+	case EventTypeOOMKill:
+		return "oom_kill"
+	case EventTypeProcessExit:
+		return "process_exit"
 	default:
 		return fmt.Sprintf("unknown(%d)", e)
 	}
@@ -126,9 +168,10 @@ type SyscallEvent struct {
 // DiskIOEvent represents a block I/O operation.
 type DiskIOEvent struct {
 	Event
-	LatencyNs uint64 `json:"latency_ns"`
-	Bytes     uint32 `json:"bytes"`
-	ReadWrite uint8  `json:"rw"` // 0=read, 1=write
+	LatencyNs  uint64 `json:"latency_ns"`
+	Bytes      uint32 `json:"bytes"`
+	ReadWrite  uint8  `json:"rw"` // 0=read, 1=write
+	QueueDepth uint32 `json:"queue_depth"`
 }
 
 // NetIOEvent represents a network send or receive.
@@ -147,6 +190,13 @@ type SchedEvent struct {
 	Voluntary bool   `json:"voluntary"`
 }
 
+// SchedRunqueueEvent represents runqueue/off-CPU latency for a thread.
+type SchedRunqueueEvent struct {
+	Event
+	RunqueueNs uint64 `json:"runqueue_ns"`
+	OffCpuNs   uint64 `json:"off_cpu_ns"`
+}
+
 // PageFaultEvent represents a page fault.
 type PageFaultEvent struct {
 	Event
@@ -161,12 +211,72 @@ type FDEvent struct {
 	Filename string `json:"filename"`
 }
 
+// BlockMergeEvent represents a merged block I/O request.
+type BlockMergeEvent struct {
+	Event
+	Bytes     uint32 `json:"bytes"`
+	ReadWrite uint8  `json:"rw"` // 0=read, 1=write
+}
+
+// TcpRetransmitEvent represents a TCP retransmission.
+type TcpRetransmitEvent struct {
+	Event
+	Bytes   uint32 `json:"bytes"`
+	SrcPort uint16 `json:"sport"`
+	DstPort uint16 `json:"dport"`
+}
+
+// TcpStateEvent represents a TCP state transition.
+type TcpStateEvent struct {
+	Event
+	SrcPort  uint16 `json:"sport"`
+	DstPort  uint16 `json:"dport"`
+	NewState uint8  `json:"new_state"`
+	OldState uint8  `json:"old_state"`
+}
+
+// TcpMetricsEvent represents TCP congestion/RTT metrics.
+type TcpMetricsEvent struct {
+	Event
+	SrttUs  uint32 `json:"srtt_us"`
+	Cwnd    uint32 `json:"cwnd"`
+	SrcPort uint16 `json:"sport"`
+	DstPort uint16 `json:"dport"`
+}
+
+// MemLatencyEvent represents memory reclaim/compaction latency.
+type MemLatencyEvent struct {
+	Event
+	DurationNs uint64 `json:"duration_ns"`
+}
+
+// SwapEvent represents a swap-in/out event.
+type SwapEvent struct {
+	Event
+	Pages uint64 `json:"pages"`
+}
+
+// OOMKillEvent represents an OOM kill event.
+type OOMKillEvent struct {
+	Event
+	TargetPID uint32 `json:"target_pid"`
+}
+
+// ProcessExitEvent represents a process exit.
+type ProcessExitEvent struct {
+	Event
+	ExitCode uint32 `json:"exit_code"`
+}
+
 // ParsedEvent wraps a typed event after parsing from the ring buffer.
 type ParsedEvent struct {
 	// Raw is the common event header.
 	Raw Event
 
 	// Typed is one of SyscallEvent, DiskIOEvent, NetIOEvent,
-	// SchedEvent, PageFaultEvent, or FDEvent.
+	// SchedEvent, SchedRunqueueEvent, PageFaultEvent, FDEvent,
+	// BlockMergeEvent, TcpRetransmitEvent, TcpStateEvent,
+	// TcpMetricsEvent, MemLatencyEvent, SwapEvent, OOMKillEvent,
+	// or ProcessExitEvent.
 	Typed any
 }

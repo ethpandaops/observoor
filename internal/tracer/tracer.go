@@ -13,6 +13,12 @@ type RingbufStats struct {
 
 type RingbufStatsHandler func(stats RingbufStats)
 
+// TrackedTidInfo holds metadata for a tracked thread.
+type TrackedTidInfo struct {
+	PID    uint32
+	Client ClientType
+}
+
 // Tracer manages BPF program loading, attachment, and event reading.
 type Tracer interface {
 	// Start loads BPF programs, attaches hooks, and begins reading
@@ -25,7 +31,7 @@ type Tracer interface {
 	// UpdateTIDs updates the tracked TIDs in the BPF map for
 	// on-CPU time tracking. Clears and repopulates tracked_tids
 	// and clears sched_on_ts.
-	UpdateTIDs(tids []uint32, clientTypes map[uint32]ClientType) error
+	UpdateTIDs(tids []uint32, tidInfo map[uint32]TrackedTidInfo) error
 	// OnEvent registers a handler for parsed events.
 	OnEvent(handler EventHandler)
 	// OnError registers a handler for read or parse errors.

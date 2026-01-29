@@ -30,6 +30,12 @@ type tracer struct {
 	wg            sync.WaitGroup
 }
 
+type trackedTidVal struct {
+	PID        uint32
+	ClientType uint8
+	Pad        [3]byte
+}
+
 // New creates a new BPF tracer.
 func New(
 	log logrus.FieldLogger,
@@ -170,7 +176,7 @@ func (t *tracer) UpdatePIDs(
 
 func (t *tracer) UpdateTIDs(
 	tids []uint32,
-	clientTypes map[uint32]ClientType,
+	tidInfo map[uint32]TrackedTidInfo,
 ) error {
 	if t.objs == nil {
 		return fmt.Errorf("BPF objects not loaded")
@@ -179,7 +185,7 @@ func (t *tracer) UpdateTIDs(
 	// Clear existing tracked_tids entries.
 	var (
 		tidKey uint32
-		tidVal uint8
+		tidVal trackedTidVal
 	)
 
 	tidIter := t.objs.TrackedTids.Iterate()
@@ -218,14 +224,54 @@ func (t *tracer) UpdateTIDs(
 		}
 	}
 
+	// Clear wakeup_ts entries.
+	wakeupIter := t.objs.WakeupTs.Iterate()
+	wakeupKeysToDelete := make([]uint32, 0, 4096)
+
+	for wakeupIter.Next(&tsKey, &tsVal) {
+		wakeupKeysToDelete = append(wakeupKeysToDelete, tsKey)
+	}
+
+	for _, k := range wakeupKeysToDelete {
+		if err := t.objs.WakeupTs.Delete(k); err != nil &&
+			!errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.log.WithError(err).WithField("tid", k).
+				Warn("Failed to delete TID from wakeup_ts map")
+		}
+	}
+
+	// Clear offcpu_ts entries.
+	offcpuIter := t.objs.OffcpuTs.Iterate()
+	offcpuKeysToDelete := make([]uint32, 0, 4096)
+
+	for offcpuIter.Next(&tsKey, &tsVal) {
+		offcpuKeysToDelete = append(offcpuKeysToDelete, tsKey)
+	}
+
+	for _, k := range offcpuKeysToDelete {
+		if err := t.objs.OffcpuTs.Delete(k); err != nil &&
+			!errors.Is(err, ebpf.ErrKeyNotExist) {
+			t.log.WithError(err).WithField("tid", k).
+				Warn("Failed to delete TID from offcpu_ts map")
+		}
+	}
+
 	// Add new TIDs.
 	for _, tid := range tids {
+		info, ok := tidInfo[tid]
 		ct := ClientTypeUnknown
-		if c, ok := clientTypes[tid]; ok {
-			ct = c
+		pid := uint32(0)
+		if ok {
+			ct = info.Client
+			pid = info.PID
 		}
 
-		if err := t.objs.TrackedTids.Put(tid, uint8(ct)); err != nil {
+		val := trackedTidVal{
+			PID:        pid,
+			ClientType: uint8(ct),
+		}
+
+		if err := t.objs.TrackedTids.Put(tid, val); err != nil {
 			return fmt.Errorf("adding TID %d to BPF map: %w", tid, err)
 		}
 	}
@@ -339,7 +385,8 @@ func parseEvent(data []byte) (ParsedEvent, error) {
 	switch event.Type {
 	case EventTypeSyscallRead, EventTypeSyscallWrite,
 		EventTypeSyscallFutex, EventTypeSyscallMmap,
-		EventTypeSyscallEpollWait:
+		EventTypeSyscallEpollWait, EventTypeSyscallFsync,
+		EventTypeSyscallFdatasync, EventTypeSyscallPwrite:
 		parsed.Typed, err = parseSyscallEvent(event, reader)
 	case EventTypeDiskIO:
 		parsed.Typed, err = parseDiskIOEvent(event, reader)
@@ -347,10 +394,28 @@ func parseEvent(data []byte) (ParsedEvent, error) {
 		parsed.Typed, err = parseNetIOEvent(event, reader)
 	case EventTypeSchedSwitch:
 		parsed.Typed, err = parseSchedEvent(event, reader)
+	case EventTypeSchedRunqueue:
+		parsed.Typed, err = parseSchedRunqueueEvent(event, reader)
 	case EventTypePageFault:
 		parsed.Typed, err = parsePageFaultEvent(event, reader)
 	case EventTypeFDOpen, EventTypeFDClose:
 		parsed.Typed, err = parseFDEvent(event, reader)
+	case EventTypeBlockMerge:
+		parsed.Typed, err = parseBlockMergeEvent(event, reader)
+	case EventTypeTcpRetransmit:
+		parsed.Typed, err = parseTcpRetransmitEvent(event, reader)
+	case EventTypeTcpState:
+		parsed.Typed, err = parseTcpStateEvent(event, reader)
+	case EventTypeTcpMetrics:
+		parsed.Typed, err = parseTcpMetricsEvent(event, reader)
+	case EventTypeMemReclaim, EventTypeMemCompaction:
+		parsed.Typed, err = parseMemLatencyEvent(event, reader)
+	case EventTypeSwapIn, EventTypeSwapOut:
+		parsed.Typed, err = parseSwapEvent(event, reader)
+	case EventTypeOOMKill:
+		parsed.Typed, err = parseOOMKillEvent(event, reader)
+	case EventTypeProcessExit:
+		parsed.Typed, err = parseProcessExitEvent(event, reader)
 	default:
 		return ParsedEvent{}, fmt.Errorf(
 			"unknown event type: %d", event.Type,
@@ -393,10 +458,12 @@ func parseDiskIOEvent(
 	reader *bytes.Reader,
 ) (DiskIOEvent, error) {
 	var raw struct {
-		LatencyNs uint64
-		Bytes     uint32
-		ReadWrite uint8
-		Pad       [3]byte
+		LatencyNs  uint64
+		Bytes      uint32
+		ReadWrite  uint8
+		Pad        [3]byte
+		QueueDepth uint32
+		Pad2       [4]byte
 	}
 
 	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
@@ -404,10 +471,11 @@ func parseDiskIOEvent(
 	}
 
 	return DiskIOEvent{
-		Event:     base,
-		LatencyNs: raw.LatencyNs,
-		Bytes:     raw.Bytes,
-		ReadWrite: raw.ReadWrite,
+		Event:      base,
+		LatencyNs:  raw.LatencyNs,
+		Bytes:      raw.Bytes,
+		ReadWrite:  raw.ReadWrite,
+		QueueDepth: raw.QueueDepth,
 	}, nil
 }
 
@@ -504,6 +572,212 @@ func parseFDEvent(
 	}, nil
 }
 
+func parseSchedRunqueueEvent(
+	base Event,
+	reader *bytes.Reader,
+) (SchedRunqueueEvent, error) {
+	var raw struct {
+		RunqueueNs uint64
+		OffCpuNs   uint64
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return SchedRunqueueEvent{}, fmt.Errorf(
+			"reading sched runqueue event: %w", err,
+		)
+	}
+
+	return SchedRunqueueEvent{
+		Event:      base,
+		RunqueueNs: raw.RunqueueNs,
+		OffCpuNs:   raw.OffCpuNs,
+	}, nil
+}
+
+func parseBlockMergeEvent(
+	base Event,
+	reader *bytes.Reader,
+) (BlockMergeEvent, error) {
+	var raw struct {
+		Bytes     uint32
+		ReadWrite uint8
+		Pad       [3]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return BlockMergeEvent{}, fmt.Errorf(
+			"reading block merge event: %w", err,
+		)
+	}
+
+	return BlockMergeEvent{
+		Event:     base,
+		Bytes:     raw.Bytes,
+		ReadWrite: raw.ReadWrite,
+	}, nil
+}
+
+func parseTcpRetransmitEvent(
+	base Event,
+	reader *bytes.Reader,
+) (TcpRetransmitEvent, error) {
+	var raw struct {
+		Bytes uint32
+		Sport uint16
+		Dport uint16
+		Pad   [8]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return TcpRetransmitEvent{}, fmt.Errorf(
+			"reading tcp retransmit event: %w", err,
+		)
+	}
+
+	return TcpRetransmitEvent{
+		Event:   base,
+		Bytes:   raw.Bytes,
+		SrcPort: raw.Sport,
+		DstPort: raw.Dport,
+	}, nil
+}
+
+func parseTcpStateEvent(
+	base Event,
+	reader *bytes.Reader,
+) (TcpStateEvent, error) {
+	var raw struct {
+		Sport    uint16
+		Dport    uint16
+		NewState uint8
+		OldState uint8
+		Pad      [10]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return TcpStateEvent{}, fmt.Errorf(
+			"reading tcp state event: %w", err,
+		)
+	}
+
+	return TcpStateEvent{
+		Event:    base,
+		SrcPort:  raw.Sport,
+		DstPort:  raw.Dport,
+		NewState: raw.NewState,
+		OldState: raw.OldState,
+	}, nil
+}
+
+func parseTcpMetricsEvent(
+	base Event,
+	reader *bytes.Reader,
+) (TcpMetricsEvent, error) {
+	var raw struct {
+		SrttUs uint32
+		Cwnd   uint32
+		Sport  uint16
+		Dport  uint16
+		Pad    [4]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return TcpMetricsEvent{}, fmt.Errorf(
+			"reading tcp metrics event: %w", err,
+		)
+	}
+
+	return TcpMetricsEvent{
+		Event:   base,
+		SrttUs:  raw.SrttUs,
+		Cwnd:    raw.Cwnd,
+		SrcPort: raw.Sport,
+		DstPort: raw.Dport,
+	}, nil
+}
+
+func parseMemLatencyEvent(
+	base Event,
+	reader *bytes.Reader,
+) (MemLatencyEvent, error) {
+	var raw struct {
+		DurationNs uint64
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return MemLatencyEvent{}, fmt.Errorf(
+			"reading mem latency event: %w", err,
+		)
+	}
+
+	return MemLatencyEvent{
+		Event:      base,
+		DurationNs: raw.DurationNs,
+	}, nil
+}
+
+func parseSwapEvent(
+	base Event,
+	reader *bytes.Reader,
+) (SwapEvent, error) {
+	var raw struct {
+		Pages uint64
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return SwapEvent{}, fmt.Errorf(
+			"reading swap event: %w", err,
+		)
+	}
+
+	return SwapEvent{
+		Event: base,
+		Pages: raw.Pages,
+	}, nil
+}
+
+func parseOOMKillEvent(
+	base Event,
+	reader *bytes.Reader,
+) (OOMKillEvent, error) {
+	var raw struct {
+		TargetPID uint32
+		Pad       [4]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return OOMKillEvent{}, fmt.Errorf(
+			"reading oom kill event: %w", err,
+		)
+	}
+
+	return OOMKillEvent{
+		Event:     base,
+		TargetPID: raw.TargetPID,
+	}, nil
+}
+
+func parseProcessExitEvent(
+	base Event,
+	reader *bytes.Reader,
+) (ProcessExitEvent, error) {
+	var raw struct {
+		ExitCode uint32
+		Pad      [4]byte
+	}
+
+	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
+		return ProcessExitEvent{}, fmt.Errorf(
+			"reading process exit event: %w", err,
+		)
+	}
+
+	return ProcessExitEvent{
+		Event:    base,
+		ExitCode: raw.ExitCode,
+	}, nil
+}
+
 func (t *tracer) attachPrograms() error {
 	var err error
 
@@ -531,6 +805,27 @@ func (t *tracer) attachPrograms() error {
 		}).Debug("Attached tracepoint")
 	}
 
+	attachTracepointOptional := func(group, name string, prog *ebpf.Program) {
+		if prog == nil {
+			return
+		}
+
+		l, attachErr := link.Tracepoint(group, name, prog, nil)
+		if attachErr != nil {
+			t.log.WithError(attachErr).WithFields(logrus.Fields{
+				"group": group,
+				"name":  name,
+			}).Warn("Optional tracepoint attach failed")
+			return
+		}
+
+		t.links = append(t.links, l)
+		t.log.WithFields(logrus.Fields{
+			"group": group,
+			"name":  name,
+		}).Debug("Attached optional tracepoint")
+	}
+
 	attachKprobe := func(symbol string, prog *ebpf.Program) {
 		if err != nil || prog == nil {
 			return
@@ -551,6 +846,23 @@ func (t *tracer) attachPrograms() error {
 
 		t.log.WithField("symbol", symbol).
 			Debug("Attached kprobe")
+	}
+
+	attachKprobeOptional := func(symbol string, prog *ebpf.Program) {
+		if prog == nil {
+			return
+		}
+
+		l, attachErr := link.Kprobe(symbol, prog, nil)
+		if attachErr != nil {
+			t.log.WithError(attachErr).WithField("symbol", symbol).
+				Warn("Optional kprobe attach failed")
+			return
+		}
+
+		t.links = append(t.links, l)
+		t.log.WithField("symbol", symbol).
+			Debug("Attached optional kprobe")
 	}
 
 	attachKretprobe := func(symbol string, prog *ebpf.Program) {
@@ -596,6 +908,18 @@ func (t *tracer) attachPrograms() error {
 		t.objs.TraceSysEnterEpollWait)
 	attachTracepoint("syscalls", "sys_exit_epoll_wait",
 		t.objs.TraceSysExitEpollWait)
+	attachTracepoint("syscalls", "sys_enter_fsync",
+		t.objs.TraceSysEnterFsync)
+	attachTracepoint("syscalls", "sys_exit_fsync",
+		t.objs.TraceSysExitFsync)
+	attachTracepoint("syscalls", "sys_enter_fdatasync",
+		t.objs.TraceSysEnterFdatasync)
+	attachTracepoint("syscalls", "sys_exit_fdatasync",
+		t.objs.TraceSysExitFdatasync)
+	attachTracepoint("syscalls", "sys_enter_pwrite64",
+		t.objs.TraceSysEnterPwrite64)
+	attachTracepoint("syscalls", "sys_exit_pwrite64",
+		t.objs.TraceSysExitPwrite64)
 
 	// FD tracers
 	attachTracepoint("syscalls", "sys_enter_openat",
@@ -610,19 +934,44 @@ func (t *tracer) attachPrograms() error {
 		t.objs.TraceBlockRqIssue)
 	attachTracepoint("block", "block_rq_complete",
 		t.objs.TraceBlockRqComplete)
+	attachTracepointOptional("block", "block_rq_merge",
+		t.objs.TraceBlockRqMerge)
 
 	// Network tracers
 	attachKprobe("tcp_sendmsg", t.objs.KprobeTcpSendmsg)
 	attachKprobe("tcp_recvmsg", t.objs.KprobeTcpRecvmsg)
 	attachKretprobe("tcp_recvmsg", t.objs.KretprobeTcpRecvmsg)
+	attachKprobeOptional("tcp_retransmit_skb", t.objs.KprobeTcpRetransmitSkb)
+	attachKprobeOptional("tcp_set_state", t.objs.KprobeTcpSetState)
 
 	// Scheduler tracer
 	attachTracepoint("sched", "sched_switch",
 		t.objs.TraceSchedSwitch)
+	attachTracepointOptional("sched", "sched_wakeup",
+		t.objs.TraceSchedWakeup)
+	attachTracepointOptional("sched", "sched_wakeup_new",
+		t.objs.TraceSchedWakeupNew)
 
 	// Memory tracers
 	attachKprobe("handle_mm_fault", t.objs.KprobeHandleMmFault)
 	attachKretprobe("handle_mm_fault", t.objs.KretprobeHandleMmFault)
+
+	// Memory pressure/oom/process lifecycle (optional).
+	attachTracepointOptional("vmscan", "mm_vmscan_direct_reclaim_begin",
+		t.objs.TraceReclaimBegin)
+	attachTracepointOptional("vmscan", "mm_vmscan_direct_reclaim_end",
+		t.objs.TraceReclaimEnd)
+	attachTracepointOptional("compaction", "compaction_begin",
+		t.objs.TraceCompactionBegin)
+	attachTracepointOptional("compaction", "compaction_end",
+		t.objs.TraceCompactionEnd)
+	attachTracepointOptional("swap", "swapin",
+		t.objs.TraceSwapin)
+	attachTracepointOptional("swap", "swapout",
+		t.objs.TraceSwapout)
+	attachTracepointOptional("oom", "oom_kill",
+		t.objs.TraceOomKill)
+	attachKprobeOptional("do_exit", t.objs.KprobeDoExit)
 
 	return err
 }

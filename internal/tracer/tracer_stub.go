@@ -61,7 +61,7 @@ func (t *tracer) UpdatePIDs(
 
 func (t *tracer) UpdateTIDs(
 	_ []uint32,
-	_ map[uint32]ClientType,
+	_ map[uint32]TrackedTidInfo,
 ) error {
 	return fmt.Errorf("BPF tracer requires Linux")
 }
