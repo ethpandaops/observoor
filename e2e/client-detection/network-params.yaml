@@ -12,6 +12,5 @@ participants:
 
 network_params:
   seconds_per_slot: 12
-  preset: minimal
 
 additional_services: []
