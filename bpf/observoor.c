@@ -535,7 +535,7 @@ int trace_sys_enter_close(struct trace_event_raw_sys_enter *ctx)
 // =========================================================
 
 SEC("tracepoint/block/block_rq_issue")
-int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx)
+int trace_block_rq_issue(struct trace_event_raw_block_rq_local *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
@@ -545,51 +545,78 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
-    __u8 rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
-    struct req_key key = {
-        .dev = ctx->dev,
-        .nr_sector = ctx->nr_sector,
-        .sector = ctx->sector,
-        .rw = rw,
-    };
-    struct req_val val = {
-        .ts = bpf_ktime_get_ns(),
-        .pid = pid,
-        .tid = tid,
-        .client_type = ct,
-    };
-    bpf_map_update_elem(&req_start, &key, &val, BPF_ANY);
+    __u32 dev = 0;
+    __u64 sector = 0;
+    __u32 nr_sector = 0;
+    char rwbs[8] = {};
+
+    bpf_probe_read_kernel(&dev, sizeof(dev), &ctx->dev);
+    bpf_probe_read_kernel(&sector, sizeof(sector), &ctx->sector);
+    bpf_probe_read_kernel(&nr_sector, sizeof(nr_sector), &ctx->nr_sector);
+    bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+
+    __u8 rw = (rwbs[0] == 'W') ? 1 : 0;
+    struct req_key key = {};
+    key.dev = dev;
+    key.nr_sector = nr_sector;
+    key.sector = sector;
+    key.rw = rw;
+
+    struct req_key *keyp = &key;
+    asm volatile("" : "+r"(keyp));
+
+    struct req_val val = {};
+    val.ts = bpf_ktime_get_ns();
+    val.pid = pid;
+    val.tid = tid;
+    val.client_type = ct;
+    bpf_map_update_elem(&req_start, keyp, &val, BPF_ANY);
 
     // Track per-device in-flight depth.
     __u32 depth = 0;
-    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &ctx->dev);
+    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &dev);
     if (depthp)
         depth = *depthp;
     depth++;
-    bpf_map_update_elem(&dev_inflight, &ctx->dev, &depth, BPF_ANY);
+    bpf_map_update_elem(&dev_inflight, &dev, &depth, BPF_ANY);
     return 0;
 }
 
 SEC("tracepoint/block/block_rq_complete")
-int trace_block_rq_complete(struct trace_event_raw_block_rq *ctx)
+int trace_block_rq_complete(struct trace_event_raw_block_rq_local *ctx)
 {
-    __u8 rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
-    struct req_key key = {
-        .dev = ctx->dev,
-        .nr_sector = ctx->nr_sector,
-        .sector = ctx->sector,
-        .rw = rw,
-    };
-    struct req_val *val = bpf_map_lookup_elem(&req_start, &key);
+    __u32 dev = 0;
+    __u64 sector = 0;
+    __u32 nr_sector = 0;
+    __u32 bytes = 0;
+    char rwbs[8] = {};
+
+    bpf_probe_read_kernel(&dev, sizeof(dev), &ctx->dev);
+    bpf_probe_read_kernel(&sector, sizeof(sector), &ctx->sector);
+    bpf_probe_read_kernel(&nr_sector, sizeof(nr_sector), &ctx->nr_sector);
+    bpf_probe_read_kernel(&bytes, sizeof(bytes), &ctx->bytes);
+    bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+
+    __u8 rw = (rwbs[0] == 'W') ? 1 : 0;
+    struct req_key key = {};
+    key.dev = dev;
+    key.nr_sector = nr_sector;
+    key.sector = sector;
+    key.rw = rw;
+
+    struct req_key *keyp = &key;
+    asm volatile("" : "+r"(keyp));
+
+    struct req_val *val = bpf_map_lookup_elem(&req_start, keyp);
     if (!val)
         return 0;
 
     __u32 depth = 0;
-    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &ctx->dev);
+    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &dev);
     if (depthp && *depthp > 0)
         depth = *depthp - 1;
     if (depthp)
-        bpf_map_update_elem(&dev_inflight, &ctx->dev, &depth, BPF_ANY);
+        bpf_map_update_elem(&dev_inflight, &dev, &depth, BPF_ANY);
 
     struct disk_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
@@ -599,19 +626,20 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq *ctx)
     e->hdr.pid = val->pid;
     e->hdr.tid = val->tid;
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->bytes = ctx->bytes;
+    e->bytes = bytes;
     e->rw = rw;
     e->queue_depth = depth;
+    e->dev = dev;
 
     bpf_ringbuf_submit(e, 0);
 
 cleanup:
-    bpf_map_delete_elem(&req_start, &key);
+    bpf_map_delete_elem(&req_start, keyp);
     return 0;
 }
 
 SEC("tracepoint/block/block_rq_merge")
-int trace_block_rq_merge(struct trace_event_raw_block_rq *ctx)
+int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
@@ -620,13 +648,19 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
+    __u32 bytes = 0;
+    char rwbs[8] = {};
+
+    bpf_probe_read_kernel(&bytes, sizeof(bytes), &ctx->bytes);
+    bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+
     struct block_merge_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
 
     fill_header(&e->hdr, EVENT_BLOCK_MERGE, ct);
-    e->bytes = ctx->bytes;
-    e->rw = (ctx->rwbs[0] == 'W') ? 1 : 0;
+    e->bytes = bytes;
+    e->rw = (rwbs[0] == 'W') ? 1 : 0;
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -822,7 +856,7 @@ int BPF_KPROBE(kprobe_tcp_set_state, struct sock *sk, int state)
 // =========================================================
 
 SEC("tracepoint/sched/sched_wakeup")
-int trace_sched_wakeup(struct trace_event_raw_sched_wakeup *ctx)
+int trace_sched_wakeup(struct trace_event_raw_sched_wakeup_local *ctx)
 {
     __u32 tid = ctx->pid;
     __u8 ct;
@@ -836,7 +870,7 @@ int trace_sched_wakeup(struct trace_event_raw_sched_wakeup *ctx)
 }
 
 SEC("tracepoint/sched/sched_wakeup_new")
-int trace_sched_wakeup_new(struct trace_event_raw_sched_wakeup *ctx)
+int trace_sched_wakeup_new(struct trace_event_raw_sched_wakeup_local *ctx)
 {
     __u32 tid = ctx->pid;
     __u8 ct;
@@ -1129,10 +1163,9 @@ int trace_swapout(void *ctx)
 }
 
 SEC("tracepoint/oom/oom_kill")
-int trace_oom_kill(struct trace_event_raw_oom_kill *ctx)
+int trace_oom_kill(struct trace_event_raw_oom_kill_local *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
     __u32 tid = (__u32)pid_tgid;
     __u32 target_pid = 0;
     __u8 ct;

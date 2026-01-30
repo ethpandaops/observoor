@@ -172,6 +172,7 @@ type DiskIOEvent struct {
 	Bytes      uint32 `json:"bytes"`
 	ReadWrite  uint8  `json:"rw"` // 0=read, 1=write
 	QueueDepth uint32 `json:"queue_depth"`
+	DeviceID   uint32 `json:"device_id"` // Block device ID (major:minor encoded)
 }
 
 // NetIOEvent represents a network send or receive.

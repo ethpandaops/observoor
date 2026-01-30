@@ -3,7 +3,6 @@ package sink
 import (
 	"context"
 	"fmt"
-	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,7 +18,6 @@ import (
 type RawConfig struct {
 	Enabled    bool                    `yaml:"enabled"`
 	ClickHouse export.ClickHouseConfig `yaml:"clickhouse"`
-	SampleRate float64                 `yaml:"sample_rate"`
 	// IncludeFilenames controls whether fd_open filenames are stored.
 	// Defaults to true when unset.
 	IncludeFilenames *bool `yaml:"include_filenames"`
@@ -35,9 +33,7 @@ type RawSink struct {
 	currentSlot       atomic.Uint64
 	currentSlotStart  atomic.Int64
 	monotonicOffsetNs atomic.Int64
-	sampleRate        float64
 	includeFilenames  bool
-	rng               *rand.Rand
 
 	mu      sync.Mutex
 	batch   []rawRow
@@ -66,6 +62,7 @@ type rawRow struct {
 	OnCpuNs     uint64
 	RW          uint8
 	QueueDepth  uint32
+	DeviceID    uint32
 	RunqueueNs  uint64
 	OffCpuNs    uint64
 	TcpState    uint8
@@ -90,11 +87,6 @@ func NewRawSink(
 		includeFilenames = *cfg.IncludeFilenames
 	}
 
-	sampleRate := cfg.SampleRate
-	if sampleRate <= 0 || sampleRate > 1 {
-		sampleRate = 1
-	}
-
 	return &RawSink{
 		log:              log.WithField("sink", "raw"),
 		cfg:              cfg,
@@ -102,10 +94,8 @@ func NewRawSink(
 		health:           health,
 		batch:            make([]rawRow, 0, cfg.ClickHouse.BatchSize),
 		done:             make(chan struct{}),
-		eventCh:          make(chan tracer.ParsedEvent, 4096),
-		sampleRate:       sampleRate,
+		eventCh:          make(chan tracer.ParsedEvent, 65536),
 		includeFilenames: includeFilenames,
-		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
 }
 
@@ -194,11 +184,6 @@ func (s *RawSink) addEvent(
 	ctx context.Context,
 	event tracer.ParsedEvent,
 ) {
-	if s.sampleRate < 1 && s.rng.Float64() > s.sampleRate {
-		s.reportDrop()
-		return
-	}
-
 	row := toRawRow(
 		event,
 		s.currentSlot.Load(),
@@ -258,7 +243,7 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 	batch, err := conn.PrepareBatch(
 		ctx,
 		fmt.Sprintf(
-			"INSERT INTO %s (timestamp_ns, slot, slot_start_date_time, pid, tid, event_type, client_type, latency_ns, bytes, src_port, dst_port, fd, filename, voluntary, major, address, on_cpu_ns, rw, queue_depth, runqueue_ns, off_cpu_ns, tcp_state, tcp_old_state, tcp_srtt_us, tcp_cwnd, pages, exit_code, target_pid)",
+			"INSERT INTO %s (timestamp_ns, slot, slot_start_date_time, pid, tid, event_type, client_type, latency_ns, bytes, src_port, dst_port, fd, filename, voluntary, major, address, on_cpu_ns, rw, queue_depth, device_id, runqueue_ns, off_cpu_ns, tcp_state, tcp_old_state, tcp_srtt_us, tcp_cwnd, pages, exit_code, target_pid)",
 			table,
 		),
 	)
@@ -287,6 +272,7 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 			row.OnCpuNs,
 			row.RW,
 			row.QueueDepth,
+			row.DeviceID,
 			row.RunqueueNs,
 			row.OffCpuNs,
 			row.TcpState,
@@ -345,6 +331,7 @@ func toRawRow(
 		row.Bytes = int64(e.Bytes)
 		row.RW = e.ReadWrite
 		row.QueueDepth = e.QueueDepth
+		row.DeviceID = e.DeviceID
 	case tracer.NetIOEvent:
 		row.Bytes = int64(e.Bytes)
 		row.SrcPort = e.SrcPort

@@ -4,14 +4,16 @@ import (
 	"context"
 	"time"
 
+	"github.com/ethpandaops/observoor/internal/sink/aggregated"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
 // Config holds configuration for all sinks.
 type Config struct {
-	Raw    RawConfig    `yaml:"raw"`
-	Slot   SlotConfig   `yaml:"slot"`
-	Window WindowConfig `yaml:"window"`
+	Raw        RawConfig         `yaml:"raw"`
+	Slot       SlotConfig        `yaml:"slot"`
+	Window     WindowConfig      `yaml:"window"`
+	Aggregated aggregated.Config `yaml:"aggregated"`
 }
 
 // Sink defines the interface for event consumers.

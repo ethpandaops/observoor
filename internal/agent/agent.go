@@ -15,6 +15,7 @@ import (
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/pid"
 	"github.com/ethpandaops/observoor/internal/sink"
+	"github.com/ethpandaops/observoor/internal/sink/aggregated"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
@@ -35,6 +36,9 @@ type agent struct {
 	disc   pid.Discovery
 	tracer tracer.Tracer
 	sinks  []sink.Sink
+
+	// aggregatedSink is a reference to the aggregated sink for port whitelist configuration.
+	aggregatedSink *aggregated.Sink
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -67,6 +71,11 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 		a.sinks = append(a.sinks, sink.NewWindowSink(
 			log, cfg.Sinks.Window,
 		))
+	}
+
+	if cfg.Sinks.Aggregated.Enabled {
+		a.aggregatedSink = aggregated.New(log, cfg.Sinks.Aggregated)
+		a.sinks = append(a.sinks, a.aggregatedSink)
 	}
 
 	return a, nil
@@ -128,6 +137,22 @@ func (a *agent) Start(ctx context.Context) error {
 	a.health.PIDsTracked.Set(float64(len(pids)))
 
 	clientTypes := resolveClientTypes(pids)
+
+	// 5b. Discover well-known ports from process cmdlines.
+	if a.aggregatedSink != nil {
+		portInfos := DiscoverPorts(a.log, pids, clientTypes)
+		allPorts := GetAllTrackedPorts(portInfos)
+
+		a.aggregatedSink.SetPortWhitelist(allPorts)
+
+		portList := make([]uint16, 0, len(allPorts))
+		for p := range allPorts {
+			portList = append(portList, p)
+		}
+
+		a.log.WithField("ports", portList).
+			Info("Discovered well-known ports for tracking")
+	}
 
 	// 6. Start all enabled sinks.
 	for _, s := range a.sinks {

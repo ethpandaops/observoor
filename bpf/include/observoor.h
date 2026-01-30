@@ -58,7 +58,7 @@ struct disk_io_event {
     __u8  rw; // 0=read, 1=write
     __u8  pad[3];
     __u32 queue_depth;
-    __u32 pad2;
+    __u32 dev; // Block device ID (major:minor encoded)
 };
 
 // Network I/O event (40 bytes total).
@@ -215,6 +215,34 @@ struct net_recv_val {
 struct fault_val {
     __u64 ts;
     __u64 address;
+};
+
+// Tracepoint context structs (non-CO-RE). Defined here (outside vmlinux.h)
+// so they are NOT preserve_access_index.
+struct trace_event_raw_block_rq_local {
+    __u64 unused;
+    __u32 dev;
+    __u64 sector;
+    __u32 nr_sector;
+    __u32 bytes;
+    char rwbs[8];
+};
+
+struct trace_event_raw_sched_wakeup_local {
+    __u64 unused;
+    char comm[16];
+    int pid;
+    int prio;
+    int success;
+    int target_cpu;
+};
+
+struct trace_event_raw_oom_kill_local {
+    __u64 unused;
+    char comm[16];
+    int pid;
+    int tgid;
+    unsigned long totalpages;
 };
 
 #endif /* __OBSERVOOR_H */

@@ -285,6 +285,10 @@ func (t *tracer) UpdateTIDs(
 func (t *tracer) readLoop(ctx context.Context) {
 	defer t.wg.Done()
 
+	// Only report stats every N events to reduce overhead.
+	const statsInterval = 1000
+	eventCount := 0
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -304,7 +308,12 @@ func (t *tracer) readLoop(ctx context.Context) {
 			continue
 		}
 
-		t.reportRingbufStats(record.Remaining)
+		// Report stats periodically, not on every event.
+		eventCount++
+		if eventCount >= statsInterval {
+			t.reportRingbufStats(record.Remaining)
+			eventCount = 0
+		}
 
 		event, err := parseEvent(record.RawSample)
 		if err != nil {
@@ -463,7 +472,7 @@ func parseDiskIOEvent(
 		ReadWrite  uint8
 		Pad        [3]byte
 		QueueDepth uint32
-		Pad2       [4]byte
+		DeviceID   uint32
 	}
 
 	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
@@ -476,6 +485,7 @@ func parseDiskIOEvent(
 		Bytes:      raw.Bytes,
 		ReadWrite:  raw.ReadWrite,
 		QueueDepth: raw.QueueDepth,
+		DeviceID:   raw.DeviceID,
 	}, nil
 }
 
