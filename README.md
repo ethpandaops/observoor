@@ -2,6 +2,10 @@
 
 eBPF agent that monitors Ethereum execution and consensus layer processes at the kernel level. Captures syscalls, disk I/O, network I/O, scheduler events, memory faults, and file descriptor activity — aggregated per slot and exported via ClickHouse. Zero client modifications required. Linux only.
 
+## Architecture
+
+![Observoor Architecture](observoor-architecture.png)
+
 ## Supported Clients
 
 **Execution Layer:** Geth, Reth, Besu, Nethermind, Erigon
