@@ -47,8 +47,9 @@ jobs:
       - name: Get beacon endpoint
         id: beacon
         run: |
+          # kurtosis port print returns full URL like http://127.0.0.1:32793
           BEACON_ENDPOINT=$(kurtosis port print observoor-test cl-1-lighthouse-geth http)
-          echo "endpoint=http://$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
+          echo "endpoint=$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
 
       - name: Generate config
         run: |
