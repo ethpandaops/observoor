@@ -10,6 +10,7 @@ var DefaultProcessNames = []string{
 	"besu",
 	"nethermind",
 	"erigon",
+	"ethrex",
 	// Consensus layer clients
 	"lighthouse",
 	"prysm",
@@ -18,7 +19,11 @@ var DefaultProcessNames = []string{
 	"teku",
 	"lodestar",
 	"nimbus",
-	"nimbus_beacon_", // Truncated in /proc/comm (15 char limit)
+	"nimbus_beacon_n", // Truncated in /proc/comm (15 char limit)
+	// Generic runtime names (client type resolved via cmdline)
+	"java",       // Besu/Teku run as java
+	"node",       // Lodestar runs as node
+	"MainThread", // Node.js main thread name
 }
 
 // Config holds configuration for PID discovery.

@@ -33,10 +33,11 @@ jobs:
 
       - name: Wait for beacon sync
         run: |
-          BEACON_PORT=$(kurtosis port print observoor-test cl-1-lighthouse-geth http | cut -d: -f2)
-          echo "Beacon port: $BEACON_PORT"
+          # kurtosis port print returns full URL like http://127.0.0.1:32793
+          BEACON_URL=$(kurtosis port print observoor-test cl-1-lighthouse-geth http)
+          echo "Beacon URL: $BEACON_URL"
           for i in $(seq 1 60); do
-            if curl -sf "http://127.0.0.1:$BEACON_PORT/eth/v1/node/syncing" 2>/dev/null | jq -e '.data.is_syncing == false' > /dev/null 2>&1; then
+            if curl -sf "$BEACON_URL/eth/v1/node/syncing" 2>/dev/null | jq -e '.data.is_syncing == false' > /dev/null 2>&1; then
               echo "Synced!"
               break
             fi

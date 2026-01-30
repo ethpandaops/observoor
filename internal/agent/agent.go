@@ -434,21 +434,23 @@ func resolveClientTypes(
 	types := make(map[uint32]tracer.ClientType, len(pids))
 
 	commMap := map[string]tracer.ClientType{
-		"geth":         tracer.ClientTypeGeth,
-		"reth":         tracer.ClientTypeReth,
-		"besu":         tracer.ClientTypeBesu,
-		"nethermind":   tracer.ClientTypeNethermind,
-		"erigon":       tracer.ClientTypeErigon,
-		"prysm":        tracer.ClientTypePrysm,
-		"lighthouse":   tracer.ClientTypeLighthouse,
-		"teku":         tracer.ClientTypeTeku,
-		"lodestar":     tracer.ClientTypeLodestar,
-		"nimbus":       tracer.ClientTypeNimbus,
-		"beacon-chain": tracer.ClientTypePrysm,
+		"geth":            tracer.ClientTypeGeth,
+		"reth":            tracer.ClientTypeReth,
+		"besu":            tracer.ClientTypeBesu,
+		"nethermind":      tracer.ClientTypeNethermind,
+		"erigon":          tracer.ClientTypeErigon,
+		"ethrex":          tracer.ClientTypeEthrex,
+		"prysm":           tracer.ClientTypePrysm,
+		"lighthouse":      tracer.ClientTypeLighthouse,
+		"teku":            tracer.ClientTypeTeku,
+		"lodestar":        tracer.ClientTypeLodestar,
+		"nimbus":          tracer.ClientTypeNimbus,
+		"nimbus_beacon_n": tracer.ClientTypeNimbus, // truncated to 15 chars
+		"beacon-chain":    tracer.ClientTypePrysm,
 	}
 
 	// Keywords to search for in /proc/<pid>/cmdline when comm
-	// doesn't match (e.g. Teku/Besu run as "java").
+	// doesn't match (e.g. Teku/Besu run as "java", Lodestar as "node").
 	cmdlineKeywords := []struct {
 		keyword    string
 		clientType tracer.ClientType
@@ -457,6 +459,7 @@ func resolveClientTypes(
 		{"besu", tracer.ClientTypeBesu},
 		{"lodestar", tracer.ClientTypeLodestar},
 		{"nimbus", tracer.ClientTypeNimbus},
+		{"ethrex", tracer.ClientTypeEthrex},
 	}
 
 	for _, p := range pids {

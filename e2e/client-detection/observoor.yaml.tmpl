@@ -12,6 +12,7 @@ pid:
     - besu
     - nethermind
     - erigon
+    - ethrex
     # Consensus layer clients
     - lighthouse
     - prysm
@@ -20,11 +21,12 @@ pid:
     - lodestar
     - nimbus
     - nimbus_beacon_node
-    - nimbus_beacon_
+    - nimbus_beacon_n  # truncated to 15 chars in /proc/*/comm
     # Java-based clients (besu, teku) run as 'java'
     - java
-    # Node.js clients (lodestar) run as 'node'
+    # Node.js clients (lodestar) run as 'node' or 'MainThread'
     - node
+    - MainThread
 
 ring_buffer_size: 8388608
 sync_poll_interval: 10s

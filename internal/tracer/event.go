@@ -109,6 +109,7 @@ const (
 	ClientTypeTeku       ClientType = 8
 	ClientTypeLodestar   ClientType = 9
 	ClientTypeNimbus     ClientType = 10
+	ClientTypeEthrex     ClientType = 11
 )
 
 // String returns the human-readable name of the client type.
@@ -134,6 +135,8 @@ func (c ClientType) String() string {
 		return "lodestar"
 	case ClientTypeNimbus:
 		return "nimbus"
+	case ClientTypeEthrex:
+		return "ethrex"
 	default:
 		return "unknown"
 	}
