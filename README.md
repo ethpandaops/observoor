@@ -1,4 +1,4 @@
-# observoor
+# <img src="./static/observoor-logo.png" height="40" alt="Observoor Logo"> observoor
 
 eBPF agent that monitors Ethereum execution and consensus layer processes at the kernel level. Captures syscalls, disk I/O, network I/O, scheduler events, memory faults, and file descriptor activity — aggregated per slot and exported via ClickHouse. Zero client modifications required. Linux only.
 
@@ -45,43 +45,7 @@ eBPF agent that monitors Ethereum execution and consensus layer processes at the
 
 ## Configuration
 
-```yaml
-log_level: info
-
-beacon:
-  endpoint: http://localhost:5052
-  timeout: 10s
-
-pid:
-  process_names:
-    - geth
-    - lighthouse
-
-ring_buffer_size: 4194304
-sync_poll_interval: 30s
-
-sinks:
-  raw:
-    enabled: true
-    clickhouse:
-      endpoint: clickhouse:9000
-      database: observoor
-      table: raw_events
-      batch_size: 10000
-      flush_interval: 1s
-    sample_rate: 1.0
-    include_filenames: true
-
-  slot:
-    enabled: true
-
-  window:
-    enabled: false
-    interval: 500ms
-
-health:
-  addr: ":9090"
-```
+See [`example.config.yaml`](example.config.yaml) for a complete configuration reference.
 
 ## ClickHouse Migrations
 

@@ -77,10 +77,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("beacon.endpoint is required")
 	}
 
-	if c.PID.ProcessNames == nil && c.PID.CgroupPath == "" {
-		return fmt.Errorf(
-			"at least one of pid.process_names or pid.cgroup_path is required",
-		)
+	// If no PID discovery method is configured, use default process names
+	// for all known Ethereum clients.
+	if len(c.PID.ProcessNames) == 0 && c.PID.CgroupPath == "" {
+		c.PID.ProcessNames = pid.DefaultProcessNames
 	}
 
 	if c.RingBufferSize <= 0 {

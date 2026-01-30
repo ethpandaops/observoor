@@ -1,0 +1,60 @@
+# Observoor Example Configuration
+#
+# Copy this file and customize for your environment.
+# Run with: sudo ./observoor --config config.yaml
+
+log_level: info
+
+# Beacon node connection (required)
+beacon:
+  endpoint: http://localhost:5052
+  timeout: 10s
+
+# Process discovery (optional - defaults to all known Ethereum clients)
+# If omitted, searches for: geth, reth, besu, nethermind, erigon,
+# lighthouse, prysm, beacon-chain, validator, teku, lodestar, nimbus
+pid:
+  # Option 1: Discover by process name (scans /proc)
+  # process_names:
+  #   - geth
+  #   - lighthouse
+  # Option 2: Discover by cgroup path
+  # cgroup_path: /sys/fs/cgroup/ethereum.slice
+
+# BPF ring buffer size in bytes (default: 4MB)
+ring_buffer_size: 4194304
+
+# How often to poll beacon node for sync status (default: 30s)
+sync_poll_interval: 30s
+
+# Data export sinks
+sinks:
+  # Raw events - writes every event to ClickHouse
+  raw:
+    enabled: true
+    clickhouse:
+      endpoint: clickhouse:9000
+      database: observoor
+      table: raw_events
+      batch_size: 10000
+      flush_interval: 1s
+    sample_rate: 1.0
+    include_filenames: true
+
+  # Slot aggregation - aggregates metrics per Ethereum slot
+  slot:
+    enabled: true
+
+  # Window aggregation - aggregates over fixed time intervals
+  window:
+    enabled: false
+    interval: 500ms
+
+  # Aggregated metrics - configurable resolution aggregation
+  aggregated:
+    enabled: false
+    resolution: 1s
+
+# Prometheus metrics endpoint
+health:
+  addr: ":9090"

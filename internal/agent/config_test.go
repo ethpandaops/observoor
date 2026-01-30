@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ethpandaops/observoor/internal/pid"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -87,13 +89,14 @@ func TestValidate_MissingBeaconEndpoint(t *testing.T) {
 	assert.Contains(t, err.Error(), "beacon.endpoint is required")
 }
 
-func TestValidate_MissingPIDConfig(t *testing.T) {
+func TestValidate_DefaultsPIDConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Beacon.Endpoint = "http://localhost:3500"
 
+	// When no PID config is specified, Validate should apply defaults.
 	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "pid.process_names or pid.cgroup_path")
+	require.NoError(t, err)
+	assert.Equal(t, pid.DefaultProcessNames, cfg.PID.ProcessNames)
 }
 
 func TestValidate_InvalidRingBufferSize(t *testing.T) {
