@@ -1,6 +1,6 @@
 FROM clickhouse/clickhouse-server:24-alpine
 
-# Single-node config with macros + embedded Keeper for ReplicatedMergeTree
+# Single-node config with macros + embedded Keeper + cluster definition for ReplicatedMergeTree
 RUN printf '%s\n' \
     '<clickhouse>' \
     '    <macros>' \
@@ -9,6 +9,17 @@ RUN printf '%s\n' \
     '        <shard>1</shard>' \
     '        <replica>1</replica>' \
     '    </macros>' \
+    '' \
+    '    <remote_servers>' \
+    '        <local>' \
+    '            <shard>' \
+    '                <replica>' \
+    '                    <host>localhost</host>' \
+    '                    <port>9000</port>' \
+    '                </replica>' \
+    '            </shard>' \
+    '        </local>' \
+    '    </remote_servers>' \
     '' \
     '    <keeper_server>' \
     '        <tcp_port>9181</tcp_port>' \
