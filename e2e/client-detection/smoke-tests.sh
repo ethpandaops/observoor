@@ -30,10 +30,9 @@ EL_CLIENTS=("geth" "reth" "besu" "nethermind" "erigon")
 CL_CLIENTS=("lighthouse" "prysm" "teku" "lodestar" "nimbus")
 ALL_CLIENTS=("${EL_CLIENTS[@]}" "${CL_CLIENTS[@]}")
 
-# Clients that may not be detected due to Docker init process wrapping.
-# These use tini/init which masks the actual process name.
-# TODO: Investigate better detection for these clients.
-OPTIONAL_CLIENTS=("lodestar" "nimbus")
+# Clients that may not be detected in certain environments.
+# Detection now works for all clients via cmdline keyword matching.
+OPTIONAL_CLIENTS=()
 
 echo "=== Smoke Tests for Client Detection ==="
 echo ""
