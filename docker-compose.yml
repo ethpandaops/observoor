@@ -1,0 +1,54 @@
+services:
+  clickhouse:
+    build:
+      context: .
+      dockerfile: Dockerfile.clickhouse
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    image: migrate/migrate:v4.17.0
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+    volumes:
+      - ./deploy/migrations/clickhouse:/migrations:ro
+    command: [
+      "-source", "file:///migrations",
+      "-database", "clickhouse://clickhouse:9000/default?x-multi-statement=true",
+      "up"
+    ]
+
+  observoor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    privileged: true
+    pid: host
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /sys/fs/bpf:/sys/fs/bpf:rw
+      - /proc:/host/proc:ro
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+      - ./config.yaml:/etc/observoor/config.yaml:ro
+    command: ["--config", "/etc/observoor/config.yaml"]
+    restart: on-failure:5
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:9090/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  clickhouse-data:

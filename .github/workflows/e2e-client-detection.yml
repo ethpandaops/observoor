@@ -1,0 +1,98 @@
+name: E2E Client Detection
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  e2e-client-detection:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Kurtosis
+        run: |
+          echo "deb [trusted=yes] https://apt.fury.io/kurtosis-tech/ /" | \
+            sudo tee /etc/apt/sources.list.d/kurtosis.list
+          sudo apt update
+          sudo apt install -y kurtosis-cli
+
+      - name: Start Kurtosis engine
+        run: kurtosis engine start
+
+      - name: Start Ethereum network
+        run: |
+          kurtosis run --enclave observoor-test \
+            github.com/ethpandaops/ethereum-package \
+            --args-file e2e/client-detection/network-params.yaml
+
+      - name: Wait for beacon sync
+        run: |
+          BEACON_PORT=$(kurtosis port print observoor-test cl-1-lighthouse-geth http | cut -d: -f2)
+          echo "Beacon port: $BEACON_PORT"
+          for i in $(seq 1 60); do
+            if curl -sf "http://127.0.0.1:$BEACON_PORT/eth/v1/node/syncing" 2>/dev/null | jq -e '.data.is_syncing == false' > /dev/null 2>&1; then
+              echo "Synced!"
+              break
+            fi
+            echo "Attempt $i..."
+            sleep 10
+          done
+
+      - name: Get beacon endpoint
+        id: beacon
+        run: |
+          BEACON_ENDPOINT=$(kurtosis port print observoor-test cl-1-lighthouse-geth http)
+          echo "endpoint=http://$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: Generate config
+        run: |
+          sed "s|\${BEACON_ENDPOINT}|${{ steps.beacon.outputs.endpoint }}|g" \
+            e2e/client-detection/observoor.yaml.tmpl > config.yaml
+
+      - name: Start ClickHouse + observoor
+        run: |
+          docker compose up -d
+          echo "Waiting for services..."
+          sleep 30
+
+      - name: Wait for data
+        run: |
+          for i in $(seq 1 24); do
+            COUNT=$(curl -s http://localhost:8123 --data-binary "SELECT count() FROM aggregated_metrics" 2>/dev/null || echo "0")
+            echo "Attempt $i: $COUNT rows"
+            if [[ "$COUNT" -gt 100 ]]; then
+              break
+            fi
+            sleep 10
+          done
+
+      - name: Run smoke tests
+        run: ./e2e/client-detection/smoke-tests.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          docker compose logs > docker-logs.txt
+          kurtosis enclave dump observoor-test ./kurtosis-dump || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: failure-logs
+          path: |
+            docker-logs.txt
+            kurtosis-dump/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          docker compose down -v || true
+          kurtosis enclave rm -f observoor-test || true
+          kurtosis engine stop || true

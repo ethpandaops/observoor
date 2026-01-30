@@ -1,0 +1,45 @@
+log_level: debug
+
+beacon:
+  endpoint: ${BEACON_ENDPOINT}
+  timeout: 30s
+
+pid:
+  process_names:
+    - geth
+    - reth
+    - besu
+    - nethermind
+    - erigon
+    - lighthouse
+    - prysm
+    - beacon-chain
+    - teku
+    - lodestar
+    - nimbus
+    - nimbus_beacon_node
+
+ring_buffer_size: 8388608
+sync_poll_interval: 10s
+
+sinks:
+  raw:
+    enabled: false
+  slot:
+    enabled: false
+  window:
+    enabled: false
+  aggregated:
+    enabled: true
+    resolution:
+      interval: 100ms
+      slot_aligned: true
+    clickhouse:
+      endpoint: clickhouse:9000
+      database: default
+      table: aggregated_metrics
+      batch_size: 5000
+      flush_interval: 500ms
+
+health:
+  addr: ":9090"
