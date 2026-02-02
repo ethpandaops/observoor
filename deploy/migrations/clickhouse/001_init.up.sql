@@ -115,37 +115,32 @@ ENGINE = Distributed('{cluster}', default, raw_events_local, rand());
 
 --------------------------------------------------------------------------------
 -- AGGREGATED METRICS
--- Time-windowed aggregations with histograms. Primary storage for analysis.
--- Expected volume: ~500 MB/day at 1s intervals
+-- Time-windowed aggregations organized by subsystem. Primary storage for analysis.
+-- Expected volume: ~500 MB/day at 100ms intervals
 --------------------------------------------------------------------------------
 
-CREATE TABLE aggregated_metrics_local ON CLUSTER '{cluster}' (
-    -- Time window
+-- Common columns for all metric tables:
+-- window_start, interval_ms, wallclock_slot, cl_syncing, el_optimistic, el_offline,
+-- metric_name, pid, client_type, meta_node_name, meta_network_name
+
+--------------------------------------------------------------------------------
+-- CPU METRICS: Scheduler events (sched_on_cpu, sched_off_cpu, sched_runqueue)
+--------------------------------------------------------------------------------
+
+CREATE TABLE cpu_metrics_local ON CLUSTER '{cluster}' (
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-
-    -- Sync state
     cl_syncing Bool CODEC(ZSTD(1)),
     el_optimistic Bool CODEC(ZSTD(1)),
     el_offline Bool CODEC(ZSTD(1)),
-
-    -- Dimensions
     metric_name LowCardinality(String),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
-    local_port UInt16 CODEC(ZSTD(1)),
-    direction LowCardinality(String),
-    device_id UInt32 CODEC(ZSTD(1)),
-    rw LowCardinality(String),
-
-    -- Statistics
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
     min Int64 CODEC(ZSTD(1)),
     max Int64 CODEC(ZSTD(1)),
-
-    -- Histogram buckets (exponential: 1us, 10us, 100us, 1ms, 10ms, 100ms, 1s, 10s, 100s, inf)
     hist_1us UInt16 CODEC(ZSTD(1)),
     hist_10us UInt16 CODEC(ZSTD(1)),
     hist_100us UInt16 CODEC(ZSTD(1)),
@@ -156,8 +151,6 @@ CREATE TABLE aggregated_metrics_local ON CLUSTER '{cluster}' (
     hist_10s UInt16 CODEC(ZSTD(1)),
     hist_100s UInt16 CODEC(ZSTD(1)),
     hist_inf UInt16 CODEC(ZSTD(1)),
-
-    -- Metadata
     meta_node_name LowCardinality(String),
     meta_network_name LowCardinality(String)
 ) ENGINE = ReplicatedMergeTree(
@@ -167,37 +160,220 @@ CREATE TABLE aggregated_metrics_local ON CLUSTER '{cluster}' (
 PARTITION BY toStartOfMonth(window_start)
 ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
 
-ALTER TABLE aggregated_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Aggregated eBPF metrics with configurable time resolution and dimensional breakdown.',
-COMMENT COLUMN window_start 'Start time of the aggregation window',
-COMMENT COLUMN interval_ms 'Aggregation interval in milliseconds (window_end = window_start + interval_ms)',
-COMMENT COLUMN wallclock_slot 'Ethereum slot number at window start (from wall clock)',
-COMMENT COLUMN cl_syncing 'Whether the consensus layer was syncing during this window',
-COMMENT COLUMN el_optimistic 'Whether the execution layer was in optimistic sync mode during this window',
-COMMENT COLUMN el_offline 'Whether the execution layer was unreachable during this window',
-COMMENT COLUMN metric_name 'Name of the aggregated metric (syscall_read, disk_latency, net_io, etc.)',
-COMMENT COLUMN pid 'Process ID of the traced Ethereum client',
-COMMENT COLUMN client_type 'Ethereum client implementation (geth, reth, prysm, lighthouse, etc.)',
-COMMENT COLUMN local_port 'Local port for network metrics (0 if not applicable)',
-COMMENT COLUMN direction 'Network direction: tx, rx, or empty',
-COMMENT COLUMN device_id 'Block device ID for disk metrics (major:minor encoded, 0 if not applicable)',
-COMMENT COLUMN rw 'Read/write indicator for disk metrics: read, write, or empty',
-COMMENT COLUMN sum 'Sum of all values in the window (latency in ns, bytes, etc.)',
-COMMENT COLUMN count 'Number of events in the window',
-COMMENT COLUMN min 'Minimum value observed in the window',
-COMMENT COLUMN max 'Maximum value observed in the window',
-COMMENT COLUMN hist_1us 'Count of values < 1 microsecond',
-COMMENT COLUMN hist_10us 'Count of values 1us - 10us',
-COMMENT COLUMN hist_100us 'Count of values 10us - 100us',
-COMMENT COLUMN hist_1ms 'Count of values 100us - 1ms',
-COMMENT COLUMN hist_10ms 'Count of values 1ms - 10ms',
-COMMENT COLUMN hist_100ms 'Count of values 10ms - 100ms',
-COMMENT COLUMN hist_1s 'Count of values 100ms - 1s',
-COMMENT COLUMN hist_10s 'Count of values 1s - 10s',
-COMMENT COLUMN hist_100s 'Count of values 10s - 100s',
-COMMENT COLUMN hist_inf 'Count of values >= 100s',
-COMMENT COLUMN meta_node_name 'Name of the node running the observoor agent',
-COMMENT COLUMN meta_network_name 'Ethereum network name (mainnet, holesky, etc.)';
+ALTER TABLE cpu_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'CPU/scheduler metrics: on-cpu time, off-cpu time, runqueue latency.',
+COMMENT COLUMN metric_name 'Metric: sched_on_cpu, sched_off_cpu, sched_runqueue';
 
-CREATE TABLE aggregated_metrics ON CLUSTER '{cluster}' AS aggregated_metrics_local
-ENGINE = Distributed('{cluster}', default, aggregated_metrics_local, rand());
+CREATE TABLE cpu_metrics ON CLUSTER '{cluster}' AS cpu_metrics_local
+ENGINE = Distributed('{cluster}', default, cpu_metrics_local, rand());
+
+
+--------------------------------------------------------------------------------
+-- MEMORY METRICS: Page faults, swap, OOM, memory pressure
+--------------------------------------------------------------------------------
+
+CREATE TABLE memory_metrics_local ON CLUSTER '{cluster}' (
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
+    metric_name LowCardinality(String),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt16 CODEC(ZSTD(1)),
+    hist_10us UInt16 CODEC(ZSTD(1)),
+    hist_100us UInt16 CODEC(ZSTD(1)),
+    hist_1ms UInt16 CODEC(ZSTD(1)),
+    hist_10ms UInt16 CODEC(ZSTD(1)),
+    hist_100ms UInt16 CODEC(ZSTD(1)),
+    hist_1s UInt16 CODEC(ZSTD(1)),
+    hist_10s UInt16 CODEC(ZSTD(1)),
+    hist_100s UInt16 CODEC(ZSTD(1)),
+    hist_inf UInt16 CODEC(ZSTD(1)),
+    meta_node_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}'
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+
+ALTER TABLE memory_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Memory metrics: page faults, swap, OOM kills, memory reclaim/compaction.',
+COMMENT COLUMN metric_name 'Metric: page_fault_major, page_fault_minor, mem_reclaim, mem_compaction, swap_in, swap_out, oom_kill';
+
+CREATE TABLE memory_metrics ON CLUSTER '{cluster}' AS memory_metrics_local
+ENGINE = Distributed('{cluster}', default, memory_metrics_local, rand());
+
+
+--------------------------------------------------------------------------------
+-- DISK METRICS: Block I/O latency, throughput, queue depth
+--------------------------------------------------------------------------------
+
+CREATE TABLE disk_metrics_local ON CLUSTER '{cluster}' (
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
+    metric_name LowCardinality(String),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    device_id UInt32 CODEC(ZSTD(1)),
+    rw LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt16 CODEC(ZSTD(1)),
+    hist_10us UInt16 CODEC(ZSTD(1)),
+    hist_100us UInt16 CODEC(ZSTD(1)),
+    hist_1ms UInt16 CODEC(ZSTD(1)),
+    hist_10ms UInt16 CODEC(ZSTD(1)),
+    hist_100ms UInt16 CODEC(ZSTD(1)),
+    hist_1s UInt16 CODEC(ZSTD(1)),
+    hist_10s UInt16 CODEC(ZSTD(1)),
+    hist_100s UInt16 CODEC(ZSTD(1)),
+    hist_inf UInt16 CODEC(ZSTD(1)),
+    meta_node_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}'
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+
+ALTER TABLE disk_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Disk I/O metrics: latency, throughput, queue depth, block merges.',
+COMMENT COLUMN metric_name 'Metric: disk_latency, disk_bytes, disk_queue_depth, block_merge',
+COMMENT COLUMN device_id 'Block device ID (major:minor encoded)',
+COMMENT COLUMN rw 'Read/write indicator: read, write';
+
+CREATE TABLE disk_metrics ON CLUSTER '{cluster}' AS disk_metrics_local
+ENGINE = Distributed('{cluster}', default, disk_metrics_local, rand());
+
+
+--------------------------------------------------------------------------------
+-- NETWORK METRICS: Network I/O, TCP retransmits, RTT, congestion window
+--------------------------------------------------------------------------------
+
+CREATE TABLE network_metrics_local ON CLUSTER '{cluster}' (
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
+    metric_name LowCardinality(String),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    local_port UInt16 CODEC(ZSTD(1)),
+    direction LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    meta_node_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}'
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+
+ALTER TABLE network_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Network metrics: I/O throughput, TCP retransmits, RTT, congestion window.',
+COMMENT COLUMN metric_name 'Metric: net_io, tcp_retransmit, tcp_rtt, tcp_cwnd, tcp_state_change',
+COMMENT COLUMN local_port 'Local port number',
+COMMENT COLUMN direction 'Network direction: tx, rx';
+
+CREATE TABLE network_metrics ON CLUSTER '{cluster}' AS network_metrics_local
+ENGINE = Distributed('{cluster}', default, network_metrics_local, rand());
+
+
+--------------------------------------------------------------------------------
+-- SYSCALL METRICS: Syscall latencies (read, write, fsync, etc.)
+--------------------------------------------------------------------------------
+
+CREATE TABLE syscall_metrics_local ON CLUSTER '{cluster}' (
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
+    metric_name LowCardinality(String),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt16 CODEC(ZSTD(1)),
+    hist_10us UInt16 CODEC(ZSTD(1)),
+    hist_100us UInt16 CODEC(ZSTD(1)),
+    hist_1ms UInt16 CODEC(ZSTD(1)),
+    hist_10ms UInt16 CODEC(ZSTD(1)),
+    hist_100ms UInt16 CODEC(ZSTD(1)),
+    hist_1s UInt16 CODEC(ZSTD(1)),
+    hist_10s UInt16 CODEC(ZSTD(1)),
+    hist_100s UInt16 CODEC(ZSTD(1)),
+    hist_inf UInt16 CODEC(ZSTD(1)),
+    meta_node_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}'
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+
+ALTER TABLE syscall_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Syscall latency metrics for I/O and synchronization operations.',
+COMMENT COLUMN metric_name 'Metric: syscall_read, syscall_write, syscall_fsync, syscall_fdatasync, syscall_pwrite, syscall_futex, syscall_mmap, syscall_epoll_wait';
+
+CREATE TABLE syscall_metrics ON CLUSTER '{cluster}' AS syscall_metrics_local
+ENGINE = Distributed('{cluster}', default, syscall_metrics_local, rand());
+
+
+--------------------------------------------------------------------------------
+-- PROCESS METRICS: File descriptor operations, process exit
+--------------------------------------------------------------------------------
+
+CREATE TABLE process_metrics_local ON CLUSTER '{cluster}' (
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
+    metric_name LowCardinality(String),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_node_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}'
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+
+ALTER TABLE process_metrics_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Process lifecycle metrics: file descriptor operations, process exit.',
+COMMENT COLUMN metric_name 'Metric: fd_open, fd_close, process_exit';
+
+CREATE TABLE process_metrics ON CLUSTER '{cluster}' AS process_metrics_local
+ENGINE = Distributed('{cluster}', default, process_metrics_local, rand());
