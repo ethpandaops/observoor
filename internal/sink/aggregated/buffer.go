@@ -8,10 +8,13 @@ import (
 // Buffer is a thread-safe aggregation buffer that collects events
 // and aggregates them by dimension over a time window.
 type Buffer struct {
-	StartTime time.Time
-	EndTime   time.Time
-	Slot      uint64
-	mu        sync.RWMutex
+	StartTime     time.Time
+	EndTime       time.Time
+	WallclockSlot uint64
+	CLSyncing     bool
+	ELOptimistic  bool
+	ELOffline     bool
+	mu            sync.RWMutex
 
 	// Syscalls (BasicDimension key) - 8 syscall types.
 	SyscallRead      map[BasicDimension]*LatencyAggregate
@@ -63,10 +66,19 @@ type Buffer struct {
 }
 
 // NewBuffer creates a new Buffer with initialized maps.
-func NewBuffer(startTime time.Time, slot uint64) *Buffer {
+func NewBuffer(
+	startTime time.Time,
+	wallclockSlot uint64,
+	clSyncing bool,
+	elOptimistic bool,
+	elOffline bool,
+) *Buffer {
 	return &Buffer{
-		StartTime: startTime,
-		Slot:      slot,
+		StartTime:     startTime,
+		WallclockSlot: wallclockSlot,
+		CLSyncing:     clSyncing,
+		ELOptimistic:  elOptimistic,
+		ELOffline:     elOffline,
 		// Syscalls.
 		SyscallRead:      make(map[BasicDimension]*LatencyAggregate, 16),
 		SyscallWrite:     make(map[BasicDimension]*LatencyAggregate, 16),

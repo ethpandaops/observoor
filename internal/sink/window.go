@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -88,6 +89,10 @@ func (s *WindowSink) OnSlotChanged(newSlot uint64, _ time.Time) {
 		s.bucket.Slot = newSlot
 	}
 	s.mu.Unlock()
+}
+
+func (s *WindowSink) SetSyncState(_ beacon.SyncStatus) {
+	// WindowSink only logs; sync state is not needed.
 }
 
 func (s *WindowSink) runTimer(ctx context.Context) {

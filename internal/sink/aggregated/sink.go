@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -23,6 +24,11 @@ type Sink struct {
 
 	currentSlot      atomic.Uint64
 	currentSlotStart atomic.Int64
+
+	// Sync state fields (stored as uint32: 0=false, 1=true for atomic access).
+	clSyncing    atomic.Uint32
+	elOptimistic atomic.Uint32
+	elOffline    atomic.Uint32
 
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -83,8 +89,14 @@ func (s *Sink) Start(ctx context.Context) error {
 
 	ctx, s.cancel = context.WithCancel(ctx)
 
-	// Initialize first buffer.
-	s.buffer.Store(NewBuffer(time.Now(), 0))
+	// Initialize first buffer with current sync state.
+	s.buffer.Store(NewBuffer(
+		time.Now(),
+		0,
+		s.clSyncing.Load() == 1,
+		s.elOptimistic.Load() == 1,
+		s.elOffline.Load() == 1,
+	))
 
 	go s.runLoop(ctx)
 
@@ -139,6 +151,27 @@ func (s *Sink) OnSlotChanged(slot uint64, slotStart time.Time) {
 	if s.cfg.Resolution.SlotAligned {
 		// Trigger buffer rotation on slot change.
 		s.rotateBuffer(slotStart, slot)
+	}
+}
+
+// SetSyncState updates the current sync state from the beacon node.
+func (s *Sink) SetSyncState(status beacon.SyncStatus) {
+	if status.IsSyncing {
+		s.clSyncing.Store(1)
+	} else {
+		s.clSyncing.Store(0)
+	}
+
+	if status.IsOptimistic {
+		s.elOptimistic.Store(1)
+	} else {
+		s.elOptimistic.Store(0)
+	}
+
+	if status.ELOffline {
+		s.elOffline.Store(1)
+	} else {
+		s.elOffline.Store(0)
 	}
 }
 
@@ -363,7 +396,13 @@ func (s *Sink) tickFlush(ctx context.Context) {
 
 // rotateBuffer swaps the current buffer with a new one and flushes the old one.
 func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
-	newBuf := NewBuffer(now, slot)
+	newBuf := NewBuffer(
+		now,
+		slot,
+		s.clSyncing.Load() == 1,
+		s.elOptimistic.Load() == 1,
+		s.elOffline.Load() == 1,
+	)
 	oldBuffer := s.buffer.Swap(newBuf)
 
 	if oldBuffer == nil {

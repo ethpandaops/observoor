@@ -10,8 +10,13 @@
 CREATE TABLE raw_events_local ON CLUSTER '{cluster}' (
     -- Timing
     timestamp_ns UInt64 CODEC(DoubleDelta, ZSTD(1)),
-    slot UInt64 CODEC(DoubleDelta, ZSTD(1)),
-    slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot UInt64 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+
+    -- Sync state
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
 
     -- Process identification
     pid UInt32 CODEC(ZSTD(1)),
@@ -64,14 +69,17 @@ CREATE TABLE raw_events_local ON CLUSTER '{cluster}' (
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
     '{replica}'
 )
-PARTITION BY toStartOfMonth(slot_start_date_time)
-ORDER BY (slot_start_date_time, meta_network_name, client_type, event_type, pid);
+PARTITION BY toStartOfMonth(wallclock_slot_start_date_time)
+ORDER BY (wallclock_slot_start_date_time, meta_network_name, client_type, event_type, pid);
 
 ALTER TABLE raw_events_local ON CLUSTER '{cluster}'
 MODIFY COMMENT 'Raw eBPF events captured from Ethereum client processes, one row per kernel event.',
 COMMENT COLUMN timestamp_ns 'Wall clock time of the event in nanoseconds since Unix epoch',
-COMMENT COLUMN slot 'Ethereum slot number at the time of the event',
-COMMENT COLUMN slot_start_date_time 'Wall clock time when the slot started',
+COMMENT COLUMN wallclock_slot 'Ethereum slot number at the time of the event (from wall clock)',
+COMMENT COLUMN wallclock_slot_start_date_time 'Wall clock time when the slot started',
+COMMENT COLUMN cl_syncing 'Whether the consensus layer was syncing when this event was captured',
+COMMENT COLUMN el_optimistic 'Whether the execution layer was in optimistic sync mode when this event was captured',
+COMMENT COLUMN el_offline 'Whether the execution layer was unreachable when this event was captured',
 COMMENT COLUMN pid 'Process ID of the traced Ethereum client',
 COMMENT COLUMN tid 'Thread ID within the traced process',
 COMMENT COLUMN event_type 'Type of eBPF event (syscall_read, disk_io, net_tx, etc.)',
@@ -116,7 +124,12 @@ CREATE TABLE aggregated_metrics_local ON CLUSTER '{cluster}' (
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_end DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
-    slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+
+    -- Sync state
+    cl_syncing Bool CODEC(ZSTD(1)),
+    el_optimistic Bool CODEC(ZSTD(1)),
+    el_offline Bool CODEC(ZSTD(1)),
 
     -- Dimensions
     metric_name LowCardinality(String),
@@ -160,7 +173,10 @@ MODIFY COMMENT 'Aggregated eBPF metrics with configurable time resolution and di
 COMMENT COLUMN window_start 'Start time of the aggregation window',
 COMMENT COLUMN window_end 'End time of the aggregation window',
 COMMENT COLUMN interval_ms 'Aggregation interval in milliseconds',
-COMMENT COLUMN slot 'Ethereum slot number at window start',
+COMMENT COLUMN wallclock_slot 'Ethereum slot number at window start (from wall clock)',
+COMMENT COLUMN cl_syncing 'Whether the consensus layer was syncing during this window',
+COMMENT COLUMN el_optimistic 'Whether the execution layer was in optimistic sync mode during this window',
+COMMENT COLUMN el_offline 'Whether the execution layer was unreachable during this window',
 COMMENT COLUMN metric_name 'Name of the aggregated metric (syscall_read, disk_latency, net_io, etc.)',
 COMMENT COLUMN pid 'Process ID of the traced Ethereum client',
 COMMENT COLUMN client_type 'Ethereum client implementation (geth, reth, prysm, lighthouse, etc.)',

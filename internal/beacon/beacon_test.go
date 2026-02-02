@@ -89,31 +89,69 @@ func TestFetchSpec(t *testing.T) {
 
 func TestFetchSyncStatus(t *testing.T) {
 	tests := []struct {
-		name        string
-		isSyncing   bool
-		headSlot    string
-		syncDist    string
-		wantSyncing bool
-		wantHead    uint64
-		wantDist    uint64
+		name           string
+		isSyncing      bool
+		headSlot       string
+		syncDist       string
+		isOptimistic   bool
+		elOffline      bool
+		wantSyncing    bool
+		wantHead       uint64
+		wantDist       uint64
+		wantOptimistic bool
+		wantELOffline  bool
 	}{
 		{
-			name:        "synced",
-			isSyncing:   false,
-			headSlot:    "100000",
-			syncDist:    "0",
-			wantSyncing: false,
-			wantHead:    100000,
-			wantDist:    0,
+			name:           "synced",
+			isSyncing:      false,
+			headSlot:       "100000",
+			syncDist:       "0",
+			isOptimistic:   false,
+			elOffline:      false,
+			wantSyncing:    false,
+			wantHead:       100000,
+			wantDist:       0,
+			wantOptimistic: false,
+			wantELOffline:  false,
 		},
 		{
-			name:        "syncing",
-			isSyncing:   true,
-			headSlot:    "50000",
-			syncDist:    "50000",
-			wantSyncing: true,
-			wantHead:    50000,
-			wantDist:    50000,
+			name:           "syncing",
+			isSyncing:      true,
+			headSlot:       "50000",
+			syncDist:       "50000",
+			isOptimistic:   false,
+			elOffline:      false,
+			wantSyncing:    true,
+			wantHead:       50000,
+			wantDist:       50000,
+			wantOptimistic: false,
+			wantELOffline:  false,
+		},
+		{
+			name:           "optimistic sync",
+			isSyncing:      true,
+			headSlot:       "75000",
+			syncDist:       "25000",
+			isOptimistic:   true,
+			elOffline:      false,
+			wantSyncing:    true,
+			wantHead:       75000,
+			wantDist:       25000,
+			wantOptimistic: true,
+			wantELOffline:  false,
+		},
+		{
+			name:           "el offline",
+			isSyncing:      false,
+			headSlot:       "100000",
+			syncDist:       "0",
+			isOptimistic:   false,
+			elOffline:      true,
+			wantSyncing:    false,
+			wantHead:       100000,
+			wantDist:       0,
+			wantOptimistic: false,
+			wantELOffline:  true,
 		},
 	}
 
@@ -126,6 +164,8 @@ func TestFetchSyncStatus(t *testing.T) {
 						"is_syncing":    tt.isSyncing,
 						"head_slot":     tt.headSlot,
 						"sync_distance": tt.syncDist,
+						"is_optimistic": tt.isOptimistic,
+						"el_offline":    tt.elOffline,
 					},
 				}
 				w.Header().Set("Content-Type", "application/json")
@@ -143,6 +183,8 @@ func TestFetchSyncStatus(t *testing.T) {
 			assert.Equal(t, tt.wantSyncing, status.IsSyncing)
 			assert.Equal(t, tt.wantHead, status.HeadSlot)
 			assert.Equal(t, tt.wantDist, status.SyncDistance)
+			assert.Equal(t, tt.wantOptimistic, status.IsOptimistic)
+			assert.Equal(t, tt.wantELOffline, status.ELOffline)
 		})
 	}
 }

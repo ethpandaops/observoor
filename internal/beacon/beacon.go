@@ -31,6 +31,8 @@ type SyncStatus struct {
 	IsSyncing    bool
 	HeadSlot     uint64
 	SyncDistance uint64
+	IsOptimistic bool
+	ELOffline    bool
 }
 
 // Client defines the interface for interacting with a CL beacon node.
@@ -164,6 +166,8 @@ func (c *client) FetchSyncStatus(
 			IsSyncing    bool   `json:"is_syncing"`
 			HeadSlot     string `json:"head_slot"`
 			SyncDistance string `json:"sync_distance"`
+			IsOptimistic bool   `json:"is_optimistic"`
+			ELOffline    bool   `json:"el_offline"`
 		} `json:"data"`
 	}
 
@@ -193,6 +197,8 @@ func (c *client) FetchSyncStatus(
 		IsSyncing:    resp.Data.IsSyncing,
 		HeadSlot:     headSlot,
 		SyncDistance: syncDistance,
+		IsOptimistic: resp.Data.IsOptimistic,
+		ELOffline:    resp.Data.ELOffline,
 	}, nil
 }
 

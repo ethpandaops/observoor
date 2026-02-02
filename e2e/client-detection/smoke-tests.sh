@@ -49,11 +49,11 @@ else
     exit 1
 fi
 
-# 2. Check slot > 0
-echo -n "2. Slot > 0... "
-MAX_SLOT=$(query "SELECT max(slot) FROM aggregated_metrics")
+# 2. Check wallclock_slot > 0
+echo -n "2. Wallclock slot > 0... "
+MAX_SLOT=$(query "SELECT max(wallclock_slot) FROM aggregated_metrics")
 if [[ -n "$MAX_SLOT" && "$MAX_SLOT" -gt 0 ]]; then
-    echo "PASS (slot $MAX_SLOT)"
+    echo "PASS (wallclock_slot $MAX_SLOT)"
 else
     echo "FAIL ($MAX_SLOT)"
     exit 1
