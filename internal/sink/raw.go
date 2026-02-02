@@ -106,6 +106,13 @@ func (s *RawSink) Start(ctx context.Context) error {
 		return err
 	}
 
+	// Record channel capacity metric.
+	if s.health != nil {
+		s.health.SinkEventChannelCapacity.WithLabelValues("raw").
+			Set(float64(cap(s.eventCh)))
+		s.health.ClickHouseConnected.WithLabelValues("raw").Set(1)
+	}
+
 	offset, err := monotonicOffsetNs()
 	if err != nil {
 		s.log.WithError(err).
@@ -150,6 +157,9 @@ func (s *RawSink) Stop() error {
 func (s *RawSink) HandleEvent(event tracer.ParsedEvent) {
 	select {
 	case s.eventCh <- event:
+		if s.health != nil {
+			s.health.SinkEventsProcessed.WithLabelValues("raw").Inc()
+		}
 	default:
 		s.log.Warn("Raw sink event channel full, dropping event")
 		s.reportDrop()
@@ -174,6 +184,12 @@ func (s *RawSink) runLoop(ctx context.Context) {
 		case event := <-s.eventCh:
 			s.addEvent(ctx, event)
 		case <-ticker.C:
+			// Update channel length metric periodically.
+			if s.health != nil {
+				s.health.SinkEventChannelLength.WithLabelValues("raw").
+					Set(float64(len(s.eventCh)))
+			}
+
 			s.refreshMonotonicOffset()
 			s.tickFlush(ctx)
 		}
@@ -236,6 +252,8 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		return nil
 	}
 
+	start := time.Now()
+
 	conn := s.writer.Conn()
 	cfg := s.writer.Config()
 	table := fmt.Sprintf("%s.%s", cfg.Database, cfg.Table)
@@ -248,6 +266,8 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		),
 	)
 	if err != nil {
+		s.recordBatchError("prepare")
+
 		return fmt.Errorf("preparing batch: %w", err)
 	}
 
@@ -283,12 +303,24 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 			row.ExitCode,
 			row.TargetPID,
 		); err != nil {
+			s.recordBatchError("append")
+
 			return fmt.Errorf("appending row: %w", err)
 		}
 	}
 
 	if err := batch.Send(); err != nil {
+		s.recordBatchError("send")
+
 		return fmt.Errorf("sending batch of %d rows: %w", len(rows), err)
+	}
+
+	// Record success metrics.
+	if s.health != nil {
+		duration := time.Since(start)
+		s.health.SinkFlushDuration.WithLabelValues("raw").Observe(duration.Seconds())
+		s.health.SinkBatchSize.WithLabelValues("raw").Observe(float64(len(rows)))
+		s.health.ClickHouseBatchDuration.WithLabelValues("send").Observe(duration.Seconds())
 	}
 
 	s.log.WithField("rows", len(rows)).
@@ -417,4 +449,13 @@ func (s *RawSink) reportExportError() {
 	}
 
 	s.health.ExportErrors.Inc()
+}
+
+// recordBatchError records a batch error with categorized error type.
+func (s *RawSink) recordBatchError(errorType string) {
+	if s.health == nil {
+		return
+	}
+
+	s.health.ExportBatchErrors.WithLabelValues("raw", errorType).Inc()
 }

@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ethpandaops/observoor/internal/export"
 )
 
 // GenesisResponse contains the genesis information from the beacon node.
@@ -45,10 +47,15 @@ type client struct {
 	log      logrus.FieldLogger
 	endpoint string
 	http     *http.Client
+	health   *export.HealthMetrics
 }
 
 // NewClient creates a new beacon node API client.
-func NewClient(log logrus.FieldLogger, cfg Config) Client {
+func NewClient(
+	log logrus.FieldLogger,
+	cfg Config,
+	health *export.HealthMetrics,
+) Client {
 	timeout := cfg.Timeout
 	if timeout == 0 {
 		timeout = 10 * time.Second
@@ -60,6 +67,7 @@ func NewClient(log logrus.FieldLogger, cfg Config) Client {
 		http: &http.Client{
 			Timeout: timeout,
 		},
+		health: health,
 	}
 }
 
@@ -193,10 +201,15 @@ func (c *client) getJSON(
 	path string,
 	target any,
 ) error {
+	start := time.Now()
+	endpoint := endpointFromPath(path)
+
 	url := c.endpoint + path
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		c.recordRequest(endpoint, "error", time.Since(start))
+
 		return fmt.Errorf("creating request for %s: %w", path, err)
 	}
 
@@ -204,12 +217,15 @@ func (c *client) getJSON(
 
 	resp, err := c.http.Do(req)
 	if err != nil {
+		c.recordRequest(endpoint, "error", time.Since(start))
+
 		return fmt.Errorf("executing request for %s: %w", path, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		c.recordRequest(endpoint, "error", time.Since(start))
 
 		return fmt.Errorf(
 			"unexpected status %d from %s: %s",
@@ -220,8 +236,36 @@ func (c *client) getJSON(
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		c.recordRequest(endpoint, "error", time.Since(start))
+
 		return fmt.Errorf("decoding response from %s: %w", path, err)
 	}
 
+	c.recordRequest(endpoint, "success", time.Since(start))
+
 	return nil
+}
+
+// recordRequest records beacon request metrics.
+func (c *client) recordRequest(endpoint, status string, duration time.Duration) {
+	if c.health == nil {
+		return
+	}
+
+	c.health.BeaconRequestsTotal.WithLabelValues(endpoint, status).Inc()
+	c.health.BeaconRequestDuration.WithLabelValues(endpoint).Observe(duration.Seconds())
+}
+
+// endpointFromPath extracts a short endpoint name from the API path.
+func endpointFromPath(path string) string {
+	switch path {
+	case "/eth/v1/beacon/genesis":
+		return "genesis"
+	case "/eth/v1/config/spec":
+		return "spec"
+	case "/eth/v1/node/syncing":
+		return "syncing"
+	default:
+		return "other"
+	}
 }

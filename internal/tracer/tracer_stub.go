@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ethpandaops/observoor/internal/export"
 )
 
 type tracer struct {
@@ -22,6 +24,7 @@ type tracer struct {
 func New(
 	log logrus.FieldLogger,
 	ringBufSize int,
+	_ *export.HealthMetrics,
 ) Tracer {
 	return &tracer{
 		log:           log.WithField("component", "tracer"),

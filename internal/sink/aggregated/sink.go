@@ -17,6 +17,7 @@ type Sink struct {
 	log    logrus.FieldLogger
 	cfg    Config
 	writer *export.ClickHouseWriter
+	health *export.HealthMetrics
 
 	buffer atomic.Pointer[Buffer]
 
@@ -29,7 +30,11 @@ type Sink struct {
 }
 
 // New creates a new aggregated metrics sink.
-func New(log logrus.FieldLogger, cfg Config) *Sink {
+func New(
+	log logrus.FieldLogger,
+	cfg Config,
+	health *export.HealthMetrics,
+) *Sink {
 	// Apply defaults.
 	if cfg.Resolution.Interval <= 0 {
 		cfg.Resolution.Interval = time.Second
@@ -47,6 +52,7 @@ func New(log logrus.FieldLogger, cfg Config) *Sink {
 		log:     log.WithField("sink", "aggregated"),
 		cfg:     cfg,
 		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
+		health:  health,
 		done:    make(chan struct{}),
 		eventCh: make(chan tracer.ParsedEvent, 65536),
 	}
@@ -66,6 +72,13 @@ func (s *Sink) SetPortWhitelist(ports map[uint16]struct{}) {
 func (s *Sink) Start(ctx context.Context) error {
 	if err := s.writer.Start(ctx); err != nil {
 		return err
+	}
+
+	// Record channel capacity metric.
+	if s.health != nil {
+		s.health.SinkEventChannelCapacity.WithLabelValues("aggregated").
+			Set(float64(cap(s.eventCh)))
+		s.health.ClickHouseConnected.WithLabelValues("aggregated").Set(1)
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -110,6 +123,9 @@ func (s *Sink) Stop() error {
 func (s *Sink) HandleEvent(event tracer.ParsedEvent) {
 	select {
 	case s.eventCh <- event:
+		if s.health != nil {
+			s.health.SinkEventsProcessed.WithLabelValues("aggregated").Inc()
+		}
 	default:
 		s.log.Warn("Aggregated sink event channel full, dropping event")
 	}
@@ -148,6 +164,12 @@ func (s *Sink) runLoop(ctx context.Context) {
 			// Drain up to batchSize-1 more events without blocking.
 			s.drainEvents(batchSize - 1)
 		case <-ticker.C:
+			// Update channel length metric periodically.
+			if s.health != nil {
+				s.health.SinkEventChannelLength.WithLabelValues("aggregated").
+					Set(float64(len(s.eventCh)))
+			}
+
 			s.tickFlush(ctx)
 		}
 	}
@@ -359,7 +381,16 @@ func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
 
 // flush writes the buffer contents to ClickHouse.
 func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
-	flusher := newFlusher(s.log, s.writer, s.cfg)
+	start := time.Now()
+	flusher := newFlusher(s.log, s.writer, s.cfg, s.health)
 
-	return flusher.Flush(ctx, buf)
+	err := flusher.Flush(ctx, buf)
+
+	// Record flush metrics.
+	if s.health != nil && err == nil {
+		duration := time.Since(start)
+		s.health.SinkFlushDuration.WithLabelValues("aggregated").Observe(duration.Seconds())
+	}
+
+	return err
 }

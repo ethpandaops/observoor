@@ -46,7 +46,7 @@ func TestFetchGenesis(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: server.URL,
 		Timeout:  5 * time.Second,
-	})
+	}, nil)
 
 	genesis, err := client.FetchGenesis(context.Background())
 	require.NoError(t, err)
@@ -79,7 +79,7 @@ func TestFetchSpec(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: server.URL,
 		Timeout:  5 * time.Second,
-	})
+	}, nil)
 
 	spec, err := client.FetchSpec(context.Background())
 	require.NoError(t, err)
@@ -136,7 +136,7 @@ func TestFetchSyncStatus(t *testing.T) {
 			client := NewClient(testLog(), Config{
 				Endpoint: server.URL,
 				Timeout:  5 * time.Second,
-			})
+			}, nil)
 
 			status, err := client.FetchSyncStatus(context.Background())
 			require.NoError(t, err)
@@ -158,7 +158,7 @@ func TestFetchGenesis_ServerError(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: server.URL,
 		Timeout:  5 * time.Second,
-	})
+	}, nil)
 
 	_, err := client.FetchGenesis(context.Background())
 	require.Error(t, err)
@@ -176,7 +176,7 @@ func TestFetchGenesis_InvalidJSON(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: server.URL,
 		Timeout:  5 * time.Second,
-	})
+	}, nil)
 
 	_, err := client.FetchGenesis(context.Background())
 	require.Error(t, err)
@@ -193,7 +193,7 @@ func TestFetchGenesis_Timeout(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: server.URL,
 		Timeout:  100 * time.Millisecond,
-	})
+	}, nil)
 
 	_, err := client.FetchGenesis(context.Background())
 	require.Error(t, err)
@@ -202,7 +202,7 @@ func TestFetchGenesis_Timeout(t *testing.T) {
 func TestDefaultTimeout(t *testing.T) {
 	client := NewClient(testLog(), Config{
 		Endpoint: "http://localhost:9999",
-	})
+	}, nil)
 	// Just verify it doesn't panic — timeout defaults to 10s.
 	assert.NotNil(t, client)
 }
