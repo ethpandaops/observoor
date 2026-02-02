@@ -121,8 +121,6 @@ func (s *Sink) Stop() error {
 	finalBuffer := s.buffer.Swap(nil)
 
 	if finalBuffer != nil {
-		finalBuffer.Finalize(time.Now())
-
 		if err := s.flush(context.Background(), finalBuffer); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
 		}
@@ -408,8 +406,6 @@ func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
 	if oldBuffer == nil {
 		return
 	}
-
-	oldBuffer.Finalize(now)
 
 	go func() {
 		if err := s.flush(context.Background(), oldBuffer); err != nil {

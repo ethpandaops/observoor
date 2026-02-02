@@ -122,7 +122,6 @@ ENGINE = Distributed('{cluster}', default, raw_events_local, rand());
 CREATE TABLE aggregated_metrics_local ON CLUSTER '{cluster}' (
     -- Time window
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_end DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
 
@@ -171,8 +170,7 @@ ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
 ALTER TABLE aggregated_metrics_local ON CLUSTER '{cluster}'
 MODIFY COMMENT 'Aggregated eBPF metrics with configurable time resolution and dimensional breakdown.',
 COMMENT COLUMN window_start 'Start time of the aggregation window',
-COMMENT COLUMN window_end 'End time of the aggregation window',
-COMMENT COLUMN interval_ms 'Aggregation interval in milliseconds',
+COMMENT COLUMN interval_ms 'Aggregation interval in milliseconds (window_end = window_start + interval_ms)',
 COMMENT COLUMN wallclock_slot 'Ethereum slot number at window start (from wall clock)',
 COMMENT COLUMN cl_syncing 'Whether the consensus layer was syncing during this window',
 COMMENT COLUMN el_optimistic 'Whether the execution layer was in optimistic sync mode during this window',

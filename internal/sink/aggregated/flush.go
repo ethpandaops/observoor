@@ -13,7 +13,6 @@ import (
 // aggregatedRow represents a single row to be written to ClickHouse.
 type aggregatedRow struct {
 	WindowStart   time.Time
-	WindowEnd     time.Time
 	IntervalMs    uint16
 	WallclockSlot uint32
 	MetricName    string
@@ -105,7 +104,7 @@ func (f *flusher) Flush(ctx context.Context, buf *Buffer) error {
 	batch, err := conn.PrepareBatch(
 		ctx,
 		fmt.Sprintf(`INSERT INTO %s (
-			window_start, window_end, interval_ms, wallclock_slot,
+			window_start, interval_ms, wallclock_slot,
 			metric_name, pid, client_type, local_port, direction, device_id, rw,
 			sum, count, min, max,
 			hist_1us, hist_10us, hist_100us, hist_1ms, hist_10ms, hist_100ms, hist_1s, hist_10s, hist_100s, hist_inf,
@@ -118,7 +117,7 @@ func (f *flusher) Flush(ctx context.Context, buf *Buffer) error {
 
 	for _, row := range f.rows {
 		if err := batch.Append(
-			row.WindowStart, row.WindowEnd, row.IntervalMs, row.WallclockSlot,
+			row.WindowStart, row.IntervalMs, row.WallclockSlot,
 			row.MetricName, row.PID, row.ClientType, row.LocalPort, row.Direction, row.DeviceID, row.RW,
 			row.Sum, row.Count, row.Min, row.Max,
 			row.Hist1us, row.Hist10us, row.Hist100us, row.Hist1ms, row.Hist10ms, row.Hist100ms,
@@ -155,7 +154,6 @@ func (f *flusher) addLatencyRow(metricName string, dim BasicDimension, snap Late
 
 	f.rows = append(f.rows, aggregatedRow{
 		WindowStart:   f.buf.StartTime,
-		WindowEnd:     f.buf.EndTime,
 		IntervalMs:    f.intervalMs,
 		WallclockSlot: f.wallclockSlot,
 		CLSyncing:     f.clSyncing,
@@ -189,7 +187,6 @@ func (f *flusher) addCounterRow(metricName string, dim BasicDimension, snap Coun
 
 	f.rows = append(f.rows, aggregatedRow{
 		WindowStart:   f.buf.StartTime,
-		WindowEnd:     f.buf.EndTime,
 		IntervalMs:    f.intervalMs,
 		WallclockSlot: f.wallclockSlot,
 		CLSyncing:     f.clSyncing,
@@ -211,7 +208,6 @@ func (f *flusher) addGaugeRow(metricName string, dim BasicDimension, snap GaugeS
 
 	f.rows = append(f.rows, aggregatedRow{
 		WindowStart:   f.buf.StartTime,
-		WindowEnd:     f.buf.EndTime,
 		IntervalMs:    f.intervalMs,
 		WallclockSlot: f.wallclockSlot,
 		CLSyncing:     f.clSyncing,
@@ -258,7 +254,6 @@ func (f *flusher) collectNetwork() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -283,7 +278,6 @@ func (f *flusher) collectNetwork() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -311,7 +305,6 @@ func (f *flusher) collectTcpMetrics() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -337,7 +330,6 @@ func (f *flusher) collectTcpMetrics() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -363,7 +355,6 @@ func (f *flusher) collectTcpMetrics() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -389,7 +380,6 @@ func (f *flusher) collectDisk() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -426,7 +416,6 @@ func (f *flusher) collectDisk() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -451,7 +440,6 @@ func (f *flusher) collectDisk() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,
@@ -478,7 +466,6 @@ func (f *flusher) collectDisk() {
 
 		f.rows = append(f.rows, aggregatedRow{
 			WindowStart:   f.buf.StartTime,
-			WindowEnd:     f.buf.EndTime,
 			IntervalMs:    f.intervalMs,
 			WallclockSlot: f.wallclockSlot,
 			CLSyncing:     f.clSyncing,

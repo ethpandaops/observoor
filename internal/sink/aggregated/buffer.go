@@ -9,7 +9,6 @@ import (
 // and aggregates them by dimension over a time window.
 type Buffer struct {
 	StartTime     time.Time
-	EndTime       time.Time
 	WallclockSlot uint64
 	CLSyncing     bool
 	ELOptimistic  bool
@@ -118,13 +117,6 @@ func NewBuffer(
 		ProcessExit:    make(map[BasicDimension]*CounterAggregate, 8),
 		TcpStateChange: make(map[BasicDimension]*CounterAggregate, 8),
 	}
-}
-
-// Finalize sets the end time for the buffer.
-func (b *Buffer) Finalize(endTime time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.EndTime = endTime
 }
 
 // getOrCreateLatency returns the LatencyAggregate for the given key,
