@@ -1,3 +1,5 @@
+version: 2
+
 project_name: observoor
 
 before:
@@ -6,6 +8,7 @@ before:
 
 builds:
   - id: linux-amd64
+    main: ./cmd/observoor
     env:
       - CGO_ENABLED=0
     binary: observoor-{{.Version}}
@@ -18,6 +21,7 @@ builds:
     mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: linux-arm64
+    main: ./cmd/observoor
     env:
       - CGO_ENABLED=0
     binary: observoor-{{.Version}}
@@ -33,7 +37,7 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ incpatch .Version }}-next"
+  version_template: "{{ incpatch .Version }}-next"
 
 changelog:
   sort: asc
