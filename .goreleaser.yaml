@@ -1,0 +1,92 @@
+project_name: observoor
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: linux-amd64
+    env:
+      - CGO_ENABLED=0
+    binary: observoor-{{.Version}}
+    goos:
+      - linux
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w -X github.com/ethpandaops/observoor/internal/version.Release={{.Tag}} -X github.com/ethpandaops/observoor/internal/version.GitCommit={{.ShortCommit}} -X github.com/ethpandaops/observoor/internal/version.GOOS=linux -X github.com/ethpandaops/observoor/internal/version.GOARCH=amd64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+  - id: linux-arm64
+    env:
+      - CGO_ENABLED=0
+    binary: observoor-{{.Version}}
+    goos:
+      - linux
+    goarch:
+      - arm64
+    ldflags:
+      - -s -w -X github.com/ethpandaops/observoor/internal/version.Release={{.Tag}} -X github.com/ethpandaops/observoor/internal/version.GitCommit={{.ShortCommit}} -X github.com/ethpandaops/observoor/internal/version.GOOS=linux -X github.com/ethpandaops/observoor/internal/version.GOARCH=arm64
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+
+dockers:
+  # Debian images only - required for eBPF compatibility
+  - use: buildx
+    goos: linux
+    goarch: amd64
+    dockerfile: goreleaser-debian.Dockerfile
+    image_templates:
+      - "ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64"
+      - "ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64"
+    build_flag_templates:
+      - "--platform=linux/amd64"
+      - "--provenance=false"
+      - "--sbom=false"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+
+  - use: buildx
+    goos: linux
+    goarch: arm64
+    dockerfile: goreleaser-debian.Dockerfile
+    image_templates:
+      - "ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8"
+      - "ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8"
+    build_flag_templates:
+      - "--platform=linux/arm64/v8"
+      - "--provenance=false"
+      - "--sbom=false"
+      - "--label=org.opencontainers.image.created={{.Date}}"
+      - "--label=org.opencontainers.image.title={{.ProjectName}}"
+      - "--label=org.opencontainers.image.revision={{.FullCommit}}"
+      - "--label=org.opencontainers.image.version={{.Version}}"
+
+docker_manifests:
+  - name_template: ethpandaops/{{ .ProjectName }}:{{ .Version }}
+    image_templates:
+      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64
+      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
+
+  - name_template: ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64
+    image_templates:
+      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
+
+  - name_template: ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest
+    image_templates:
+      - ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64
+      - ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8
