@@ -44,6 +44,7 @@ type flusher struct {
 	log        logrus.FieldLogger
 	writer     *export.ClickHouseWriter
 	cfg        Config
+	health     *export.HealthMetrics
 	rows       []aggregatedRow
 	intervalMs uint16
 	slot       uint32
@@ -55,11 +56,13 @@ func newFlusher(
 	log logrus.FieldLogger,
 	writer *export.ClickHouseWriter,
 	cfg Config,
+	health *export.HealthMetrics,
 ) *flusher {
 	return &flusher{
 		log:    log,
 		writer: writer,
 		cfg:    cfg,
+		health: health,
 		rows:   make([]aggregatedRow, 0, 1024),
 	}
 }
@@ -116,7 +119,16 @@ func (f *flusher) Flush(ctx context.Context, buf *Buffer) error {
 	}
 
 	if err := batch.Send(); err != nil {
+		if f.health != nil {
+			f.health.ExportBatchErrors.WithLabelValues("aggregated", "send").Inc()
+		}
+
 		return fmt.Errorf("sending batch of %d rows: %w", len(f.rows), err)
+	}
+
+	// Record batch size metric.
+	if f.health != nil {
+		f.health.SinkBatchSize.WithLabelValues("aggregated").Observe(float64(len(f.rows)))
 	}
 
 	f.log.WithField("rows", len(f.rows)).Debug("Flushed aggregated metrics")

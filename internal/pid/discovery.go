@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/sirupsen/logrus"
+
+	"github.com/ethpandaops/observoor/internal/export"
 )
 
 // Discovery defines the interface for PID discovery mechanisms.
@@ -17,9 +19,11 @@ type Discovery interface {
 func NewDiscovery(
 	log logrus.FieldLogger,
 	cfg Config,
+	health *export.HealthMetrics,
 ) Discovery {
 	return &compositeDiscovery{
 		log:     log.WithField("component", "pid"),
+		health:  health,
 		process: newProcessDiscovery(log, cfg.ProcessNames),
 		cgroup:  newCgroupDiscovery(log, cfg.CgroupPath),
 	}
@@ -27,6 +31,7 @@ func NewDiscovery(
 
 type compositeDiscovery struct {
 	log     logrus.FieldLogger
+	health  *export.HealthMetrics
 	process *processDiscovery
 	cgroup  *cgroupDiscovery
 }
@@ -43,6 +48,7 @@ func (d *compositeDiscovery) Discover(
 			d.log.WithError(err).Warn(
 				"Process name discovery failed",
 			)
+			d.recordDiscoveryError("process")
 		}
 
 		for _, pid := range pids {
@@ -59,6 +65,7 @@ func (d *compositeDiscovery) Discover(
 			d.log.WithError(err).Warn(
 				"Cgroup discovery failed",
 			)
+			d.recordDiscoveryError("cgroup")
 		}
 
 		for _, pid := range pids {
@@ -77,4 +84,13 @@ func (d *compositeDiscovery) Discover(
 	}
 
 	return result, nil
+}
+
+// recordDiscoveryError records a PID discovery error metric.
+func (d *compositeDiscovery) recordDiscoveryError(source string) {
+	if d.health == nil {
+		return
+	}
+
+	d.health.PIDDiscoveryErrors.WithLabelValues(source).Inc()
 }

@@ -142,6 +142,37 @@ func (c ClientType) String() string {
 	}
 }
 
+// AllClientTypes returns all known client types (excluding unknown).
+func AllClientTypes() []ClientType {
+	return []ClientType{
+		ClientTypeGeth,
+		ClientTypeReth,
+		ClientTypeBesu,
+		ClientTypeNethermind,
+		ClientTypeErigon,
+		ClientTypePrysm,
+		ClientTypeLighthouse,
+		ClientTypeTeku,
+		ClientTypeLodestar,
+		ClientTypeNimbus,
+		ClientTypeEthrex,
+	}
+}
+
+// AllClientNames returns all client type names including "unknown".
+func AllClientNames() []string {
+	types := AllClientTypes()
+	names := make([]string, 0, len(types)+1)
+
+	for _, t := range types {
+		names = append(names, t.String())
+	}
+
+	names = append(names, ClientTypeUnknown.String())
+
+	return names
+}
+
 // Direction indicates network I/O direction.
 type Direction uint8
 

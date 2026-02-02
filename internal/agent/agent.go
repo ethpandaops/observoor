@@ -46,13 +46,15 @@ type agent struct {
 
 // New creates a new Agent.
 func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
+	health := export.NewHealthMetrics(log, cfg.Health)
+
 	a := &agent{
 		log:    log.WithField("component", "agent"),
 		cfg:    cfg,
-		health: export.NewHealthMetrics(log, cfg.Health),
-		beacon: beacon.NewClient(log, cfg.Beacon),
-		disc:   pid.NewDiscovery(log, cfg.PID),
-		tracer: tracer.New(log, cfg.RingBufferSize),
+		health: health,
+		beacon: beacon.NewClient(log, cfg.Beacon, health),
+		disc:   pid.NewDiscovery(log, cfg.PID, health),
+		tracer: tracer.New(log, cfg.RingBufferSize, health),
 		sinks:  make([]sink.Sink, 0, 3),
 	}
 
@@ -74,7 +76,7 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	}
 
 	if cfg.Sinks.Aggregated.Enabled {
-		a.aggregatedSink = aggregated.New(log, cfg.Sinks.Aggregated)
+		a.aggregatedSink = aggregated.New(log, cfg.Sinks.Aggregated, health)
 		a.sinks = append(a.sinks, a.aggregatedSink)
 	}
 
@@ -138,6 +140,9 @@ func (a *agent) Start(ctx context.Context) error {
 
 	clientTypes := resolveClientTypes(pids)
 
+	// Update PIDs by client metric.
+	a.updatePIDsByClient(clientTypes)
+
 	// 5b. Discover well-known ports from process cmdlines.
 	if a.aggregatedSink != nil {
 		portInfos := DiscoverPorts(a.log, pids, clientTypes)
@@ -189,11 +194,20 @@ func (a *agent) Start(ctx context.Context) error {
 
 	// 10. Register tracer handlers for events, errors, and ringbuf stats.
 	a.tracer.OnEvent(func(event tracer.ParsedEvent) {
+		start := time.Now()
+
 		a.health.EventsReceived.Inc()
+
+		// Track events by type and client.
+		a.health.EventsByType.WithLabelValues(event.Raw.Type.String()).Inc()
+		a.health.EventsByClient.WithLabelValues(event.Raw.Client.String()).Inc()
 
 		for _, s := range a.sinks {
 			s.HandleEvent(event)
 		}
+
+		// Track event processing duration.
+		a.health.EventProcessingDuration.Observe(time.Since(start).Seconds())
 	})
 
 	a.tracer.OnError(func(err error) {
@@ -220,6 +234,9 @@ func (a *agent) Start(ctx context.Context) error {
 	if err := a.tracer.UpdateTIDs(tids, tidInfo); err != nil {
 		return fmt.Errorf("updating TIDs in BPF map: %w", err)
 	}
+
+	// Update TID discovery count metric.
+	a.health.TIDDiscoveryCount.Set(float64(len(tids)))
 
 	a.log.WithField("count", len(tids)).
 		Info("Updated tracked TIDs")
@@ -327,11 +344,15 @@ func (a *agent) monitorSyncState(ctx context.Context) {
 				continue
 			}
 
+			// Update sync status metrics.
 			if status.IsSyncing {
 				a.health.IsSyncing.Set(1)
 			} else {
 				a.health.IsSyncing.Set(0)
 			}
+
+			// Update sync distance metric.
+			a.health.BeaconSyncDistance.Set(float64(status.SyncDistance))
 		}
 	}
 }
@@ -347,6 +368,8 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			start := time.Now()
+
 			pids, err := a.disc.Discover(ctx)
 			if err != nil {
 				a.log.WithError(err).
@@ -357,6 +380,9 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 
 			a.health.PIDsTracked.Set(float64(len(pids)))
 			clientTypes := resolveClientTypes(pids)
+
+			// Update PIDs by client metric.
+			a.updatePIDsByClient(clientTypes)
 
 			if err := a.tracer.UpdatePIDs(pids, clientTypes); err != nil {
 				a.log.WithError(err).
@@ -373,6 +399,12 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 				a.log.WithError(err).
 					Warn("TID map update failed")
 			}
+
+			// Update TID discovery count metric.
+			a.health.TIDDiscoveryCount.Set(float64(len(tids)))
+
+			// Record PID refresh duration.
+			a.health.PIDRefreshDuration.Observe(time.Since(start).Seconds())
 
 			a.log.WithField("count", len(tids)).
 				Debug("Updated tracked TIDs")
@@ -526,4 +558,20 @@ func readProcCmdline(p uint32) (string, error) {
 
 	// cmdline uses null bytes as separators.
 	return strings.ReplaceAll(string(data), "\x00", " "), nil
+}
+
+// updatePIDsByClient updates the PIDs by client metric gauge.
+func (a *agent) updatePIDsByClient(clientTypes map[uint32]tracer.ClientType) {
+	// Count PIDs per client type.
+	counts := make(map[string]int, 12)
+
+	for _, ct := range clientTypes {
+		counts[ct.String()]++
+	}
+
+	// Update metrics for all client types (including zero counts).
+	for _, name := range tracer.AllClientNames() {
+		count := counts[name]
+		a.health.PIDsByClient.WithLabelValues(name).Set(float64(count))
+	}
 }

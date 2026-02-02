@@ -9,17 +9,31 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"github.com/cilium/ebpf/ringbuf"
 	"github.com/sirupsen/logrus"
+
+	"github.com/ethpandaops/observoor/internal/export"
 )
+
+// AttachmentStats tracks BPF program attachment status.
+type AttachmentStats struct {
+	TracepointsAttached int
+	TracepointsFailed   int
+	KprobesAttached     int
+	KprobesFailed       int
+	KretprobesAttached  int
+	KretprobesFailed    int
+}
 
 type tracer struct {
 	log           logrus.FieldLogger
 	ringBufSize   int
+	health        *export.HealthMetrics
 	handlers      []EventHandler
 	errorHandlers []ErrorHandler
 	statsHandlers []RingbufStatsHandler
@@ -28,6 +42,7 @@ type tracer struct {
 	objs          *observoorObjects
 	cancel        context.CancelFunc
 	wg            sync.WaitGroup
+	attachStats   AttachmentStats
 }
 
 type trackedTidVal struct {
@@ -40,10 +55,12 @@ type trackedTidVal struct {
 func New(
 	log logrus.FieldLogger,
 	ringBufSize int,
+	health *export.HealthMetrics,
 ) Tracer {
 	return &tracer{
 		log:           log.WithField("component", "tracer"),
 		ringBufSize:   ringBufSize,
+		health:        health,
 		handlers:      make([]EventHandler, 0, 4),
 		errorHandlers: make([]ErrorHandler, 0, 2),
 		statsHandlers: make([]RingbufStatsHandler, 0, 2),
@@ -90,12 +107,20 @@ func (t *tracer) Start(ctx context.Context) error {
 		return fmt.Errorf("attaching BPF programs: %w", err)
 	}
 
+	// Report attachment metrics.
+	t.reportAttachmentMetrics()
+
 	// Open ring buffer reader.
 	t.reader, err = ringbuf.NewReader(t.objs.Events)
 	if err != nil {
 		t.cleanup()
 
 		return fmt.Errorf("creating ring buffer reader: %w", err)
+	}
+
+	// Report ring buffer capacity.
+	if t.health != nil {
+		t.health.RingbufCapacityBytes.Set(float64(t.reader.BufferSize()))
 	}
 
 	// Start event reading goroutine.
@@ -302,8 +327,25 @@ func (t *tracer) readLoop(ctx context.Context) {
 				return
 			}
 
-			t.log.WithError(err).Warn("Ring buffer read error")
+			// Check for ring buffer overflow.
+			if errors.Is(err, ringbuf.ErrClosed) {
+				t.log.WithError(err).Warn("Ring buffer closed")
+			} else {
+				t.log.WithError(err).Warn("Ring buffer read error")
+			}
+
 			t.reportError(err)
+
+			continue
+		}
+
+		// Check if this is a lost record (overflow indicator).
+		if record.RawSample == nil {
+			if t.health != nil {
+				t.health.BPFRingbufOverflows.Inc()
+			}
+
+			t.log.Warn("Ring buffer overflow detected")
 
 			continue
 		}
@@ -319,6 +361,7 @@ func (t *tracer) readLoop(ctx context.Context) {
 		if err != nil {
 			t.log.WithError(err).Debug("Event parse error")
 			t.reportError(err)
+			t.reportParseError(err)
 
 			continue
 		}
@@ -353,6 +396,64 @@ func (t *tracer) reportRingbufStats(remaining int) {
 
 	for _, handler := range t.statsHandlers {
 		handler(stats)
+	}
+}
+
+// reportAttachmentMetrics reports BPF program attachment statistics.
+func (t *tracer) reportAttachmentMetrics() {
+	if t.health == nil {
+		return
+	}
+
+	t.health.BPFProgramsAttached.WithLabelValues("tracepoint").
+		Set(float64(t.attachStats.TracepointsAttached))
+	t.health.BPFProgramsAttached.WithLabelValues("kprobe").
+		Set(float64(t.attachStats.KprobesAttached))
+	t.health.BPFProgramsAttached.WithLabelValues("kretprobe").
+		Set(float64(t.attachStats.KretprobesAttached))
+
+	t.health.BPFProgramsFailed.WithLabelValues("tracepoint").
+		Set(float64(t.attachStats.TracepointsFailed))
+	t.health.BPFProgramsFailed.WithLabelValues("kprobe").
+		Set(float64(t.attachStats.KprobesFailed))
+	t.health.BPFProgramsFailed.WithLabelValues("kretprobe").
+		Set(float64(t.attachStats.KretprobesFailed))
+
+	t.log.WithFields(logrus.Fields{
+		"tracepoints_attached": t.attachStats.TracepointsAttached,
+		"tracepoints_failed":   t.attachStats.TracepointsFailed,
+		"kprobes_attached":     t.attachStats.KprobesAttached,
+		"kprobes_failed":       t.attachStats.KprobesFailed,
+		"kretprobes_attached":  t.attachStats.KretprobesAttached,
+		"kretprobes_failed":    t.attachStats.KretprobesFailed,
+	}).Info("BPF program attachment summary")
+}
+
+// reportParseError reports a parse error with categorized error type.
+func (t *tracer) reportParseError(err error) {
+	if t.health == nil {
+		return
+	}
+
+	errorType := categorizeParseError(err)
+	t.health.EventParseErrors.WithLabelValues(errorType).Inc()
+}
+
+// categorizeParseError determines the error type for metrics labeling.
+func categorizeParseError(err error) string {
+	errStr := err.Error()
+
+	switch {
+	case strings.Contains(errStr, "event too short"):
+		return "truncated"
+	case strings.Contains(errStr, "unknown event type"):
+		return "unknown_type"
+	case strings.Contains(errStr, "reading event header"):
+		return "header_decode"
+	case strings.Contains(errStr, "reading"):
+		return "payload_decode"
+	default:
+		return "other"
 	}
 }
 
@@ -791,6 +892,9 @@ func parseProcessExitEvent(
 func (t *tracer) attachPrograms() error {
 	var err error
 
+	// Reset attachment stats.
+	t.attachStats = AttachmentStats{}
+
 	attachTracepoint := func(group, name string, prog *ebpf.Program) {
 		if err != nil || prog == nil {
 			return
@@ -800,6 +904,7 @@ func (t *tracer) attachPrograms() error {
 
 		l, err = link.Tracepoint(group, name, prog, nil)
 		if err != nil {
+			t.attachStats.TracepointsFailed++
 			err = fmt.Errorf(
 				"attaching tracepoint %s/%s: %w", group, name, err,
 			)
@@ -807,6 +912,7 @@ func (t *tracer) attachPrograms() error {
 			return
 		}
 
+		t.attachStats.TracepointsAttached++
 		t.links = append(t.links, l)
 
 		t.log.WithFields(logrus.Fields{
@@ -822,13 +928,16 @@ func (t *tracer) attachPrograms() error {
 
 		l, attachErr := link.Tracepoint(group, name, prog, nil)
 		if attachErr != nil {
+			t.attachStats.TracepointsFailed++
 			t.log.WithError(attachErr).WithFields(logrus.Fields{
 				"group": group,
 				"name":  name,
 			}).Warn("Optional tracepoint attach failed")
+
 			return
 		}
 
+		t.attachStats.TracepointsAttached++
 		t.links = append(t.links, l)
 		t.log.WithFields(logrus.Fields{
 			"group": group,
@@ -845,6 +954,7 @@ func (t *tracer) attachPrograms() error {
 
 		l, err = link.Kprobe(symbol, prog, nil)
 		if err != nil {
+			t.attachStats.KprobesFailed++
 			err = fmt.Errorf(
 				"attaching kprobe %s: %w", symbol, err,
 			)
@@ -852,6 +962,7 @@ func (t *tracer) attachPrograms() error {
 			return
 		}
 
+		t.attachStats.KprobesAttached++
 		t.links = append(t.links, l)
 
 		t.log.WithField("symbol", symbol).
@@ -865,11 +976,14 @@ func (t *tracer) attachPrograms() error {
 
 		l, attachErr := link.Kprobe(symbol, prog, nil)
 		if attachErr != nil {
+			t.attachStats.KprobesFailed++
 			t.log.WithError(attachErr).WithField("symbol", symbol).
 				Warn("Optional kprobe attach failed")
+
 			return
 		}
 
+		t.attachStats.KprobesAttached++
 		t.links = append(t.links, l)
 		t.log.WithField("symbol", symbol).
 			Debug("Attached optional kprobe")
@@ -884,6 +998,7 @@ func (t *tracer) attachPrograms() error {
 
 		l, err = link.Kretprobe(symbol, prog, nil)
 		if err != nil {
+			t.attachStats.KretprobesFailed++
 			err = fmt.Errorf(
 				"attaching kretprobe %s: %w", symbol, err,
 			)
@@ -891,6 +1006,7 @@ func (t *tracer) attachPrograms() error {
 			return
 		}
 
+		t.attachStats.KretprobesAttached++
 		t.links = append(t.links, l)
 
 		t.log.WithField("symbol", symbol).
