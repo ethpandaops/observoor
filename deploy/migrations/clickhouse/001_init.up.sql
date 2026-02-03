@@ -63,7 +63,7 @@ CREATE TABLE raw_events_local ON CLUSTER '{cluster}' (
     target_pid UInt32 CODEC(ZSTD(1)),
 
     -- Metadata
-    meta_node_name LowCardinality(String),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
 ) ENGINE = ReplicatedMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
@@ -106,7 +106,7 @@ COMMENT COLUMN tcp_srtt_us 'Smoothed RTT in microseconds',
 COMMENT COLUMN tcp_cwnd 'Congestion window size',
 COMMENT COLUMN exit_code 'Process exit code',
 COMMENT COLUMN target_pid 'Target PID for OOM kill events',
-COMMENT COLUMN meta_node_name 'Name of the node running the observoor agent',
+COMMENT COLUMN meta_client_name 'Name of the node running the observoor agent',
 COMMENT COLUMN meta_network_name 'Ethereum network name (mainnet, holesky, etc.)';
 
 CREATE TABLE raw_events ON CLUSTER '{cluster}' AS raw_events_local
@@ -114,117 +114,536 @@ ENGINE = Distributed('{cluster}', default, raw_events_local, rand());
 
 
 --------------------------------------------------------------------------------
--- AGGREGATED METRICS
--- Time-windowed aggregations organized by subsystem. Primary storage for analysis.
--- Expected volume: ~500 MB/day at 100ms intervals
+-- SYNC STATE
+-- Separate table for consensus/execution layer sync state.
+-- Polled periodically (e.g., every slot) to reduce per-row overhead.
 --------------------------------------------------------------------------------
 
--- Common columns for all metric tables:
--- window_start, interval_ms, wallclock_slot, cl_syncing, el_optimistic, el_offline,
--- metric_name, pid, client_type, meta_node_name, meta_network_name
-
---------------------------------------------------------------------------------
--- CPU METRICS: Scheduler events (sched_on_cpu, sched_off_cpu, sched_runqueue)
---------------------------------------------------------------------------------
-
-CREATE TABLE cpu_metrics_local ON CLUSTER '{cluster}' (
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
-    interval_ms UInt16 CODEC(ZSTD(1)),
+CREATE TABLE sync_state_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    event_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     cl_syncing Bool CODEC(ZSTD(1)),
     el_optimistic Bool CODEC(ZSTD(1)),
     el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(event_time)
+ORDER BY (event_time, meta_network_name, meta_client_name);
+
+ALTER TABLE sync_state_local ON CLUSTER '{cluster}'
+MODIFY COMMENT 'Sync state snapshots for consensus and execution layers.',
+COMMENT COLUMN updated_date_time 'Version column for ReplacingMergeTree deduplication',
+COMMENT COLUMN event_time 'Time when the sync state was sampled',
+COMMENT COLUMN wallclock_slot 'Ethereum slot number at sampling time',
+COMMENT COLUMN wallclock_slot_start_date_time 'Wall clock time when the slot started',
+COMMENT COLUMN cl_syncing 'Whether the consensus layer is syncing',
+COMMENT COLUMN el_optimistic 'Whether the execution layer is in optimistic sync mode',
+COMMENT COLUMN el_offline 'Whether the execution layer is unreachable',
+COMMENT COLUMN meta_client_name 'Name of the node running the observoor agent',
+COMMENT COLUMN meta_network_name 'Ethereum network name (mainnet, holesky, etc.)';
+
+CREATE TABLE sync_state ON CLUSTER '{cluster}' AS sync_state_local
+ENGINE = Distributed('{cluster}', default, sync_state_local, cityHash64(event_time, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- AGGREGATED METRICS: ONE TABLE PER METRIC
+-- Time-windowed aggregations. No metric_name column - the table IS the metric.
+-- ReplicatedReplacingMergeTree for idempotent writes, ORDER BY as composite key.
+--------------------------------------------------------------------------------
+
+
+--------------------------------------------------------------------------------
+-- SYSCALL LATENCY TABLES (8 tables)
+-- Latency histograms for system call operations
+--------------------------------------------------------------------------------
+
+CREATE TABLE syscall_read_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
     min Int64 CODEC(ZSTD(1)),
     max Int64 CODEC(ZSTD(1)),
-    hist_1us UInt16 CODEC(ZSTD(1)),
-    hist_10us UInt16 CODEC(ZSTD(1)),
-    hist_100us UInt16 CODEC(ZSTD(1)),
-    hist_1ms UInt16 CODEC(ZSTD(1)),
-    hist_10ms UInt16 CODEC(ZSTD(1)),
-    hist_100ms UInt16 CODEC(ZSTD(1)),
-    hist_1s UInt16 CODEC(ZSTD(1)),
-    hist_10s UInt16 CODEC(ZSTD(1)),
-    hist_100s UInt16 CODEC(ZSTD(1)),
-    hist_inf UInt16 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
 
-ALTER TABLE cpu_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'CPU/scheduler metrics: on-cpu time, off-cpu time, runqueue latency.',
-COMMENT COLUMN metric_name 'Metric: sched_on_cpu, sched_off_cpu, sched_runqueue';
+CREATE TABLE syscall_read ON CLUSTER '{cluster}' AS syscall_read_local
+ENGINE = Distributed('{cluster}', default, syscall_read_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
-CREATE TABLE cpu_metrics ON CLUSTER '{cluster}' AS cpu_metrics_local
-ENGINE = Distributed('{cluster}', default, cpu_metrics_local, rand());
-
-
---------------------------------------------------------------------------------
--- MEMORY METRICS: Page faults, swap, OOM, memory pressure
---------------------------------------------------------------------------------
-
-CREATE TABLE memory_metrics_local ON CLUSTER '{cluster}' (
+CREATE TABLE syscall_write_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    cl_syncing Bool CODEC(ZSTD(1)),
-    el_optimistic Bool CODEC(ZSTD(1)),
-    el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
     min Int64 CODEC(ZSTD(1)),
     max Int64 CODEC(ZSTD(1)),
-    hist_1us UInt16 CODEC(ZSTD(1)),
-    hist_10us UInt16 CODEC(ZSTD(1)),
-    hist_100us UInt16 CODEC(ZSTD(1)),
-    hist_1ms UInt16 CODEC(ZSTD(1)),
-    hist_10ms UInt16 CODEC(ZSTD(1)),
-    hist_100ms UInt16 CODEC(ZSTD(1)),
-    hist_1s UInt16 CODEC(ZSTD(1)),
-    hist_10s UInt16 CODEC(ZSTD(1)),
-    hist_100s UInt16 CODEC(ZSTD(1)),
-    hist_inf UInt16 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
 
-ALTER TABLE memory_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Memory metrics: page faults, swap, OOM kills, memory reclaim/compaction.',
-COMMENT COLUMN metric_name 'Metric: page_fault_major, page_fault_minor, mem_reclaim, mem_compaction, swap_in, swap_out, oom_kill';
+CREATE TABLE syscall_write ON CLUSTER '{cluster}' AS syscall_write_local
+ENGINE = Distributed('{cluster}', default, syscall_write_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
-CREATE TABLE memory_metrics ON CLUSTER '{cluster}' AS memory_metrics_local
-ENGINE = Distributed('{cluster}', default, memory_metrics_local, rand());
-
-
---------------------------------------------------------------------------------
--- DISK METRICS: Block I/O latency, throughput, queue depth
---------------------------------------------------------------------------------
-
-CREATE TABLE disk_metrics_local ON CLUSTER '{cluster}' (
+CREATE TABLE syscall_futex_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    cl_syncing Bool CODEC(ZSTD(1)),
-    el_optimistic Bool CODEC(ZSTD(1)),
-    el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_futex ON CLUSTER '{cluster}' AS syscall_futex_local
+ENGINE = Distributed('{cluster}', default, syscall_futex_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE syscall_mmap_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_mmap ON CLUSTER '{cluster}' AS syscall_mmap_local
+ENGINE = Distributed('{cluster}', default, syscall_mmap_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE syscall_epoll_wait_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_epoll_wait ON CLUSTER '{cluster}' AS syscall_epoll_wait_local
+ENGINE = Distributed('{cluster}', default, syscall_epoll_wait_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE syscall_fsync_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_fsync ON CLUSTER '{cluster}' AS syscall_fsync_local
+ENGINE = Distributed('{cluster}', default, syscall_fsync_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE syscall_fdatasync_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_fdatasync ON CLUSTER '{cluster}' AS syscall_fdatasync_local
+ENGINE = Distributed('{cluster}', default, syscall_fdatasync_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE syscall_pwrite_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE syscall_pwrite ON CLUSTER '{cluster}' AS syscall_pwrite_local
+ENGINE = Distributed('{cluster}', default, syscall_pwrite_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- SCHEDULER LATENCY TABLES (3 tables)
+-- CPU scheduling latency histograms
+--------------------------------------------------------------------------------
+
+CREATE TABLE sched_on_cpu_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE sched_on_cpu ON CLUSTER '{cluster}' AS sched_on_cpu_local
+ENGINE = Distributed('{cluster}', default, sched_on_cpu_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE sched_off_cpu_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE sched_off_cpu ON CLUSTER '{cluster}' AS sched_off_cpu_local
+ENGINE = Distributed('{cluster}', default, sched_off_cpu_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE sched_runqueue_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE sched_runqueue ON CLUSTER '{cluster}' AS sched_runqueue_local
+ENGINE = Distributed('{cluster}', default, sched_runqueue_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- MEMORY LATENCY TABLES (2 tables)
+-- Memory reclaim and compaction latency histograms
+--------------------------------------------------------------------------------
+
+CREATE TABLE mem_reclaim_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE mem_reclaim ON CLUSTER '{cluster}' AS mem_reclaim_local
+ENGINE = Distributed('{cluster}', default, mem_reclaim_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE mem_compaction_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE mem_compaction ON CLUSTER '{cluster}' AS mem_compaction_local
+ENGINE = Distributed('{cluster}', default, mem_compaction_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- DISK LATENCY TABLE (1 table)
+-- Block I/O latency histogram with device and rw dimensions
+--------------------------------------------------------------------------------
+
+CREATE TABLE disk_latency_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     device_id UInt32 CODEC(ZSTD(1)),
@@ -233,147 +652,441 @@ CREATE TABLE disk_metrics_local ON CLUSTER '{cluster}' (
     count UInt32 CODEC(ZSTD(1)),
     min Int64 CODEC(ZSTD(1)),
     max Int64 CODEC(ZSTD(1)),
-    hist_1us UInt16 CODEC(ZSTD(1)),
-    hist_10us UInt16 CODEC(ZSTD(1)),
-    hist_100us UInt16 CODEC(ZSTD(1)),
-    hist_1ms UInt16 CODEC(ZSTD(1)),
-    hist_10ms UInt16 CODEC(ZSTD(1)),
-    hist_100ms UInt16 CODEC(ZSTD(1)),
-    hist_1s UInt16 CODEC(ZSTD(1)),
-    hist_10s UInt16 CODEC(ZSTD(1)),
-    hist_100s UInt16 CODEC(ZSTD(1)),
-    hist_inf UInt16 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    hist_1us UInt32 CODEC(ZSTD(1)),
+    hist_10us UInt32 CODEC(ZSTD(1)),
+    hist_100us UInt32 CODEC(ZSTD(1)),
+    hist_1ms UInt32 CODEC(ZSTD(1)),
+    hist_10ms UInt32 CODEC(ZSTD(1)),
+    hist_100ms UInt32 CODEC(ZSTD(1)),
+    hist_1s UInt32 CODEC(ZSTD(1)),
+    hist_10s UInt32 CODEC(ZSTD(1)),
+    hist_100s UInt32 CODEC(ZSTD(1)),
+    hist_inf UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, device_id, rw);
 
-ALTER TABLE disk_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Disk I/O metrics: latency, throughput, queue depth, block merges.',
-COMMENT COLUMN metric_name 'Metric: disk_latency, disk_bytes, disk_queue_depth, block_merge',
-COMMENT COLUMN device_id 'Block device ID (major:minor encoded)',
-COMMENT COLUMN rw 'Read/write indicator: read, write';
-
-CREATE TABLE disk_metrics ON CLUSTER '{cluster}' AS disk_metrics_local
-ENGINE = Distributed('{cluster}', default, disk_metrics_local, rand());
+CREATE TABLE disk_latency ON CLUSTER '{cluster}' AS disk_latency_local
+ENGINE = Distributed('{cluster}', default, disk_latency_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 
 --------------------------------------------------------------------------------
--- NETWORK METRICS: Network I/O, TCP retransmits, RTT, congestion window
+-- COUNTER TABLES - MEMORY (5 tables)
+-- Simple count/sum aggregations for memory events
 --------------------------------------------------------------------------------
 
-CREATE TABLE network_metrics_local ON CLUSTER '{cluster}' (
+CREATE TABLE page_fault_major_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    cl_syncing Bool CODEC(ZSTD(1)),
-    el_optimistic Bool CODEC(ZSTD(1)),
-    el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE page_fault_major ON CLUSTER '{cluster}' AS page_fault_major_local
+ENGINE = Distributed('{cluster}', default, page_fault_major_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE page_fault_minor_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE page_fault_minor ON CLUSTER '{cluster}' AS page_fault_minor_local
+ENGINE = Distributed('{cluster}', default, page_fault_minor_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE swap_in_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE swap_in ON CLUSTER '{cluster}' AS swap_in_local
+ENGINE = Distributed('{cluster}', default, swap_in_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE swap_out_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE swap_out ON CLUSTER '{cluster}' AS swap_out_local
+ENGINE = Distributed('{cluster}', default, swap_out_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE oom_kill_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE oom_kill ON CLUSTER '{cluster}' AS oom_kill_local
+ENGINE = Distributed('{cluster}', default, oom_kill_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- COUNTER TABLES - PROCESS (3 tables)
+-- File descriptor and process exit counters
+--------------------------------------------------------------------------------
+
+CREATE TABLE fd_open_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE fd_open ON CLUSTER '{cluster}' AS fd_open_local
+ENGINE = Distributed('{cluster}', default, fd_open_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE fd_close_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE fd_close ON CLUSTER '{cluster}' AS fd_close_local
+ENGINE = Distributed('{cluster}', default, fd_close_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE process_exit_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE process_exit ON CLUSTER '{cluster}' AS process_exit_local
+ENGINE = Distributed('{cluster}', default, process_exit_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- COUNTER TABLES - NETWORK (3 tables)
+-- TCP state changes, network I/O, and retransmits
+--------------------------------------------------------------------------------
+
+CREATE TABLE tcp_state_change_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type);
+
+CREATE TABLE tcp_state_change ON CLUSTER '{cluster}' AS tcp_state_change_local
+ENGINE = Distributed('{cluster}', default, tcp_state_change_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE net_io_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     local_port UInt16 CODEC(ZSTD(1)),
     direction LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
-    min Int64 CODEC(ZSTD(1)),
-    max Int64 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, local_port, direction);
 
-ALTER TABLE network_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Network metrics: I/O throughput, TCP retransmits, RTT, congestion window.',
-COMMENT COLUMN metric_name 'Metric: net_io, tcp_retransmit, tcp_rtt, tcp_cwnd, tcp_state_change',
-COMMENT COLUMN local_port 'Local port number',
-COMMENT COLUMN direction 'Network direction: tx, rx';
+CREATE TABLE net_io ON CLUSTER '{cluster}' AS net_io_local
+ENGINE = Distributed('{cluster}', default, net_io_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
-CREATE TABLE network_metrics ON CLUSTER '{cluster}' AS network_metrics_local
-ENGINE = Distributed('{cluster}', default, network_metrics_local, rand());
-
-
---------------------------------------------------------------------------------
--- SYSCALL METRICS: Syscall latencies (read, write, fsync, etc.)
---------------------------------------------------------------------------------
-
-CREATE TABLE syscall_metrics_local ON CLUSTER '{cluster}' (
+CREATE TABLE tcp_retransmit_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    cl_syncing Bool CODEC(ZSTD(1)),
-    el_optimistic Bool CODEC(ZSTD(1)),
-    el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
+    local_port UInt16 CODEC(ZSTD(1)),
+    direction LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, local_port, direction);
+
+CREATE TABLE tcp_retransmit ON CLUSTER '{cluster}' AS tcp_retransmit_local
+ENGINE = Distributed('{cluster}', default, tcp_retransmit_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- COUNTER TABLES - DISK (2 tables)
+-- Disk bytes throughput and block merge counters
+--------------------------------------------------------------------------------
+
+CREATE TABLE disk_bytes_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    device_id UInt32 CODEC(ZSTD(1)),
+    rw LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, device_id, rw);
+
+CREATE TABLE disk_bytes ON CLUSTER '{cluster}' AS disk_bytes_local
+ENGINE = Distributed('{cluster}', default, disk_bytes_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+CREATE TABLE block_merge_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    device_id UInt32 CODEC(ZSTD(1)),
+    rw LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, device_id, rw);
+
+CREATE TABLE block_merge ON CLUSTER '{cluster}' AS block_merge_local
+ENGINE = Distributed('{cluster}', default, block_merge_local, cityHash64(window_start, meta_network_name, meta_client_name));
+
+
+--------------------------------------------------------------------------------
+-- GAUGE TABLES (3 tables)
+-- Sampled values with min/max/sum/count (no histogram)
+--------------------------------------------------------------------------------
+
+CREATE TABLE tcp_rtt_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    local_port UInt16 CODEC(ZSTD(1)),
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
     min Int64 CODEC(ZSTD(1)),
     max Int64 CODEC(ZSTD(1)),
-    hist_1us UInt16 CODEC(ZSTD(1)),
-    hist_10us UInt16 CODEC(ZSTD(1)),
-    hist_100us UInt16 CODEC(ZSTD(1)),
-    hist_1ms UInt16 CODEC(ZSTD(1)),
-    hist_10ms UInt16 CODEC(ZSTD(1)),
-    hist_100ms UInt16 CODEC(ZSTD(1)),
-    hist_1s UInt16 CODEC(ZSTD(1)),
-    hist_10s UInt16 CODEC(ZSTD(1)),
-    hist_100s UInt16 CODEC(ZSTD(1)),
-    hist_inf UInt16 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, local_port);
 
-ALTER TABLE syscall_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Syscall latency metrics for I/O and synchronization operations.',
-COMMENT COLUMN metric_name 'Metric: syscall_read, syscall_write, syscall_fsync, syscall_fdatasync, syscall_pwrite, syscall_futex, syscall_mmap, syscall_epoll_wait';
+CREATE TABLE tcp_rtt ON CLUSTER '{cluster}' AS tcp_rtt_local
+ENGINE = Distributed('{cluster}', default, tcp_rtt_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
-CREATE TABLE syscall_metrics ON CLUSTER '{cluster}' AS syscall_metrics_local
-ENGINE = Distributed('{cluster}', default, syscall_metrics_local, rand());
-
-
---------------------------------------------------------------------------------
--- PROCESS METRICS: File descriptor operations, process exit
---------------------------------------------------------------------------------
-
-CREATE TABLE process_metrics_local ON CLUSTER '{cluster}' (
+CREATE TABLE tcp_cwnd_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    cl_syncing Bool CODEC(ZSTD(1)),
-    el_optimistic Bool CODEC(ZSTD(1)),
-    el_offline Bool CODEC(ZSTD(1)),
-    metric_name LowCardinality(String),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
+    local_port UInt16 CODEC(ZSTD(1)),
     sum Int64 CODEC(ZSTD(1)),
     count UInt32 CODEC(ZSTD(1)),
-    meta_node_name LowCardinality(String),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
-) ENGINE = ReplicatedMergeTree(
+) ENGINE = ReplicatedReplacingMergeTree(
     '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
-    '{replica}'
+    '{replica}',
+    updated_date_time
 )
 PARTITION BY toStartOfMonth(window_start)
-ORDER BY (window_start, meta_network_name, client_type, metric_name, pid);
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, local_port);
 
-ALTER TABLE process_metrics_local ON CLUSTER '{cluster}'
-MODIFY COMMENT 'Process lifecycle metrics: file descriptor operations, process exit.',
-COMMENT COLUMN metric_name 'Metric: fd_open, fd_close, process_exit';
+CREATE TABLE tcp_cwnd ON CLUSTER '{cluster}' AS tcp_cwnd_local
+ENGINE = Distributed('{cluster}', default, tcp_cwnd_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
-CREATE TABLE process_metrics ON CLUSTER '{cluster}' AS process_metrics_local
-ENGINE = Distributed('{cluster}', default, process_metrics_local, rand());
+CREATE TABLE disk_queue_depth_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    interval_ms UInt16 CODEC(ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    pid UInt32 CODEC(ZSTD(1)),
+    client_type LowCardinality(String),
+    device_id UInt32 CODEC(ZSTD(1)),
+    rw LowCardinality(String),
+    sum Int64 CODEC(ZSTD(1)),
+    count UInt32 CODEC(ZSTD(1)),
+    min Int64 CODEC(ZSTD(1)),
+    max Int64 CODEC(ZSTD(1)),
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(window_start)
+ORDER BY (window_start, meta_network_name, meta_client_name, pid, client_type, device_id, rw);
+
+CREATE TABLE disk_queue_depth ON CLUSTER '{cluster}' AS disk_queue_depth_local
+ENGINE = Distributed('{cluster}', default, disk_queue_depth_local, cityHash64(window_start, meta_network_name, meta_client_name));

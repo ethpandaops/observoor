@@ -90,9 +90,14 @@ func (s *Sink) Start(ctx context.Context) error {
 	ctx, s.cancel = context.WithCancel(ctx)
 
 	// Initialize first buffer with current sync state.
+	now := time.Now()
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
 	s.buffer.Store(NewBuffer(
-		time.Now(),
+		now,
 		0,
+		slotStartTime,
 		s.clSyncing.Load() == 1,
 		s.elOptimistic.Load() == 1,
 		s.elOffline.Load() == 1,
@@ -181,6 +186,15 @@ func (s *Sink) runLoop(ctx context.Context) {
 	ticker := time.NewTicker(s.cfg.Resolution.Interval)
 	defer ticker.Stop()
 
+	// Sync state ticker - default to 12s if not configured.
+	syncInterval := s.cfg.Resolution.SyncStatePollInterval
+	if syncInterval <= 0 {
+		syncInterval = 12 * time.Second
+	}
+
+	syncTicker := time.NewTicker(syncInterval)
+	defer syncTicker.Stop()
+
 	// Batch size for draining events.
 	const batchSize = 256
 
@@ -202,6 +216,8 @@ func (s *Sink) runLoop(ctx context.Context) {
 			}
 
 			s.tickFlush(ctx)
+		case <-syncTicker.C:
+			s.flushSyncState(ctx)
 		}
 	}
 }
@@ -394,9 +410,13 @@ func (s *Sink) tickFlush(ctx context.Context) {
 
 // rotateBuffer swaps the current buffer with a new one and flushes the old one.
 func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
 	newBuf := NewBuffer(
 		now,
 		slot,
+		slotStartTime,
 		s.clSyncing.Load() == 1,
 		s.elOptimistic.Load() == 1,
 		s.elOffline.Load() == 1,
@@ -428,4 +448,25 @@ func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 	}
 
 	return err
+}
+
+// flushSyncState writes the current sync state to ClickHouse.
+func (s *Sink) flushSyncState(ctx context.Context) {
+	now := time.Now()
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
+	row := syncStateRow{
+		UpdatedDateTime:            now,
+		EventTime:                  now,
+		WallclockSlot:              uint32(s.currentSlot.Load()),
+		WallclockSlotStartDateTime: slotStartTime,
+		CLSyncing:                  s.clSyncing.Load() == 1,
+		ELOptimistic:               s.elOptimistic.Load() == 1,
+		ELOffline:                  s.elOffline.Load() == 1,
+	}
+
+	if err := FlushSyncState(ctx, s.writer, s.cfg, s.health, row); err != nil {
+		s.log.WithError(err).Error("Sync state flush failed")
+	}
 }
