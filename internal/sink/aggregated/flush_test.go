@@ -47,7 +47,7 @@ func TestMakeLatencyRow_HistogramConversion(t *testing.T) {
 	assert.Equal(t, int64(50000), row.Max)
 
 	// Verify histogram conversion from uint64 to uint32.
-	expected := [10]uint32{10, 20, 30, 15, 10, 5, 3, 2, 1, 4}
+	expected := []uint32{10, 20, 30, 15, 10, 5, 3, 2, 1, 4}
 	assert.Equal(t, expected, row.Histogram)
 }
 
@@ -78,7 +78,7 @@ func TestMakeLatencyRow_HistogramZeroValues(t *testing.T) {
 
 	row := f.makeLatencyRow(dim, snap)
 
-	expected := [10]uint32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	expected := []uint32{0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	assert.Equal(t, expected, row.Histogram)
 }
 
@@ -112,7 +112,7 @@ func TestMakeLatencyRow_HistogramLargeValues(t *testing.T) {
 
 	row := f.makeLatencyRow(dim, snap)
 
-	expected := [10]uint32{
+	expected := []uint32{
 		1000000, 2000000, 3000000, 4000000, 5000000,
 		1000000, 500000, 100000, 10000, 1000,
 	}
@@ -163,7 +163,7 @@ func TestMakeDiskLatencyRow_HistogramConversion(t *testing.T) {
 	assert.Equal(t, int64(100000), row.Max)
 
 	// Verify histogram.
-	expected := [10]uint32{5, 10, 15, 10, 5, 3, 1, 1, 0, 0}
+	expected := []uint32{5, 10, 15, 10, 5, 3, 1, 1, 0, 0}
 	assert.Equal(t, expected, row.Histogram)
 }
 
@@ -251,25 +251,25 @@ func TestLatencyRow_HistogramIndexMapping(t *testing.T) {
 }
 
 func TestLatencyRowStruct_HasCorrectHistogramField(t *testing.T) {
-	// Verify the struct has a [10]uint32 Histogram field, not individual fields.
+	// Verify the struct has a []uint32 Histogram field, not individual fields.
 	row := latencyRow{
-		Histogram: [10]uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
+		Histogram: []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10},
 	}
 
-	assert.Equal(t, [10]uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, row.Histogram)
+	assert.Equal(t, []uint32{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, row.Histogram)
 }
 
 func TestDiskLatencyRowStruct_InheritsHistogramField(t *testing.T) {
 	// Verify diskLatencyRow inherits Histogram from embedded latencyRow.
 	row := diskLatencyRow{
 		latencyRow: latencyRow{
-			Histogram: [10]uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100},
+			Histogram: []uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100},
 		},
 		DeviceID: 123,
 		RW:       "read",
 	}
 
-	assert.Equal(t, [10]uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, row.Histogram)
+	assert.Equal(t, []uint32{10, 20, 30, 40, 50, 60, 70, 80, 90, 100}, row.Histogram)
 	assert.Equal(t, uint32(123), row.DeviceID)
 	assert.Equal(t, "read", row.RW)
 }

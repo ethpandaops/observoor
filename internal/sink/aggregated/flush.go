@@ -27,7 +27,7 @@ type latencyRow struct {
 	Count                      uint32
 	Min                        int64
 	Max                        int64
-	Histogram                  [10]uint32 // Tuple: le_1us, le_10us, le_100us, le_1ms, le_10ms, le_100ms, le_1s, le_10s, le_100s, inf
+	Histogram                  []uint32 // Tuple: le_1us, le_10us, le_100us, le_1ms, le_10ms, le_100ms, le_1s, le_10s, le_100s, inf
 }
 
 // diskLatencyRow is for disk_latency table with device_id and rw dimensions.
@@ -605,8 +605,8 @@ func (f *flusher) collectProcess() {
 // Row construction helpers.
 
 func (f *flusher) makeLatencyRow(dim BasicDimension, snap LatencySnapshot) latencyRow {
-	var hist [10]uint32
-	for i := 0; i < 10; i++ {
+	hist := make([]uint32, 10)
+	for i := range 10 {
 		hist[i] = uint32(snap.Histogram[i])
 	}
 
@@ -627,8 +627,8 @@ func (f *flusher) makeLatencyRow(dim BasicDimension, snap LatencySnapshot) laten
 }
 
 func (f *flusher) makeDiskLatencyRow(dim DiskDimension, snap LatencySnapshot) diskLatencyRow {
-	var hist [10]uint32
-	for i := 0; i < 10; i++ {
+	hist := make([]uint32, 10)
+	for i := range 10 {
 		hist[i] = uint32(snap.Histogram[i])
 	}
 
