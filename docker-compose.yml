@@ -15,19 +15,6 @@ services:
       retries: 30
       start_period: 30s
 
-  migrate:
-    image: migrate/migrate:v4.17.0
-    depends_on:
-      clickhouse:
-        condition: service_healthy
-    volumes:
-      - ./deploy/migrations/clickhouse:/migrations:ro
-    command: [
-      "-source", "file:///migrations",
-      "-database", "clickhouse://clickhouse:9000/default?x-multi-statement=true",
-      "up"
-    ]
-
   observoor:
     build:
       context: .
@@ -36,8 +23,8 @@ services:
     pid: host
     network_mode: host
     depends_on:
-      migrate:
-        condition: service_completed_successfully
+      clickhouse:
+        condition: service_healthy
     volumes:
       - /sys/kernel/debug:/sys/kernel/debug:ro
       - /sys/fs/bpf:/sys/fs/bpf:rw

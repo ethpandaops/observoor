@@ -49,6 +49,8 @@ sinks:
       table: aggregated_metrics
       batch_size: 5000
       flush_interval: 500ms
+      migrations:
+        enabled: true
 
 health:
   addr: ":9090"
