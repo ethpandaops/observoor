@@ -39,7 +39,7 @@ spec:
     app.kubernetes.io/name: clickhouse
 ---
 apiVersion: apps/v1
-kind: StatefulSet
+kind: Deployment
 metadata:
   name: clickhouse
   namespace: observoor-test
@@ -47,7 +47,6 @@ metadata:
     app.kubernetes.io/name: clickhouse
     app.kubernetes.io/part-of: observoor-e2e
 spec:
-  serviceName: clickhouse
   replicas: 1
   selector:
     matchLabels:
@@ -93,14 +92,8 @@ spec:
             - name: config
               mountPath: /etc/clickhouse-server/config.d
       volumes:
+        - name: data
+          emptyDir: {}
         - name: config
           configMap:
             name: clickhouse-config
-  volumeClaimTemplates:
-    - metadata:
-        name: data
-      spec:
-        accessModes: ["ReadWriteOnce"]
-        resources:
-          requests:
-            storage: 1Gi

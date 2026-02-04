@@ -26,7 +26,7 @@ kubectl apply -f "${MANIFESTS_DIR}/clickhouse.yaml"
 
 # Wait for ClickHouse to be ready.
 echo "Waiting for ClickHouse to be ready..."
-kubectl -n observoor-test rollout status statefulset/clickhouse --timeout=180s
+kubectl -n observoor-test rollout status deployment/clickhouse --timeout=180s
 
 # Update ConfigMap with beacon endpoint.
 echo "Configuring observoor with beacon endpoint..."
