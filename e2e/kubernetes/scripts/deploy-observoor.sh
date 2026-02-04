@@ -33,7 +33,7 @@ echo "Waiting for ClickHouse to accept connections..."
 for i in $(seq 1 60); do
     if kubectl -n observoor-test exec deployment/clickhouse -- \
         clickhouse-client --query "SELECT 1" > /dev/null 2>&1; then
-        echo "ClickHouse is ready"
+        echo "ClickHouse is accepting connections"
         break
     fi
     if [ $i -eq 60 ]; then
@@ -42,6 +42,22 @@ for i in $(seq 1 60); do
         exit 1
     fi
     echo "Waiting for ClickHouse... (attempt $i)"
+    sleep 2
+done
+
+# Wait for embedded Keeper to be ready (required for ReplicatedMergeTree).
+echo "Waiting for ClickHouse Keeper to be ready..."
+for i in $(seq 1 30); do
+    if kubectl -n observoor-test exec deployment/clickhouse -- \
+        clickhouse-client --query "SELECT count() FROM system.zookeeper WHERE path = '/'" > /dev/null 2>&1; then
+        echo "ClickHouse Keeper is ready"
+        break
+    fi
+    if [ $i -eq 30 ]; then
+        echo "WARNING: Keeper readiness check timed out, proceeding anyway"
+        break
+    fi
+    echo "Waiting for Keeper... (attempt $i)"
     sleep 2
 done
 
