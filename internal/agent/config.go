@@ -83,6 +83,14 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("beacon.endpoint is required")
 	}
 
+	if c.MetaClientName == "" {
+		return fmt.Errorf("meta_client_name is required")
+	}
+
+	if c.MetaNetworkName == "" {
+		return fmt.Errorf("meta_network_name is required")
+	}
+
 	// If no PID discovery method is configured, use default process names
 	// for all known Ethereum clients.
 	if len(c.PID.ProcessNames) == 0 && c.PID.CgroupPath == "" {

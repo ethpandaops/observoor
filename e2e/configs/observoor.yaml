@@ -1,5 +1,8 @@
 log_level: debug
 
+meta_client_name: "e2e-test"
+meta_network_name: "e2e-devnet"
+
 beacon:
   endpoint: "http://prysm:3500"
   timeout: 10s

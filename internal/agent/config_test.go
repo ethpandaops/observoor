@@ -22,6 +22,8 @@ func TestDefaultConfig(t *testing.T) {
 func TestLoadConfig(t *testing.T) {
 	yaml := `
 log_level: debug
+meta_client_name: "test-client"
+meta_network_name: "testnet"
 beacon:
   endpoint: "http://localhost:3500"
   timeout: 5s
@@ -51,6 +53,8 @@ ring_buffer_size: 8388608
 	require.NoError(t, err)
 
 	assert.Equal(t, "debug", cfg.LogLevel)
+	assert.Equal(t, "test-client", cfg.MetaClientName)
+	assert.Equal(t, "testnet", cfg.MetaNetworkName)
 	assert.Equal(t, "http://localhost:3500", cfg.Beacon.Endpoint)
 	assert.Equal(t, []string{"geth", "prysm"}, cfg.PID.ProcessNames)
 	assert.Equal(t,
@@ -82,6 +86,8 @@ func TestLoadConfig_InvalidYAML(t *testing.T) {
 
 func TestValidate_MissingBeaconEndpoint(t *testing.T) {
 	cfg := DefaultConfig()
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
 	cfg.PID.ProcessNames = []string{"geth"}
 
 	err := cfg.Validate()
@@ -89,9 +95,33 @@ func TestValidate_MissingBeaconEndpoint(t *testing.T) {
 	assert.Contains(t, err.Error(), "beacon.endpoint is required")
 }
 
+func TestValidate_MissingMetaClientName(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaNetworkName = "testnet"
+	cfg.PID.ProcessNames = []string{"geth"}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "meta_client_name is required")
+}
+
+func TestValidate_MissingMetaNetworkName(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.PID.ProcessNames = []string{"geth"}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "meta_network_name is required")
+}
+
 func TestValidate_DefaultsPIDConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
 
 	// When no PID config is specified, Validate should apply defaults.
 	err := cfg.Validate()
@@ -102,6 +132,8 @@ func TestValidate_DefaultsPIDConfig(t *testing.T) {
 func TestValidate_InvalidRingBufferSize(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
 	cfg.PID.ProcessNames = []string{"geth"}
 	cfg.RingBufferSize = 0
 
@@ -113,6 +145,8 @@ func TestValidate_InvalidRingBufferSize(t *testing.T) {
 func TestValidate_ValidConfig(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
 	cfg.PID.ProcessNames = []string{"geth"}
 
 	err := cfg.Validate()
@@ -122,6 +156,8 @@ func TestValidate_ValidConfig(t *testing.T) {
 func TestValidate_CgroupPathOnly(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
 	cfg.PID.CgroupPath = "/sys/fs/cgroup/test"
 
 	err := cfg.Validate()
