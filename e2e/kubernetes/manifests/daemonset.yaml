@@ -24,6 +24,15 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       hostPID: true
+      # Schedule on worker node where Kurtosis pods run (control-plane has taints)
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: node-role.kubernetes.io/control-plane
+                    operator: DoesNotExist
       containers:
         - name: observoor
           image: observoor:latest
