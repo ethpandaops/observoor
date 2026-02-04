@@ -45,6 +45,11 @@ for i in $(seq 1 60); do
     sleep 2
 done
 
+# Clear any leftover migration state (prevents dirty migration issues on restart).
+echo "Clearing migration state..."
+kubectl -n observoor-test exec deployment/clickhouse -- \
+    clickhouse-client --query "DROP TABLE IF EXISTS schema_migrations" || true
+
 # Update ConfigMap with beacon endpoint.
 echo "Configuring observoor with beacon endpoint..."
 sed "s|\${BEACON_ENDPOINT}|${BEACON_ENDPOINT}|g" "${MANIFESTS_DIR}/configmap.yaml" | kubectl apply -f -
