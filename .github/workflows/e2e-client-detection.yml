@@ -117,9 +117,12 @@ jobs:
 
       - name: Install kubectl
         run: |
-          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          # Use fixed version to avoid flaky network issues with stable.txt
+          KUBECTL_VERSION="v1.31.0"
+          curl -LO --retry 3 --retry-delay 5 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
           chmod +x kubectl
           sudo mv kubectl /usr/local/bin/kubectl
+          kubectl version --client
 
       - name: Install Kurtosis
         run: |
