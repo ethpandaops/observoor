@@ -1,5 +1,5 @@
 #!/bin/bash
-# Deploy ClickHouse and observoor to the KIND cluster.
+# Deploy ClickHouse and observoor to the K3s cluster.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

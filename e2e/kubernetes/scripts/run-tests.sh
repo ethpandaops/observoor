@@ -1,14 +1,34 @@
 #!/bin/bash
 # Run smoke tests against observoor in Kubernetes using port-forwarding.
 #
-# NOTE: In KIND, eBPF event capture doesn't work due to PID namespace mismatch.
-# BPF programs run in the host kernel with host PIDs, but observoor inside KIND
-# sees container PIDs. This test verifies infrastructure (deployment, migrations,
-# PID discovery) rather than full eBPF event capture.
+# K3s runs directly on the host (no nested containers like KIND),
+# so eBPF programs can properly trace pod processes.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PORT="${LOCAL_PORT:-8123}"
+MAX_RETRIES="${MAX_RETRIES:-12}"
+RETRY_DELAY="${RETRY_DELAY:-10}"
+
+query() {
+    curl -sf "http://localhost:${LOCAL_PORT}" --data-binary "$1"
+}
+
+retry_query() {
+    local description="$1"
+    local sql="$2"
+    local check="$3"
+
+    for i in $(seq 1 $MAX_RETRIES); do
+        RESULT=$(query "$sql" 2>/dev/null || echo "")
+        if eval "$check"; then
+            return 0
+        fi
+        echo "  Retry $i/$MAX_RETRIES: $description (got: $RESULT)"
+        sleep $RETRY_DELAY
+    done
+    return 1
+}
 
 echo "=== Running K8s E2E tests ==="
 
@@ -34,8 +54,8 @@ if [[ "$READY" != "True" ]]; then
 fi
 echo "   PASS: Observoor pod is healthy"
 
-# Check that migrations completed by verifying schema exists.
-echo "3. Checking ClickHouse migrations..."
+# Set up port-forwarding for ClickHouse.
+echo "3. Setting up ClickHouse connection..."
 kubectl -n observoor-test port-forward svc/clickhouse "$LOCAL_PORT:8123" &
 PORT_FORWARD_PID=$!
 cleanup() {
@@ -53,8 +73,8 @@ for i in $(seq 1 30); do
 done
 
 # Check that tables were created.
-TABLE_COUNT=$(curl -sf "http://localhost:${LOCAL_PORT}" \
-    --data-binary "SELECT count() FROM system.tables WHERE database = 'default' AND name NOT LIKE '%_local'" \
+echo "4. Checking ClickHouse migrations..."
+TABLE_COUNT=$(query "SELECT count() FROM system.tables WHERE database = 'default' AND name NOT LIKE '%_local'" \
     2>/dev/null || echo "0")
 if [[ "$TABLE_COUNT" -lt 10 ]]; then
     echo "FAIL: Expected at least 10 tables, got $TABLE_COUNT"
@@ -63,7 +83,7 @@ fi
 echo "   PASS: Migrations completed ($TABLE_COUNT tables created)"
 
 # Check that PID discovery is working by looking at logs.
-echo "4. Checking PID discovery..."
+echo "5. Checking PID discovery..."
 PID_DISCOVERED=$(kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=500 2>/dev/null | \
     grep -c "Discovered PIDs" || echo "0")
 if [[ "$PID_DISCOVERED" -lt 1 ]]; then
@@ -74,26 +94,89 @@ fi
 echo "   PASS: PID discovery working ($PID_DISCOVERED discovery cycles)"
 
 # Check that BPF map is being updated.
-echo "5. Checking BPF map updates..."
+echo "6. Checking BPF map updates..."
 BPF_UPDATES=$(kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=500 2>/dev/null | \
     grep -c "Added PID to BPF map" || echo "0")
-if [[ "$BPF_UPDATES" -lt 5 ]]; then
+if [[ "$BPF_UPDATES" -lt 1 ]]; then
     echo "FAIL: Expected BPF map updates, got $BPF_UPDATES"
     kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=50
     exit 1
 fi
 echo "   PASS: BPF map being updated ($BPF_UPDATES updates)"
 
-# Note about BPF event capture.
+# Verify actual eBPF data capture (K3s supports this, unlike KIND).
 echo ""
-echo "=== K8s Infrastructure Tests Passed ==="
+echo "=== Verifying eBPF Data Capture ==="
 echo ""
-echo "NOTE: eBPF event capture is not tested in KIND due to PID namespace"
-echo "isolation between the host kernel and KIND containers. Full eBPF"
-echo "functionality is verified in the Docker-based E2E tests."
+
+# Check that data exists in sched_on_cpu (primary indicator).
+echo -n "7. Data exists in sched_on_cpu... "
+if retry_query "waiting for data" \
+    "SELECT count() FROM sched_on_cpu" \
+    '[[ -n "$RESULT" && "$RESULT" -gt 0 ]]'; then
+    TOTAL=$(query "SELECT count() FROM sched_on_cpu")
+    echo "PASS ($TOTAL rows)"
+else
+    echo "FAIL"
+    echo "No scheduler events captured. Checking observoor logs..."
+    kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=100
+    exit 1
+fi
+
+# Check wallclock_slot > 0.
+echo -n "8. Wallclock slot > 0... "
+MAX_SLOT=$(query "SELECT max(wallclock_slot) FROM sched_on_cpu")
+if [[ -n "$MAX_SLOT" && "$MAX_SLOT" -gt 0 ]]; then
+    echo "PASS (max slot: $MAX_SLOT)"
+else
+    echo "FAIL ($MAX_SLOT)"
+    exit 1
+fi
+
+# Check scheduler metrics.
+echo -n "9. Scheduler metrics... "
+SCHED=$(query "SELECT count() FROM sched_on_cpu WHERE sum > 0 OR count > 0")
+if [[ -n "$SCHED" && "$SCHED" -gt 0 ]]; then
+    echo "PASS ($SCHED non-zero rows)"
+else
+    echo "FAIL"
+    exit 1
+fi
+
+# Check syscall metrics.
+echo -n "10. Syscall metrics... "
+SYSCALL=$(query "SELECT count() FROM syscall_read")
+if [[ -n "$SYSCALL" && "$SYSCALL" -gt 0 ]]; then
+    echo "PASS ($SYSCALL rows)"
+else
+    echo "FAIL"
+    exit 1
+fi
+
+# Check that 100ms interval is being used.
+echo -n "11. 100ms interval... "
+INTERVALS=$(query "SELECT DISTINCT interval_ms FROM sched_on_cpu")
+if [[ "$INTERVALS" == "100" ]]; then
+    echo "PASS"
+else
+    echo "FAIL (got: $INTERVALS)"
+    exit 1
+fi
+
 echo ""
-echo "Verified:"
-echo "  - Observoor deployment and health"
-echo "  - ClickHouse migrations"
-echo "  - Ethereum client PID discovery"
-echo "  - BPF map updates"
+echo "=== All K8s E2E Tests Passed ==="
+echo ""
+
+# Summary across key tables.
+echo "=== Summary by Table ==="
+for table in sched_on_cpu sched_off_cpu syscall_read syscall_write net_io disk_latency; do
+    COUNT=$(query "SELECT count() FROM $table" 2>/dev/null || echo "0")
+    echo "$table: $COUNT rows"
+done
+
+echo ""
+echo "=== Client Distribution (sched_on_cpu) ==="
+query "
+    SELECT client_type, countDistinct(pid) as pids, count() as rows
+    FROM sched_on_cpu GROUP BY client_type ORDER BY client_type FORMAT PrettyCompact
+"

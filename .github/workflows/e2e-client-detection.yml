@@ -100,7 +100,9 @@ jobs:
           kurtosis enclave rm -f observoor-test || true
           kurtosis engine stop || true
 
-  # Kubernetes-based E2E tests using KIND with Kurtosis K8s backend.
+  # Kubernetes-based E2E tests using K3s with Kurtosis K8s backend.
+  # K3s runs directly on the host (no nested containers like KIND),
+  # so eBPF programs can properly trace pod processes.
   e2e-kubernetes:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -109,20 +111,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install KIND
+      - name: Install K3s
         run: |
-          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
-          chmod +x ./kind
-          sudo mv ./kind /usr/local/bin/kind
+          # Install K3s without traefik (we don't need ingress)
+          curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik" sh -
 
-      - name: Install kubectl
-        run: |
-          # Use fixed version to avoid flaky network issues with stable.txt
-          KUBECTL_VERSION="v1.31.0"
-          curl -LO --retry 3 --retry-delay 5 "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
-          chmod +x kubectl
-          sudo mv kubectl /usr/local/bin/kubectl
-          kubectl version --client
+          # Wait for K3s to be ready
+          sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
+
+          # Set up kubeconfig for non-root access
+          mkdir -p ~/.kube
+          sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+          sudo chown $USER:$USER ~/.kube/config
+          chmod 600 ~/.kube/config
+
+          kubectl get nodes
 
       - name: Install Kurtosis
         run: |
@@ -145,15 +148,19 @@ jobs:
       - name: Build observoor
         run: make docker-build
 
-      - name: Create KIND cluster with eBPF support
+      - name: Import observoor image to K3s
         run: |
-          kind create cluster --name observoor-e2e --config e2e/kubernetes/kind-config.yaml
-          kubectl wait --for=condition=Ready nodes --all --timeout=120s
-          kind load docker-image observoor:latest --name observoor-e2e
+          # Save docker image and import to K3s containerd
+          docker save observoor:latest -o /tmp/observoor.tar
+          sudo k3s ctr images import /tmp/observoor.tar
+          rm /tmp/observoor.tar
 
-      - name: Configure Kurtosis for Kubernetes backend
+          # Verify image is available
+          sudo k3s ctr images ls | grep observoor
+
+      - name: Configure Kurtosis for K3s backend
         run: |
-          # Configure Kurtosis to use the KIND cluster
+          # Configure Kurtosis to use K3s
           KURTOSIS_CONFIG=$(kurtosis config path)
           cat > "$KURTOSIS_CONFIG" <<EOF
           config-version: 2
@@ -161,46 +168,36 @@ jobs:
           kurtosis-clusters:
             docker:
               type: "docker"
-            kind-observoor-e2e:
+            k3s-local:
               type: "kubernetes"
               config:
-                kubernetes-cluster-name: "kind-observoor-e2e"
-                storage-class: "standard"
+                kubernetes-cluster-name: "default"
+                storage-class: "local-path"
                 enclave-size-in-megabytes: 10
           EOF
-          # Set the cluster to use KIND
-          kurtosis cluster set kind-observoor-e2e
 
-          # Start gateway first (required for CLI to communicate with K8s engine)
+          # Set the cluster to use K3s
+          kurtosis cluster set k3s-local
+
+          # Start gateway (required for CLI to communicate with K8s engine)
           echo "Starting Kurtosis gateway..."
           nohup kurtosis gateway > /tmp/kurtosis-gateway.log 2>&1 &
-          GATEWAY_PID=$!
-          echo "Gateway started with PID: $GATEWAY_PID"
-
-          # Wait for gateway to initialize
           sleep 10
 
-          # Start the engine (gateway must be running first for K8s backend)
+          # Start the engine
           echo "Starting Kurtosis engine..."
-          kurtosis engine start || {
-            echo "First start attempt failed, trying restart..."
-            kurtosis engine restart
-          }
+          kurtosis engine start || kurtosis engine restart
 
-          # Verify engine is accessible by running a simple command
+          # Verify engine is accessible
           echo "Verifying engine is accessible..."
           for i in $(seq 1 30); do
             if kurtosis enclave ls 2>/dev/null; then
               echo "Engine is accessible"
-              kurtosis engine status || true
               break
             fi
             if [ $i -eq 30 ]; then
               echo "Engine failed to become accessible"
-              echo "=== Gateway log ==="
               cat /tmp/kurtosis-gateway.log || true
-              echo "=== Engine status ==="
-              kurtosis engine status || true
               exit 1
             fi
             echo "Waiting for engine... (attempt $i)"
@@ -229,32 +226,25 @@ jobs:
       - name: Get beacon endpoint
         id: beacon
         run: |
-          # For in-cluster access, use the K8s service name instead of gateway URL
-          # Kurtosis creates services in kt-<enclave-name> namespace
+          # For in-cluster access, use the K8s service name
           KURTOSIS_NS="kt-observoor-k8s-test"
 
-          # List services to find the beacon service
           echo "Services in Kurtosis namespace:"
           kubectl get svc -n "$KURTOSIS_NS" -o wide
 
-          # Find the service matching cl-1-lighthouse-geth (Kurtosis may add suffixes)
+          # Find the beacon service
           SVC_NAME=$(kubectl get svc -n "$KURTOSIS_NS" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep 'cl-1-lighthouse-geth' | head -1)
 
           if [ -z "$SVC_NAME" ]; then
-            echo "ERROR: Could not find beacon service. Available services:"
+            echo "ERROR: Could not find beacon service"
             kubectl get svc -n "$KURTOSIS_NS"
             exit 1
           fi
 
-          # Get the http port
+          # Get the http port (default to 4000 for Lighthouse)
           HTTP_PORT=$(kubectl get svc -n "$KURTOSIS_NS" "$SVC_NAME" -o jsonpath='{.spec.ports[?(@.name=="http")].port}')
-          if [ -z "$HTTP_PORT" ]; then
-            # Fall back to port 4000 (Lighthouse default)
-            HTTP_PORT="4000"
-            echo "Warning: Could not find 'http' port, using default: $HTTP_PORT"
-          fi
+          HTTP_PORT="${HTTP_PORT:-4000}"
 
-          # Use cluster-internal DNS name
           BEACON_ENDPOINT="http://${SVC_NAME}.${KURTOSIS_NS}.svc.cluster.local:${HTTP_PORT}"
           echo "In-cluster beacon endpoint: $BEACON_ENDPOINT"
           echo "endpoint=$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
@@ -267,8 +257,8 @@ jobs:
       - name: Wait for data collection
         run: |
           echo "Waiting for observoor to collect data..."
-          sleep 30
-          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=50 || true
+          sleep 60
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=100 || true
 
       - name: Run smoke tests
         run: ./e2e/kubernetes/scripts/run-tests.sh
@@ -287,6 +277,9 @@ jobs:
           echo "" >> k8s-logs.txt
           echo "=== Describe pods ===" >> k8s-logs.txt
           kubectl -n observoor-test describe pods >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== All pods ===" >> k8s-logs.txt
+          kubectl get pods -A >> k8s-logs.txt || true
           kurtosis enclave dump observoor-k8s-test ./kurtosis-k8s-dump || true
 
       - name: Upload logs
@@ -303,4 +296,4 @@ jobs:
         run: |
           kurtosis enclave rm -f observoor-k8s-test || true
           kurtosis engine stop || true
-          kind delete cluster --name observoor-e2e || true
+          /usr/local/bin/k3s-uninstall.sh || true

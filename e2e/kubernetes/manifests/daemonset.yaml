@@ -1,5 +1,6 @@
 # Using Deployment with 1 replica for E2E to avoid migration race conditions.
 # In production, DaemonSet is used (see deploy/kubernetes/daemonset.yaml).
+# K3s is a single-node cluster, so all pods run on the same node.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,15 +25,6 @@ spec:
         prometheus.io/path: "/metrics"
     spec:
       hostPID: true
-      # Schedule on worker node where Kurtosis pods run (control-plane has taints)
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: node-role.kubernetes.io/control-plane
-                    operator: DoesNotExist
       containers:
         - name: observoor
           image: observoor:latest
