@@ -8,10 +8,13 @@ import (
 // Buffer is a thread-safe aggregation buffer that collects events
 // and aggregates them by dimension over a time window.
 type Buffer struct {
-	StartTime time.Time
-	EndTime   time.Time
-	Slot      uint64
-	mu        sync.RWMutex
+	StartTime                  time.Time
+	WallclockSlot              uint64
+	WallclockSlotStartDateTime time.Time
+	CLSyncing                  bool
+	ELOptimistic               bool
+	ELOffline                  bool
+	mu                         sync.RWMutex
 
 	// Syscalls (BasicDimension key) - 8 syscall types.
 	SyscallRead      map[BasicDimension]*LatencyAggregate
@@ -63,10 +66,21 @@ type Buffer struct {
 }
 
 // NewBuffer creates a new Buffer with initialized maps.
-func NewBuffer(startTime time.Time, slot uint64) *Buffer {
+func NewBuffer(
+	startTime time.Time,
+	wallclockSlot uint64,
+	wallclockSlotStartDateTime time.Time,
+	clSyncing bool,
+	elOptimistic bool,
+	elOffline bool,
+) *Buffer {
 	return &Buffer{
-		StartTime: startTime,
-		Slot:      slot,
+		StartTime:                  startTime,
+		WallclockSlot:              wallclockSlot,
+		WallclockSlotStartDateTime: wallclockSlotStartDateTime,
+		CLSyncing:                  clSyncing,
+		ELOptimistic:               elOptimistic,
+		ELOffline:                  elOffline,
 		// Syscalls.
 		SyscallRead:      make(map[BasicDimension]*LatencyAggregate, 16),
 		SyscallWrite:     make(map[BasicDimension]*LatencyAggregate, 16),
@@ -106,13 +120,6 @@ func NewBuffer(startTime time.Time, slot uint64) *Buffer {
 		ProcessExit:    make(map[BasicDimension]*CounterAggregate, 8),
 		TcpStateChange: make(map[BasicDimension]*CounterAggregate, 8),
 	}
-}
-
-// Finalize sets the end time for the buffer.
-func (b *Buffer) Finalize(endTime time.Time) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.EndTime = endTime
 }
 
 // getOrCreateLatency returns the LatencyAggregate for the given key,

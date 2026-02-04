@@ -32,6 +32,10 @@ type ResolutionConfig struct {
 	// When true, the first interval after a slot change may be shorter.
 	// Defaults to true.
 	SlotAligned bool `yaml:"slot_aligned"`
+
+	// SyncStatePollInterval is the interval for writing sync state.
+	// Defaults to 12s (1 Ethereum slot).
+	SyncStatePollInterval time.Duration `yaml:"sync_state_poll_interval"`
 }
 
 // DimensionsConfig configures which dimensions to include in aggregations.
@@ -75,8 +79,9 @@ type DiskDimensionsConfig struct {
 func DefaultConfig() Config {
 	return Config{
 		Resolution: ResolutionConfig{
-			Interval:    time.Second,
-			SlotAligned: true,
+			Interval:              time.Second,
+			SlotAligned:           true,
+			SyncStatePollInterval: 12 * time.Second,
 		},
 		Dimensions: DimensionsConfig{
 			Network: NetworkDimensionsConfig{},

@@ -37,23 +37,23 @@ OPTIONAL_CLIENTS=()
 echo "=== Smoke Tests for Client Detection ==="
 echo ""
 
-# 1. Check data exists
+# 1. Check data exists (using sched_on_cpu as primary indicator)
 echo -n "1. Data exists... "
 if retry_query "waiting for data" \
-    "SELECT count() FROM aggregated_metrics" \
+    "SELECT count() FROM sched_on_cpu" \
     '[[ -n "$RESULT" && "$RESULT" -gt 0 ]]'; then
-    TOTAL=$(query "SELECT count() FROM aggregated_metrics")
-    echo "PASS ($TOTAL rows)"
+    TOTAL=$(query "SELECT count() FROM sched_on_cpu")
+    echo "PASS ($TOTAL rows in sched_on_cpu)"
 else
     echo "FAIL"
     exit 1
 fi
 
-# 2. Check slot > 0
-echo -n "2. Slot > 0... "
-MAX_SLOT=$(query "SELECT max(slot) FROM aggregated_metrics")
+# 2. Check wallclock_slot > 0
+echo -n "2. Wallclock slot > 0... "
+MAX_SLOT=$(query "SELECT max(wallclock_slot) FROM sched_on_cpu")
 if [[ -n "$MAX_SLOT" && "$MAX_SLOT" -gt 0 ]]; then
-    echo "PASS (slot $MAX_SLOT)"
+    echo "PASS (wallclock_slot $MAX_SLOT)"
 else
     echo "FAIL ($MAX_SLOT)"
     exit 1
@@ -68,15 +68,24 @@ is_optional() {
     return 1
 }
 
-# 3. Each client has data
+# 3. Each client has data (check across all tables)
 echo "3. Each client has data..."
 MISSING=()
 OPTIONAL_MISSING=()
 for client in "${ALL_CLIENTS[@]}"; do
+    # Check if client has data in any of the metric tables
     if retry_query "waiting for $client" \
-        "SELECT count() FROM aggregated_metrics WHERE client_type = '$client'" \
+        "SELECT sum(cnt) FROM (
+            SELECT count() as cnt FROM sched_on_cpu WHERE client_type = '$client'
+            UNION ALL SELECT count() FROM syscall_read WHERE client_type = '$client'
+            UNION ALL SELECT count() FROM net_io WHERE client_type = '$client'
+        )" \
         '[[ -n "$RESULT" && "$RESULT" -gt 0 ]]'; then
-        COUNT=$(query "SELECT count() FROM aggregated_metrics WHERE client_type = '$client'")
+        COUNT=$(query "SELECT sum(cnt) FROM (
+            SELECT count() as cnt FROM sched_on_cpu WHERE client_type = '$client'
+            UNION ALL SELECT count() FROM syscall_read WHERE client_type = '$client'
+            UNION ALL SELECT count() FROM net_io WHERE client_type = '$client'
+        )")
         echo "   ✓ $client: $COUNT rows"
     else
         if is_optional "$client"; then
@@ -98,9 +107,9 @@ if [[ ${#MISSING[@]} -gt 0 ]]; then
     exit 1
 fi
 
-# 4. Scheduler metrics
+# 4. Scheduler metrics (sched_on_cpu table)
 echo -n "4. Scheduler metrics... "
-SCHED=$(query "SELECT count() FROM aggregated_metrics WHERE metric_name = 'sched_on_cpu'")
+SCHED=$(query "SELECT count() FROM sched_on_cpu")
 if [[ -n "$SCHED" && "$SCHED" -gt 0 ]]; then
     echo "PASS ($SCHED)"
 else
@@ -108,9 +117,9 @@ else
     exit 1
 fi
 
-# 5. Syscall metrics
+# 5. Syscall metrics (syscall_read table)
 echo -n "5. Syscall metrics... "
-SYSCALL=$(query "SELECT count() FROM aggregated_metrics WHERE metric_name LIKE 'syscall_%'")
+SYSCALL=$(query "SELECT count() FROM syscall_read")
 if [[ -n "$SYSCALL" && "$SYSCALL" -gt 0 ]]; then
     echo "PASS ($SYSCALL)"
 else
@@ -118,9 +127,9 @@ else
     exit 1
 fi
 
-# 6. Network metrics
+# 6. Network metrics (net_io table)
 echo -n "6. Network metrics... "
-NET=$(query "SELECT count() FROM aggregated_metrics WHERE metric_name = 'net_io'")
+NET=$(query "SELECT count() FROM net_io")
 if [[ -n "$NET" && "$NET" -gt 0 ]]; then
     echo "PASS ($NET)"
 else
@@ -128,9 +137,9 @@ else
     exit 1
 fi
 
-# 7. Non-zero values
+# 7. Non-zero values (check sched_on_cpu as representative)
 echo -n "7. Non-zero values... "
-NONZERO=$(query "SELECT count() FROM aggregated_metrics WHERE sum > 0 OR count > 0")
+NONZERO=$(query "SELECT count() FROM sched_on_cpu WHERE sum > 0 OR count > 0")
 if [[ -n "$NONZERO" && "$NONZERO" -gt 0 ]]; then
     echo "PASS ($NONZERO)"
 else
@@ -138,12 +147,12 @@ else
     exit 1
 fi
 
-# 8. Histogram consistency
+# 8. Histogram consistency (syscall_read has histograms)
 echo -n "8. Histogram consistency... "
 MISMATCH=$(query "
-    SELECT count() FROM aggregated_metrics
-    WHERE metric_name LIKE 'syscall_%' AND count > 0
-    AND count != (hist_1us + hist_10us + hist_100us + hist_1ms + hist_10ms + hist_100ms + hist_1s + hist_10s + hist_100s + hist_inf)
+    SELECT count() FROM syscall_read
+    WHERE count > 0
+    AND count != (histogram.le_1us + histogram.le_10us + histogram.le_100us + histogram.le_1ms + histogram.le_10ms + histogram.le_100ms + histogram.le_1s + histogram.le_10s + histogram.le_100s + histogram.inf)
 ")
 if [[ "$MISMATCH" == "0" ]]; then
     echo "PASS"
@@ -152,9 +161,9 @@ else
     exit 1
 fi
 
-# 9. 100ms interval
+# 9. 100ms interval (check sched_on_cpu)
 echo -n "9. 100ms interval... "
-INTERVALS=$(query "SELECT DISTINCT interval_ms FROM aggregated_metrics")
+INTERVALS=$(query "SELECT DISTINCT interval_ms FROM sched_on_cpu")
 if [[ "$INTERVALS" == "100" ]]; then
     echo "PASS"
 else
@@ -165,7 +174,17 @@ fi
 echo ""
 echo "=== All Tests Passed ==="
 echo ""
+
+# Summary across key tables
+echo "=== Summary by Table ==="
+for table in sched_on_cpu sched_off_cpu sched_runqueue syscall_read syscall_write net_io tcp_retransmit disk_latency disk_bytes sync_state; do
+    COUNT=$(query "SELECT count() FROM $table" 2>/dev/null || echo "0")
+    echo "$table: $COUNT rows"
+done
+
+echo ""
+echo "=== Client Distribution (sched_on_cpu) ==="
 query "
-    SELECT client_type, countDistinct(metric_name) as metrics, countDistinct(pid) as pids, count() as rows
-    FROM aggregated_metrics GROUP BY client_type ORDER BY client_type FORMAT PrettyCompact
+    SELECT client_type, countDistinct(pid) as pids, count() as rows
+    FROM sched_on_cpu GROUP BY client_type ORDER BY client_type FORMAT PrettyCompact
 "

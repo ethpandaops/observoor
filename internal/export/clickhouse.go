@@ -33,6 +33,12 @@ type ClickHouseConfig struct {
 
 	// Password for ClickHouse authentication.
 	Password string `yaml:"password"`
+
+	// MetaClientName is the observoor client/node name for metadata.
+	MetaClientName string `yaml:"meta_client_name"`
+
+	// MetaNetworkName is the Ethereum network name (e.g., mainnet, holesky).
+	MetaNetworkName string `yaml:"meta_network_name"`
 }
 
 // ClickHouseWriter manages writes to ClickHouse.

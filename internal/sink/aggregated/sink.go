@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -23,6 +24,11 @@ type Sink struct {
 
 	currentSlot      atomic.Uint64
 	currentSlotStart atomic.Int64
+
+	// Sync state fields (stored as uint32: 0=false, 1=true for atomic access).
+	clSyncing    atomic.Uint32
+	elOptimistic atomic.Uint32
+	elOffline    atomic.Uint32
 
 	cancel  context.CancelFunc
 	done    chan struct{}
@@ -83,8 +89,19 @@ func (s *Sink) Start(ctx context.Context) error {
 
 	ctx, s.cancel = context.WithCancel(ctx)
 
-	// Initialize first buffer.
-	s.buffer.Store(NewBuffer(time.Now(), 0))
+	// Initialize first buffer with current sync state.
+	now := time.Now()
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
+	s.buffer.Store(NewBuffer(
+		now,
+		0,
+		slotStartTime,
+		s.clSyncing.Load() == 1,
+		s.elOptimistic.Load() == 1,
+		s.elOffline.Load() == 1,
+	))
 
 	go s.runLoop(ctx)
 
@@ -109,8 +126,6 @@ func (s *Sink) Stop() error {
 	finalBuffer := s.buffer.Swap(nil)
 
 	if finalBuffer != nil {
-		finalBuffer.Finalize(time.Now())
-
 		if err := s.flush(context.Background(), finalBuffer); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
 		}
@@ -142,6 +157,27 @@ func (s *Sink) OnSlotChanged(slot uint64, slotStart time.Time) {
 	}
 }
 
+// SetSyncState updates the current sync state from the beacon node.
+func (s *Sink) SetSyncState(status beacon.SyncStatus) {
+	if status.IsSyncing {
+		s.clSyncing.Store(1)
+	} else {
+		s.clSyncing.Store(0)
+	}
+
+	if status.IsOptimistic {
+		s.elOptimistic.Store(1)
+	} else {
+		s.elOptimistic.Store(0)
+	}
+
+	if status.ELOffline {
+		s.elOffline.Store(1)
+	} else {
+		s.elOffline.Store(0)
+	}
+}
+
 // runLoop is the main event processing loop.
 // Optimized for high throughput by batching event processing.
 func (s *Sink) runLoop(ctx context.Context) {
@@ -149,6 +185,15 @@ func (s *Sink) runLoop(ctx context.Context) {
 
 	ticker := time.NewTicker(s.cfg.Resolution.Interval)
 	defer ticker.Stop()
+
+	// Sync state ticker - default to 12s if not configured.
+	syncInterval := s.cfg.Resolution.SyncStatePollInterval
+	if syncInterval <= 0 {
+		syncInterval = 12 * time.Second
+	}
+
+	syncTicker := time.NewTicker(syncInterval)
+	defer syncTicker.Stop()
 
 	// Batch size for draining events.
 	const batchSize = 256
@@ -171,6 +216,8 @@ func (s *Sink) runLoop(ctx context.Context) {
 			}
 
 			s.tickFlush(ctx)
+		case <-syncTicker.C:
+			s.flushSyncState(ctx)
 		}
 	}
 }
@@ -363,14 +410,22 @@ func (s *Sink) tickFlush(ctx context.Context) {
 
 // rotateBuffer swaps the current buffer with a new one and flushes the old one.
 func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
-	newBuf := NewBuffer(now, slot)
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
+	newBuf := NewBuffer(
+		now,
+		slot,
+		slotStartTime,
+		s.clSyncing.Load() == 1,
+		s.elOptimistic.Load() == 1,
+		s.elOffline.Load() == 1,
+	)
 	oldBuffer := s.buffer.Swap(newBuf)
 
 	if oldBuffer == nil {
 		return
 	}
-
-	oldBuffer.Finalize(now)
 
 	go func() {
 		if err := s.flush(context.Background(), oldBuffer); err != nil {
@@ -393,4 +448,25 @@ func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 	}
 
 	return err
+}
+
+// flushSyncState writes the current sync state to ClickHouse.
+func (s *Sink) flushSyncState(ctx context.Context) {
+	now := time.Now()
+	slotStartNs := s.currentSlotStart.Load()
+	slotStartTime := time.Unix(0, slotStartNs)
+
+	row := syncStateRow{
+		UpdatedDateTime:            now,
+		EventTime:                  now,
+		WallclockSlot:              uint32(s.currentSlot.Load()),
+		WallclockSlotStartDateTime: slotStartTime,
+		CLSyncing:                  s.clSyncing.Load() == 1,
+		ELOptimistic:               s.elOptimistic.Load() == 1,
+		ELOffline:                  s.elOffline.Load() == 1,
+	}
+
+	if err := FlushSyncState(ctx, s.writer, s.cfg, s.health, row); err != nil {
+		s.log.WithError(err).Error("Sync state flush failed")
+	}
 }

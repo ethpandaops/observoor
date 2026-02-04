@@ -112,10 +112,23 @@ func (a *agent) Start(ctx context.Context) error {
 		"slots_per_epoch":  spec.SlotsPerEpoch,
 	}).Info("Fetched chain spec")
 
-	// 3. Wait for beacon node to be synced.
-	if err := a.waitForSync(ctx); err != nil {
-		return fmt.Errorf("waiting for sync: %w", err)
+	// 3. Fetch initial sync state (no longer wait for sync - collect data during sync).
+	initialSync, err := a.beacon.FetchSyncStatus(ctx)
+	if err != nil {
+		a.log.WithError(err).Warn("Failed to fetch initial sync status, using defaults")
+
+		initialSync = &beacon.SyncStatus{}
 	}
+
+	a.updateSyncMetrics(initialSync)
+
+	a.log.WithFields(logrus.Fields{
+		"is_syncing":    initialSync.IsSyncing,
+		"is_optimistic": initialSync.IsOptimistic,
+		"el_offline":    initialSync.ELOffline,
+		"head_slot":     initialSync.HeadSlot,
+		"sync_distance": initialSync.SyncDistance,
+	}).Info("Fetched initial sync state (collecting data regardless of sync status)")
 
 	// 4. Initialize wall clock.
 	a.clock, err = clock.New(
@@ -166,6 +179,11 @@ func (a *agent) Start(ctx context.Context) error {
 		}
 
 		a.log.WithField("sink", s.Name()).Info("Sink started")
+	}
+
+	// 6b. Set initial sync state on all sinks.
+	for _, s := range a.sinks {
+		s.SetSyncState(*initialSync)
 	}
 
 	// 7. Register slot change callback.
@@ -286,45 +304,6 @@ func (a *agent) Stop() error {
 	return nil
 }
 
-func (a *agent) waitForSync(ctx context.Context) error {
-	a.log.Info("Waiting for beacon node to be synced")
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		status, err := a.beacon.FetchSyncStatus(ctx)
-		if err != nil {
-			a.log.WithError(err).
-				Warn("Failed to fetch sync status, retrying")
-
-			time.Sleep(5 * time.Second)
-
-			continue
-		}
-
-		if !status.IsSyncing {
-			a.log.WithField("head_slot", status.HeadSlot).
-				Info("Beacon node is synced")
-
-			a.health.IsSyncing.Set(0)
-
-			return nil
-		}
-
-		a.health.IsSyncing.Set(1)
-		a.log.WithFields(logrus.Fields{
-			"head_slot":     status.HeadSlot,
-			"sync_distance": status.SyncDistance,
-		}).Info("Beacon node is syncing, waiting...")
-
-		time.Sleep(10 * time.Second)
-	}
-}
-
 func (a *agent) monitorSyncState(ctx context.Context) {
 	defer a.wg.Done()
 
@@ -344,17 +323,37 @@ func (a *agent) monitorSyncState(ctx context.Context) {
 				continue
 			}
 
-			// Update sync status metrics.
-			if status.IsSyncing {
-				a.health.IsSyncing.Set(1)
-			} else {
-				a.health.IsSyncing.Set(0)
-			}
+			// Update metrics and propagate sync state to all sinks.
+			a.updateSyncMetrics(status)
 
-			// Update sync distance metric.
-			a.health.BeaconSyncDistance.Set(float64(status.SyncDistance))
+			for _, s := range a.sinks {
+				s.SetSyncState(*status)
+			}
 		}
 	}
+}
+
+// updateSyncMetrics updates all sync-related Prometheus metrics.
+func (a *agent) updateSyncMetrics(status *beacon.SyncStatus) {
+	if status.IsSyncing {
+		a.health.IsSyncing.Set(1)
+	} else {
+		a.health.IsSyncing.Set(0)
+	}
+
+	if status.IsOptimistic {
+		a.health.IsOptimistic.Set(1)
+	} else {
+		a.health.IsOptimistic.Set(0)
+	}
+
+	if status.ELOffline {
+		a.health.ELOffline.Set(1)
+	} else {
+		a.health.ELOffline.Set(0)
+	}
+
+	a.health.BeaconSyncDistance.Set(float64(status.SyncDistance))
 }
 
 func (a *agent) monitorPIDs(ctx context.Context) {

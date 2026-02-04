@@ -10,6 +10,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -35,6 +36,11 @@ type RawSink struct {
 	monotonicOffsetNs atomic.Int64
 	includeFilenames  bool
 
+	// Sync state fields (stored as uint32: 0=false, 1=true for atomic access).
+	clSyncing    atomic.Uint32
+	elOptimistic atomic.Uint32
+	elOffline    atomic.Uint32
+
 	mu      sync.Mutex
 	batch   []rawRow
 	cancel  context.CancelFunc
@@ -43,35 +49,38 @@ type RawSink struct {
 }
 
 type rawRow struct {
-	TimestampNs uint64
-	Slot        uint64
-	SlotStart   time.Time
-	PID         uint32
-	TID         uint32
-	EventType   string
-	ClientType  string
-	LatencyNs   uint64
-	Bytes       int64
-	SrcPort     uint16
-	DstPort     uint16
-	FD          int32
-	Filename    string
-	Voluntary   bool
-	Major       bool
-	Address     uint64
-	OnCpuNs     uint64
-	RW          uint8
-	QueueDepth  uint32
-	DeviceID    uint32
-	RunqueueNs  uint64
-	OffCpuNs    uint64
-	TcpState    uint8
-	TcpOldState uint8
-	TcpSrttUs   uint32
-	TcpCwnd     uint32
-	Pages       uint64
-	ExitCode    uint32
-	TargetPID   uint32
+	TimestampNs   uint64
+	WallclockSlot uint64
+	SlotStart     time.Time
+	PID           uint32
+	TID           uint32
+	EventType     string
+	ClientType    string
+	LatencyNs     uint64
+	Bytes         int64
+	SrcPort       uint16
+	DstPort       uint16
+	FD            int32
+	Filename      string
+	Voluntary     bool
+	Major         bool
+	Address       uint64
+	OnCpuNs       uint64
+	RW            uint8
+	QueueDepth    uint32
+	DeviceID      uint32
+	RunqueueNs    uint64
+	OffCpuNs      uint64
+	TcpState      uint8
+	TcpOldState   uint8
+	TcpSrttUs     uint32
+	TcpCwnd       uint32
+	Pages         uint64
+	ExitCode      uint32
+	TargetPID     uint32
+	CLSyncing     bool
+	ELOptimistic  bool
+	ELOffline     bool
 }
 
 var _ Sink = (*RawSink)(nil)
@@ -171,6 +180,26 @@ func (s *RawSink) OnSlotChanged(slot uint64, slotStart time.Time) {
 	s.currentSlotStart.Store(slotStart.UnixNano())
 }
 
+func (s *RawSink) SetSyncState(status beacon.SyncStatus) {
+	if status.IsSyncing {
+		s.clSyncing.Store(1)
+	} else {
+		s.clSyncing.Store(0)
+	}
+
+	if status.IsOptimistic {
+		s.elOptimistic.Store(1)
+	} else {
+		s.elOptimistic.Store(0)
+	}
+
+	if status.ELOffline {
+		s.elOffline.Store(1)
+	} else {
+		s.elOffline.Store(0)
+	}
+}
+
 func (s *RawSink) runLoop(ctx context.Context) {
 	defer close(s.done)
 
@@ -206,6 +235,9 @@ func (s *RawSink) addEvent(
 		s.currentSlotStart.Load(),
 		s.monotonicOffsetNs.Load(),
 		s.includeFilenames,
+		s.clSyncing.Load() == 1,
+		s.elOptimistic.Load() == 1,
+		s.elOffline.Load() == 1,
 	)
 
 	s.mu.Lock()
@@ -261,7 +293,7 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 	batch, err := conn.PrepareBatch(
 		ctx,
 		fmt.Sprintf(
-			"INSERT INTO %s (timestamp_ns, slot, slot_start_date_time, pid, tid, event_type, client_type, latency_ns, bytes, src_port, dst_port, fd, filename, voluntary, major, address, on_cpu_ns, rw, queue_depth, device_id, runqueue_ns, off_cpu_ns, tcp_state, tcp_old_state, tcp_srtt_us, tcp_cwnd, pages, exit_code, target_pid)",
+			"INSERT INTO %s (timestamp_ns, wallclock_slot, wallclock_slot_start_date_time, pid, tid, event_type, client_type, latency_ns, bytes, src_port, dst_port, fd, filename, voluntary, major, address, on_cpu_ns, rw, queue_depth, device_id, runqueue_ns, off_cpu_ns, tcp_state, tcp_old_state, tcp_srtt_us, tcp_cwnd, pages, exit_code, target_pid, cl_syncing, el_optimistic, el_offline)",
 			table,
 		),
 	)
@@ -274,7 +306,7 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 	for _, row := range rows {
 		if err := batch.Append(
 			row.TimestampNs,
-			row.Slot,
+			row.WallclockSlot,
 			row.SlotStart,
 			row.PID,
 			row.TID,
@@ -302,6 +334,9 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 			row.Pages,
 			row.ExitCode,
 			row.TargetPID,
+			row.CLSyncing,
+			row.ELOptimistic,
+			row.ELOffline,
 		); err != nil {
 			s.recordBatchError("append")
 
@@ -331,10 +366,13 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 
 func toRawRow(
 	event tracer.ParsedEvent,
-	slot uint64,
+	wallclockSlot uint64,
 	slotStartNs int64,
 	monotonicOffsetNs int64,
 	includeFilenames bool,
+	clSyncing bool,
+	elOptimistic bool,
+	elOffline bool,
 ) rawRow {
 	timestampNs := int64(event.Raw.TimestampNs) + monotonicOffsetNs
 	if timestampNs < 0 {
@@ -344,13 +382,16 @@ func toRawRow(
 	row := rawRow{
 		// Use wall clock time for storage. The BPF ktime_get_ns()
 		// value is monotonic (since boot), not Unix epoch.
-		TimestampNs: uint64(timestampNs),
-		Slot:        slot,
-		SlotStart:   time.Unix(0, slotStartNs),
-		PID:         event.Raw.PID,
-		TID:         event.Raw.TID,
-		EventType:   event.Raw.Type.String(),
-		ClientType:  event.Raw.Client.String(),
+		TimestampNs:   uint64(timestampNs),
+		WallclockSlot: wallclockSlot,
+		SlotStart:     time.Unix(0, slotStartNs),
+		PID:           event.Raw.PID,
+		TID:           event.Raw.TID,
+		EventType:     event.Raw.Type.String(),
+		ClientType:    event.Raw.Client.String(),
+		CLSyncing:     clSyncing,
+		ELOptimistic:  elOptimistic,
+		ELOffline:     elOffline,
 	}
 
 	switch e := event.Typed.(type) {

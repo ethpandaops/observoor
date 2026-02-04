@@ -7,6 +7,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
@@ -73,6 +74,10 @@ func (s *SlotSink) OnSlotChanged(newSlot uint64, _ time.Time) {
 
 	snap := oldBucket.Snapshot()
 	s.logSnapshot(snap)
+}
+
+func (s *SlotSink) SetSyncState(_ beacon.SyncStatus) {
+	// SlotSink only logs; sync state is not needed.
 }
 
 func (s *SlotSink) logSnapshot(snap BucketSnapshot) {

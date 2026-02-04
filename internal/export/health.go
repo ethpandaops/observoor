@@ -35,6 +35,8 @@ type HealthMetrics struct {
 	PIDsTracked    prometheus.Gauge
 	CurrentSlot    prometheus.Gauge
 	IsSyncing      prometheus.Gauge
+	IsOptimistic   prometheus.Gauge
+	ELOffline      prometheus.Gauge
 	RingBufUsed    prometheus.Gauge
 
 	// === Tier 1: Critical (Detect Failures) ===
@@ -137,6 +139,16 @@ func NewHealthMetrics(
 			Namespace: "observoor",
 			Name:      "is_syncing",
 			Help:      "Whether the beacon node is syncing (1=yes, 0=no).",
+		}),
+		IsOptimistic: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "observoor",
+			Name:      "is_optimistic",
+			Help:      "Whether the execution layer is in optimistic sync mode (1=yes, 0=no).",
+		}),
+		ELOffline: prometheus.NewGauge(prometheus.GaugeOpts{
+			Namespace: "observoor",
+			Name:      "el_offline",
+			Help:      "Whether the execution layer is unreachable (1=yes, 0=no).",
 		}),
 		RingBufUsed: prometheus.NewGauge(prometheus.GaugeOpts{
 			Namespace: "observoor",
@@ -365,6 +377,8 @@ func NewHealthMetrics(
 		h.PIDsTracked,
 		h.CurrentSlot,
 		h.IsSyncing,
+		h.IsOptimistic,
+		h.ELOffline,
 		h.RingBufUsed,
 	)
 

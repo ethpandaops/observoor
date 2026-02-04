@@ -4,6 +4,7 @@ import (
 	"context"
 	"time"
 
+	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/sink/aggregated"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
@@ -28,4 +29,6 @@ type Sink interface {
 	HandleEvent(event tracer.ParsedEvent)
 	// OnSlotChanged is called at slot boundaries.
 	OnSlotChanged(newSlot uint64, slotStart time.Time)
+	// SetSyncState updates the current sync state from the beacon node.
+	SetSyncState(status beacon.SyncStatus)
 }
