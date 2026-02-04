@@ -13,6 +13,7 @@ import (
 	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/clock"
 	"github.com/ethpandaops/observoor/internal/export"
+	"github.com/ethpandaops/observoor/internal/migrate"
 	"github.com/ethpandaops/observoor/internal/pid"
 	"github.com/ethpandaops/observoor/internal/sink"
 	"github.com/ethpandaops/observoor/internal/sink/aggregated"
@@ -85,6 +86,13 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 
 func (a *agent) Start(ctx context.Context) error {
 	ctx, a.cancel = context.WithCancel(ctx)
+
+	// 0. Run migrations if enabled.
+	if a.cfg.Sinks.Aggregated.Enabled && a.cfg.Sinks.Aggregated.ClickHouse.Migrations.Enabled {
+		if err := a.runMigrations(ctx); err != nil {
+			return fmt.Errorf("running migrations: %w", err)
+		}
+	}
 
 	// 1. Start health metrics server.
 	if err := a.health.Start(ctx); err != nil {
@@ -573,4 +581,18 @@ func (a *agent) updatePIDsByClient(clientTypes map[uint32]tracer.ClientType) {
 		count := counts[name]
 		a.health.PIDsByClient.WithLabelValues(name).Set(float64(count))
 	}
+}
+
+// runMigrations executes database migrations using the aggregated sink's ClickHouse config.
+func (a *agent) runMigrations(ctx context.Context) error {
+	a.log.Info("Running ClickHouse migrations...")
+
+	dsn := a.cfg.Sinks.Aggregated.ClickHouse.DSN()
+	m := migrate.New(a.log, dsn)
+
+	if err := m.Up(ctx); err != nil {
+		return fmt.Errorf("applying migrations: %w", err)
+	}
+
+	return nil
 }

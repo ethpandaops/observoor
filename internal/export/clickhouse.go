@@ -39,6 +39,34 @@ type ClickHouseConfig struct {
 
 	// MetaNetworkName is the Ethereum network name (e.g., mainnet, holesky).
 	MetaNetworkName string `yaml:"meta_network_name"`
+
+	// Migrations configures schema migration behavior.
+	Migrations MigrationsConfig `yaml:"migrations"`
+}
+
+// MigrationsConfig configures schema migration behavior.
+type MigrationsConfig struct {
+	// Enabled runs migrations on startup before sinks start.
+	// Default: false (platform manages migrations externally).
+	Enabled bool `yaml:"enabled"`
+}
+
+// DSN returns a ClickHouse connection string suitable for database/sql.
+func (c ClickHouseConfig) DSN() string {
+	dsn := "clickhouse://"
+
+	if c.Username != "" {
+		dsn += c.Username
+		if c.Password != "" {
+			dsn += ":" + c.Password
+		}
+
+		dsn += "@"
+	}
+
+	dsn += c.Endpoint + "/" + c.Database
+
+	return dsn
 }
 
 // ClickHouseWriter manages writes to ClickHouse.
