@@ -184,17 +184,20 @@ jobs:
             kurtosis engine restart
           }
 
-          # Verify engine is running
-          echo "Verifying engine status..."
+          # Verify engine is accessible by running a simple command
+          echo "Verifying engine is accessible..."
           for i in $(seq 1 30); do
-            if kurtosis engine status 2>/dev/null | grep -q "RUNNING"; then
-              echo "Engine is running"
-              kurtosis engine status
+            if kurtosis enclave ls 2>/dev/null; then
+              echo "Engine is accessible"
+              kurtosis engine status || true
               break
             fi
             if [ $i -eq 30 ]; then
-              echo "Engine failed to start"
+              echo "Engine failed to become accessible"
+              echo "=== Gateway log ==="
               cat /tmp/kurtosis-gateway.log || true
+              echo "=== Engine status ==="
+              kurtosis engine status || true
               exit 1
             fi
             echo "Waiting for engine... (attempt $i)"
