@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/ethpandaops/observoor/internal/agent"
+	"github.com/ethpandaops/observoor/internal/version"
 )
 
 var (
@@ -51,7 +52,19 @@ aggregating events per Ethereum slot. Zero client changes required.`,
 		os.Exit(1)
 	}
 
+	cmd.AddCommand(versionCmd())
+
 	return cmd
+}
+
+func versionCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "version",
+		Short: "Print the version information",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println(version.FullWithPlatform())
+		},
+	}
 }
 
 func run(cmd *cobra.Command, args []string) error {

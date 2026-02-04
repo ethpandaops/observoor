@@ -1,4 +1,4 @@
-.PHONY: all generate build test lint clean docker-build e2e-up e2e-down e2e-test
+.PHONY: all generate generate-amd64 generate-arm64 generate-all build test lint clean docker-build e2e-up e2e-down e2e-test
 
 BINARY := observoor
 GO := go
@@ -23,6 +23,23 @@ BPF_CFLAGS := -O2 -g -Wall -Werror -D__TARGET_ARCH_$(BPF_TARGET_ARCH)
 # BPF source
 BPF_SRC := bpf/observoor.c
 
+# Event types to export from BPF
+BPF_TYPES := -type syscall_event \
+	-type disk_io_event \
+	-type net_io_event \
+	-type sched_event \
+	-type page_fault_event \
+	-type fd_event \
+	-type sched_runqueue_event \
+	-type block_merge_event \
+	-type tcp_retransmit_event \
+	-type tcp_state_event \
+	-type tcp_metrics_event \
+	-type mem_latency_event \
+	-type swap_event \
+	-type oom_kill_event \
+	-type process_exit_event
+
 all: generate build
 
 # Invoke bpf2go directly (avoids go generate package-loading chicken-and-egg).
@@ -32,14 +49,33 @@ generate:
 		-cflags "$(BPF_CFLAGS)" \
 		-go-package tracer \
 		-target $(BPF_TARGET) \
-		-type syscall_event \
-		-type disk_io_event \
-		-type net_io_event \
-		-type sched_event \
-		-type page_fault_event \
-		-type fd_event \
+		$(BPF_TYPES) \
 		observoor ../../bpf/observoor.c -- \
 		-I../../bpf/headers -I../../bpf/include
+
+# Architecture-specific BPF generation for cross-compilation
+generate-amd64:
+	cd internal/tracer && $(GO) run github.com/cilium/ebpf/cmd/bpf2go \
+		-cc $(CLANG) \
+		-cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_x86" \
+		-go-package tracer \
+		-target amd64 \
+		$(BPF_TYPES) \
+		observoor ../../bpf/observoor.c -- \
+		-I../../bpf/headers -I../../bpf/include
+
+generate-arm64:
+	cd internal/tracer && $(GO) run github.com/cilium/ebpf/cmd/bpf2go \
+		-cc $(CLANG) \
+		-cflags "-O2 -g -Wall -Werror -D__TARGET_ARCH_arm64" \
+		-go-package tracer \
+		-target arm64 \
+		$(BPF_TYPES) \
+		observoor ../../bpf/observoor.c -- \
+		-I../../bpf/headers -I../../bpf/include
+
+# Generate BPF code for all architectures (used by goreleaser)
+generate-all: generate-amd64 generate-arm64
 
 build: generate
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -ldflags '$(LDFLAGS)' -o bin/$(BINARY) ./cmd/observoor
