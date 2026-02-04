@@ -48,7 +48,7 @@ jobs:
         with:
           distribution: goreleaser
           version: latest
-          args: release --clean --skip=validate,announce
+          args: release --clean --skip=validate,announce,release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GORELEASER_CURRENT_TAG: "master"
