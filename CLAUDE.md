@@ -72,13 +72,13 @@ internal/
   beacon/               Beacon node client (genesis, spec, sync status)
   clock/                Ethereum wall clock (slot boundaries)
   pid/                  Process discovery (by name or cgroup)
+  migrate/              Embedded ClickHouse schema migrations (golang-migrate)
 bpf/
   observoor.c           Main eBPF program (syscalls, block I/O, net, sched, etc.)
   include/observoor.h   Event struct definitions (must match Go constants)
   include/maps.h        BPF map definitions
   headers/              vmlinux.h and libbpf helpers
 deploy/
-  migrations/clickhouse/ Database schema migrations
   kubernetes/           DaemonSet deployment
 ```
 
@@ -126,8 +126,4 @@ Process: process_exit
 
 ## ClickHouse Migrations
 
-```bash
-migrate -source file://deploy/migrations/clickhouse \
-  -database 'clickhouse://localhost:9000/observoor' \
-  up
-```
+Migrations are embedded in the binary (`internal/migrate/sql/`) and run automatically on agent startup. The agent applies all pending migrations before starting event collection.
