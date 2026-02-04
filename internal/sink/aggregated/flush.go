@@ -27,16 +27,7 @@ type latencyRow struct {
 	Count                      uint32
 	Min                        int64
 	Max                        int64
-	Hist1us                    uint32
-	Hist10us                   uint32
-	Hist100us                  uint32
-	Hist1ms                    uint32
-	Hist10ms                   uint32
-	Hist100ms                  uint32
-	Hist1s                     uint32
-	Hist10s                    uint32
-	Hist100s                   uint32
-	HistInf                    uint32
+	Histogram                  [10]uint32 // Tuple: le_1us, le_10us, le_100us, le_1ms, le_10ms, le_100ms, le_1s, le_10s, le_100s, inf
 }
 
 // diskLatencyRow is for disk_latency table with device_id and rw dimensions.
@@ -614,6 +605,11 @@ func (f *flusher) collectProcess() {
 // Row construction helpers.
 
 func (f *flusher) makeLatencyRow(dim BasicDimension, snap LatencySnapshot) latencyRow {
+	var hist [10]uint32
+	for i := 0; i < 10; i++ {
+		hist[i] = uint32(snap.Histogram[i])
+	}
+
 	return latencyRow{
 		UpdatedDateTime:            f.updatedDateTime,
 		WindowStart:                f.buf.StartTime,
@@ -626,20 +622,16 @@ func (f *flusher) makeLatencyRow(dim BasicDimension, snap LatencySnapshot) laten
 		Count:                      uint32(snap.Count),
 		Min:                        snap.Min,
 		Max:                        snap.Max,
-		Hist1us:                    uint32(snap.Histogram[0]),
-		Hist10us:                   uint32(snap.Histogram[1]),
-		Hist100us:                  uint32(snap.Histogram[2]),
-		Hist1ms:                    uint32(snap.Histogram[3]),
-		Hist10ms:                   uint32(snap.Histogram[4]),
-		Hist100ms:                  uint32(snap.Histogram[5]),
-		Hist1s:                     uint32(snap.Histogram[6]),
-		Hist10s:                    uint32(snap.Histogram[7]),
-		Hist100s:                   uint32(snap.Histogram[8]),
-		HistInf:                    uint32(snap.Histogram[9]),
+		Histogram:                  hist,
 	}
 }
 
 func (f *flusher) makeDiskLatencyRow(dim DiskDimension, snap LatencySnapshot) diskLatencyRow {
+	var hist [10]uint32
+	for i := 0; i < 10; i++ {
+		hist[i] = uint32(snap.Histogram[i])
+	}
+
 	return diskLatencyRow{
 		latencyRow: latencyRow{
 			UpdatedDateTime:            f.updatedDateTime,
@@ -653,16 +645,7 @@ func (f *flusher) makeDiskLatencyRow(dim DiskDimension, snap LatencySnapshot) di
 			Count:                      uint32(snap.Count),
 			Min:                        snap.Min,
 			Max:                        snap.Max,
-			Hist1us:                    uint32(snap.Histogram[0]),
-			Hist10us:                   uint32(snap.Histogram[1]),
-			Hist100us:                  uint32(snap.Histogram[2]),
-			Hist1ms:                    uint32(snap.Histogram[3]),
-			Hist10ms:                   uint32(snap.Histogram[4]),
-			Hist100ms:                  uint32(snap.Histogram[5]),
-			Hist1s:                     uint32(snap.Histogram[6]),
-			Hist10s:                    uint32(snap.Histogram[7]),
-			Hist100s:                   uint32(snap.Histogram[8]),
-			HistInf:                    uint32(snap.Histogram[9]),
+			Histogram:                  hist,
 		},
 		DeviceID: dim.DeviceID,
 		RW:       RWString(dim.ReadWrite),
@@ -772,7 +755,7 @@ func (f *flusher) flushLatencyTable(ctx context.Context, tableName string, rows 
 	batch, err := conn.PrepareBatch(ctx, fmt.Sprintf(`INSERT INTO %s (
 		updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time,
 		pid, client_type, sum, count, min, max,
-		hist_1us, hist_10us, hist_100us, hist_1ms, hist_10ms, hist_100ms, hist_1s, hist_10s, hist_100s, hist_inf,
+		histogram,
 		meta_client_name, meta_network_name
 	)`, table))
 	if err != nil {
@@ -783,8 +766,7 @@ func (f *flusher) flushLatencyTable(ctx context.Context, tableName string, rows 
 		if err := batch.Append(
 			row.UpdatedDateTime, row.WindowStart, row.IntervalMs, row.WallclockSlot, row.WallclockSlotStartDateTime,
 			row.PID, row.ClientType, row.Sum, row.Count, row.Min, row.Max,
-			row.Hist1us, row.Hist10us, row.Hist100us, row.Hist1ms, row.Hist10ms, row.Hist100ms,
-			row.Hist1s, row.Hist10s, row.Hist100s, row.HistInf,
+			row.Histogram,
 			f.cfg.ClickHouse.MetaClientName, f.cfg.ClickHouse.MetaNetworkName,
 		); err != nil {
 			return fmt.Errorf("appending %s row: %w", tableName, err)
@@ -813,7 +795,7 @@ func (f *flusher) flushDiskLatencyTable(ctx context.Context) error {
 		updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time,
 		pid, client_type, device_id, rw,
 		sum, count, min, max,
-		hist_1us, hist_10us, hist_100us, hist_1ms, hist_10ms, hist_100ms, hist_1s, hist_10s, hist_100s, hist_inf,
+		histogram,
 		meta_client_name, meta_network_name
 	)`, table))
 	if err != nil {
@@ -825,8 +807,7 @@ func (f *flusher) flushDiskLatencyTable(ctx context.Context) error {
 			row.UpdatedDateTime, row.WindowStart, row.IntervalMs, row.WallclockSlot, row.WallclockSlotStartDateTime,
 			row.PID, row.ClientType, row.DeviceID, row.RW,
 			row.Sum, row.Count, row.Min, row.Max,
-			row.Hist1us, row.Hist10us, row.Hist100us, row.Hist1ms, row.Hist10ms, row.Hist100ms,
-			row.Hist1s, row.Hist10s, row.Hist100s, row.HistInf,
+			row.Histogram,
 			f.cfg.ClickHouse.MetaClientName, f.cfg.ClickHouse.MetaNetworkName,
 		); err != nil {
 			return fmt.Errorf("appending disk_latency row: %w", err)
