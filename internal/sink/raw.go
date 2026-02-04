@@ -7,11 +7,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	processor "github.com/ethpandaops/go-batch-processor"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
 
 	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
+	httpexport "github.com/ethpandaops/observoor/internal/export/http"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
@@ -19,6 +21,8 @@ import (
 type RawConfig struct {
 	Enabled    bool                    `yaml:"enabled"`
 	ClickHouse export.ClickHouseConfig `yaml:"clickhouse"`
+	// HTTP configures optional HTTP export (e.g., to Vector).
+	HTTP httpexport.Config `yaml:"http"`
 	// IncludeFilenames controls whether fd_open filenames are stored.
 	// Defaults to true when unset.
 	IncludeFilenames *bool `yaml:"include_filenames"`
@@ -30,6 +34,9 @@ type RawSink struct {
 	cfg    RawConfig
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
+
+	// HTTP export processor (optional).
+	httpProcessor *processor.BatchItemProcessor[RawEventJSON]
 
 	currentSlot       atomic.Uint64
 	currentSlotStart  atomic.Int64
@@ -90,13 +97,13 @@ func NewRawSink(
 	log logrus.FieldLogger,
 	cfg RawConfig,
 	health *export.HealthMetrics,
-) *RawSink {
+) (*RawSink, error) {
 	includeFilenames := true
 	if cfg.IncludeFilenames != nil {
 		includeFilenames = *cfg.IncludeFilenames
 	}
 
-	return &RawSink{
+	sink := &RawSink{
 		log:              log.WithField("sink", "raw"),
 		cfg:              cfg,
 		writer:           export.NewClickHouseWriter(log, cfg.ClickHouse),
@@ -106,6 +113,22 @@ func NewRawSink(
 		eventCh:          make(chan tracer.ParsedEvent, 65536),
 		includeFilenames: includeFilenames,
 	}
+
+	// Initialize HTTP processor if enabled.
+	if cfg.HTTP.Enabled {
+		proc, err := httpexport.NewProcessor[RawEventJSON](
+			log,
+			cfg.HTTP,
+			"raw_http",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("creating HTTP processor: %w", err)
+		}
+
+		sink.httpProcessor = proc
+	}
+
+	return sink, nil
 }
 
 func (s *RawSink) Name() string { return "raw" }
@@ -132,6 +155,12 @@ func (s *RawSink) Start(ctx context.Context) error {
 
 	ctx, s.cancel = context.WithCancel(ctx)
 
+	// Start HTTP processor if enabled.
+	if s.httpProcessor != nil {
+		s.httpProcessor.Start(ctx)
+		s.log.Info("HTTP export started")
+	}
+
 	go s.runLoop(ctx)
 
 	s.log.Info("Raw sink started")
@@ -157,6 +186,13 @@ func (s *RawSink) Stop() error {
 		if err := s.flush(context.Background(), remaining); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
 			s.reportExportError()
+		}
+	}
+
+	// Shutdown HTTP processor.
+	if s.httpProcessor != nil {
+		if err := s.httpProcessor.Shutdown(context.Background()); err != nil {
+			s.log.WithError(err).Error("HTTP processor shutdown failed")
 		}
 	}
 
@@ -284,6 +320,11 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		return nil
 	}
 
+	// Export to HTTP if enabled.
+	if s.httpProcessor != nil {
+		s.exportHTTP(ctx, rows)
+	}
+
 	start := time.Now()
 
 	conn := s.writer.Conn()
@@ -362,6 +403,20 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		Debug("Flushed raw events")
 
 	return nil
+}
+
+// exportHTTP exports rows to the HTTP processor.
+func (s *RawSink) exportHTTP(ctx context.Context, rows []rawRow) {
+	events := make([]*RawEventJSON, 0, len(rows))
+
+	for _, row := range rows {
+		event := toRawEventJSON(row, s.cfg.HTTP.MetaClientName, s.cfg.HTTP.MetaNetworkName)
+		events = append(events, &event)
+	}
+
+	if err := s.httpProcessor.Write(ctx, events); err != nil {
+		s.log.WithError(err).Debug("HTTP export failed (queue may be full)")
+	}
 }
 
 func toRawRow(

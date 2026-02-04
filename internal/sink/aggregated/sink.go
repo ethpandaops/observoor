@@ -2,13 +2,16 @@ package aggregated
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
+	processor "github.com/ethpandaops/go-batch-processor"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
+	httpexport "github.com/ethpandaops/observoor/internal/export/http"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
@@ -19,6 +22,9 @@ type Sink struct {
 	cfg    Config
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
+
+	// HTTP export processor (optional).
+	httpProcessor *processor.BatchItemProcessor[AggregatedMetricJSON]
 
 	buffer atomic.Pointer[Buffer]
 
@@ -40,7 +46,7 @@ func New(
 	log logrus.FieldLogger,
 	cfg Config,
 	health *export.HealthMetrics,
-) *Sink {
+) (*Sink, error) {
 	// Apply defaults.
 	if cfg.Resolution.Interval <= 0 {
 		cfg.Resolution.Interval = time.Second
@@ -54,7 +60,7 @@ func New(
 		cfg.ClickHouse.FlushInterval = time.Second
 	}
 
-	return &Sink{
+	sink := &Sink{
 		log:     log.WithField("sink", "aggregated"),
 		cfg:     cfg,
 		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
@@ -62,6 +68,22 @@ func New(
 		done:    make(chan struct{}),
 		eventCh: make(chan tracer.ParsedEvent, 65536),
 	}
+
+	// Initialize HTTP processor if enabled.
+	if cfg.HTTP.Enabled {
+		proc, err := httpexport.NewProcessor[AggregatedMetricJSON](
+			log,
+			cfg.HTTP,
+			"aggregated_http",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("creating HTTP processor: %w", err)
+		}
+
+		sink.httpProcessor = proc
+	}
+
+	return sink, nil
 }
 
 // Name returns the sink name.
@@ -88,6 +110,12 @@ func (s *Sink) Start(ctx context.Context) error {
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
+
+	// Start HTTP processor if enabled.
+	if s.httpProcessor != nil {
+		s.httpProcessor.Start(ctx)
+		s.log.Info("HTTP export started")
+	}
 
 	// Initialize first buffer with current sync state.
 	now := time.Now()
@@ -128,6 +156,13 @@ func (s *Sink) Stop() error {
 	if finalBuffer != nil {
 		if err := s.flush(context.Background(), finalBuffer); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
+		}
+	}
+
+	// Shutdown HTTP processor.
+	if s.httpProcessor != nil {
+		if err := s.httpProcessor.Shutdown(context.Background()); err != nil {
+			s.log.WithError(err).Error("HTTP processor shutdown failed")
 		}
 	}
 
@@ -438,6 +473,11 @@ func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
 func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 	start := time.Now()
 	flusher := newFlusher(s.log, s.writer, s.cfg, s.health)
+
+	// Export to HTTP if enabled.
+	if s.httpProcessor != nil {
+		flusher.flushHTTP(ctx, buf, s.httpProcessor)
+	}
 
 	err := flusher.Flush(ctx, buf)
 
