@@ -233,9 +233,26 @@ jobs:
           # Kurtosis creates services in kt-<enclave-name> namespace
           KURTOSIS_NS="kt-observoor-k8s-test"
 
-          # Get the service name and port for the beacon node
-          SVC_NAME=$(kubectl get svc -n "$KURTOSIS_NS" -l "kurtosis.com/service-name=cl-1-lighthouse-geth" -o jsonpath='{.items[0].metadata.name}')
+          # List services to find the beacon service
+          echo "Services in Kurtosis namespace:"
+          kubectl get svc -n "$KURTOSIS_NS" -o wide
+
+          # Find the service matching cl-1-lighthouse-geth (Kurtosis may add suffixes)
+          SVC_NAME=$(kubectl get svc -n "$KURTOSIS_NS" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep 'cl-1-lighthouse-geth' | head -1)
+
+          if [ -z "$SVC_NAME" ]; then
+            echo "ERROR: Could not find beacon service. Available services:"
+            kubectl get svc -n "$KURTOSIS_NS"
+            exit 1
+          fi
+
+          # Get the http port
           HTTP_PORT=$(kubectl get svc -n "$KURTOSIS_NS" "$SVC_NAME" -o jsonpath='{.spec.ports[?(@.name=="http")].port}')
+          if [ -z "$HTTP_PORT" ]; then
+            # Fall back to port 4000 (Lighthouse default)
+            HTTP_PORT="4000"
+            echo "Warning: Could not find 'http' port, using default: $HTTP_PORT"
+          fi
 
           # Use cluster-internal DNS name
           BEACON_ENDPOINT="http://${SVC_NAME}.${KURTOSIS_NS}.svc.cluster.local:${HTTP_PORT}"
