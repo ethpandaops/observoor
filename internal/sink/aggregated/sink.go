@@ -24,7 +24,9 @@ type Sink struct {
 	health *export.HealthMetrics
 
 	// HTTP export processor (optional).
-	httpProcessor *processor.BatchItemProcessor[AggregatedMetricJSON]
+	httpProcessor   *processor.BatchItemProcessor[AggregatedMetricJSON]
+	metaClientName  string
+	metaNetworkName string
 
 	buffer atomic.Pointer[Buffer]
 
@@ -46,6 +48,8 @@ func New(
 	log logrus.FieldLogger,
 	cfg Config,
 	health *export.HealthMetrics,
+	metaClientName string,
+	metaNetworkName string,
 ) (*Sink, error) {
 	// Apply defaults.
 	if cfg.Resolution.Interval <= 0 {
@@ -61,12 +65,14 @@ func New(
 	}
 
 	sink := &Sink{
-		log:     log.WithField("sink", "aggregated"),
-		cfg:     cfg,
-		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
-		health:  health,
-		done:    make(chan struct{}),
-		eventCh: make(chan tracer.ParsedEvent, 65536),
+		log:             log.WithField("sink", "aggregated"),
+		cfg:             cfg,
+		writer:          export.NewClickHouseWriter(log, cfg.ClickHouse),
+		health:          health,
+		done:            make(chan struct{}),
+		eventCh:         make(chan tracer.ParsedEvent, 65536),
+		metaClientName:  metaClientName,
+		metaNetworkName: metaNetworkName,
 	}
 
 	// Initialize HTTP processor if enabled.
@@ -476,7 +482,7 @@ func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 
 	// Export to HTTP if enabled.
 	if s.httpProcessor != nil {
-		flusher.flushHTTP(ctx, buf, s.httpProcessor)
+		flusher.flushHTTP(ctx, buf, s.httpProcessor, s.metaClientName, s.metaNetworkName)
 	}
 
 	err := flusher.Flush(ctx, buf)

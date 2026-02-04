@@ -65,7 +65,10 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	}
 
 	if cfg.Sinks.Raw.Enabled {
-		rawSink, err := sink.NewRawSink(log, cfg.Sinks.Raw, a.health)
+		rawSink, err := sink.NewRawSink(
+			log, cfg.Sinks.Raw, a.health,
+			cfg.MetaClientName, cfg.MetaNetworkName,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("creating raw sink: %w", err)
 		}
@@ -80,7 +83,10 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	}
 
 	if cfg.Sinks.Aggregated.Enabled {
-		aggSink, err := aggregated.New(log, cfg.Sinks.Aggregated, health)
+		aggSink, err := aggregated.New(
+			log, cfg.Sinks.Aggregated, health,
+			cfg.MetaClientName, cfg.MetaNetworkName,
+		)
 		if err != nil {
 			return nil, fmt.Errorf("creating aggregated sink: %w", err)
 		}

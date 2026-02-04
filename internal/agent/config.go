@@ -37,6 +37,12 @@ type Config struct {
 	// RingBufferSize is the BPF ring buffer size in bytes.
 	// Defaults to 4MB.
 	RingBufferSize int `yaml:"ring_buffer_size"`
+
+	// MetaClientName identifies this observoor instance in exported data.
+	MetaClientName string `yaml:"meta_client_name"`
+
+	// MetaNetworkName identifies the network (e.g., mainnet, holesky).
+	MetaNetworkName string `yaml:"meta_network_name"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.

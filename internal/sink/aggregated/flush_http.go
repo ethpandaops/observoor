@@ -45,11 +45,13 @@ func (f *flusher) flushHTTP(
 	ctx context.Context,
 	buf *Buffer,
 	proc *processor.BatchItemProcessor[AggregatedMetricJSON],
+	metaClientName string,
+	metaNetworkName string,
 ) {
 	hf := &httpFlusher{
 		proc:           proc,
-		metaClientName: f.cfg.HTTP.MetaClientName,
-		metaNetwork:    f.cfg.HTTP.MetaNetworkName,
+		metaClientName: metaClientName,
+		metaNetwork:    metaNetworkName,
 		intervalMs:     f.intervalMs,
 	}
 

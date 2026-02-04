@@ -36,7 +36,9 @@ type RawSink struct {
 	health *export.HealthMetrics
 
 	// HTTP export processor (optional).
-	httpProcessor *processor.BatchItemProcessor[RawEventJSON]
+	httpProcessor   *processor.BatchItemProcessor[RawEventJSON]
+	metaClientName  string
+	metaNetworkName string
 
 	currentSlot       atomic.Uint64
 	currentSlotStart  atomic.Int64
@@ -97,6 +99,8 @@ func NewRawSink(
 	log logrus.FieldLogger,
 	cfg RawConfig,
 	health *export.HealthMetrics,
+	metaClientName string,
+	metaNetworkName string,
 ) (*RawSink, error) {
 	includeFilenames := true
 	if cfg.IncludeFilenames != nil {
@@ -112,6 +116,8 @@ func NewRawSink(
 		done:             make(chan struct{}),
 		eventCh:          make(chan tracer.ParsedEvent, 65536),
 		includeFilenames: includeFilenames,
+		metaClientName:   metaClientName,
+		metaNetworkName:  metaNetworkName,
 	}
 
 	// Initialize HTTP processor if enabled.
@@ -410,7 +416,7 @@ func (s *RawSink) exportHTTP(ctx context.Context, rows []rawRow) {
 	events := make([]*RawEventJSON, 0, len(rows))
 
 	for _, row := range rows {
-		event := toRawEventJSON(row, s.cfg.HTTP.MetaClientName, s.cfg.HTTP.MetaNetworkName)
+		event := toRawEventJSON(row, s.metaClientName, s.metaNetworkName)
 		events = append(events, &event)
 	}
 

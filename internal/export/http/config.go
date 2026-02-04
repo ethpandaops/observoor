@@ -45,12 +45,6 @@ type Config struct {
 	// KeepAlive enables HTTP keep-alive connections.
 	// Defaults to true.
 	KeepAlive *bool `yaml:"keep_alive"`
-
-	// MetaClientName is added to exported events.
-	MetaClientName string `yaml:"meta_client_name"`
-
-	// MetaNetworkName is added to exported events.
-	MetaNetworkName string `yaml:"meta_network_name"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
