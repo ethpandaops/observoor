@@ -152,7 +152,7 @@ echo -n "8. Histogram consistency... "
 MISMATCH=$(query "
     SELECT count() FROM syscall_read
     WHERE count > 0
-    AND count != (hist_1us + hist_10us + hist_100us + hist_1ms + hist_10ms + hist_100ms + hist_1s + hist_10s + hist_100s + hist_inf)
+    AND count != (histogram.le_1us + histogram.le_10us + histogram.le_100us + histogram.le_1ms + histogram.le_10ms + histogram.le_100ms + histogram.le_1s + histogram.le_10s + histogram.le_100s + histogram.inf)
 ")
 if [[ "$MISMATCH" == "0" ]]; then
     echo "PASS"
