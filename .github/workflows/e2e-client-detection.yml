@@ -169,9 +169,22 @@ jobs:
           kurtosis cluster set kind-observoor-e2e
           # Start the engine
           kurtosis engine start
-          # Start the gateway for port forwarding
-          kurtosis gateway &
-          sleep 5
+          # Wait for engine to be fully ready
+          sleep 10
+
+      - name: Start Kurtosis gateway
+        run: |
+          # Start the gateway for port forwarding (runs in background)
+          nohup kurtosis gateway > /tmp/kurtosis-gateway.log 2>&1 &
+          # Wait for gateway to be ready
+          for i in $(seq 1 30); do
+            if kurtosis engine status 2>/dev/null | grep -q "RUNNING"; then
+              echo "Gateway ready"
+              break
+            fi
+            echo "Waiting for gateway... (attempt $i)"
+            sleep 2
+          done
 
       - name: Start Ethereum network via Kurtosis
         run: |
