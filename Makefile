@@ -1,4 +1,4 @@
-.PHONY: all generate generate-amd64 generate-arm64 generate-all build test lint clean docker-build e2e-up e2e-down e2e-test
+.PHONY: all generate generate-amd64 generate-arm64 generate-all build test lint clean docker-build e2e-up e2e-down e2e-test e2e-k8s-up e2e-k8s-test e2e-k8s-down
 
 BINARY := observoor
 GO := go
@@ -102,3 +102,13 @@ e2e-down:
 
 e2e-test:
 	./e2e/scripts/run-e2e-tests.sh
+
+# Kubernetes E2E testing with KIND.
+e2e-k8s-up:
+	./e2e/kubernetes/scripts/setup-cluster.sh
+
+e2e-k8s-test:
+	./e2e/kubernetes/scripts/run-tests.sh
+
+e2e-k8s-down:
+	./e2e/kubernetes/scripts/teardown.sh

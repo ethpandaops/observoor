@@ -1,0 +1,31 @@
+# KIND cluster configuration with eBPF support.
+# KIND nodes share the host kernel, so eBPF programs loaded inside the cluster
+# can trace processes running in pods. Required mounts enable BPF operations.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane
+    extraMounts:
+      # Required for eBPF tracing.
+      - hostPath: /sys/kernel/debug
+        containerPath: /sys/kernel/debug
+        readOnly: true
+      # BPF filesystem for map pinning.
+      - hostPath: /sys/fs/bpf
+        containerPath: /sys/fs/bpf
+        propagation: Bidirectional
+      # BTF type information for CO-RE.
+      - hostPath: /sys/kernel/btf
+        containerPath: /sys/kernel/btf
+        readOnly: true
+  - role: worker
+    extraMounts:
+      - hostPath: /sys/kernel/debug
+        containerPath: /sys/kernel/debug
+        readOnly: true
+      - hostPath: /sys/fs/bpf
+        containerPath: /sys/fs/bpf
+        propagation: Bidirectional
+      - hostPath: /sys/kernel/btf
+        containerPath: /sys/kernel/btf
+        readOnly: true

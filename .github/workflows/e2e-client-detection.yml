@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  e2e-client-detection:
+  # Docker-based E2E tests (existing tests, renamed).
+  e2e-docker:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -66,7 +67,7 @@ jobs:
       - name: Wait for data
         run: |
           for i in $(seq 1 24); do
-            COUNT=$(curl -s http://localhost:8123 --data-binary "SELECT count() FROM aggregated_metrics" 2>/dev/null || echo "0")
+            COUNT=$(curl -s http://localhost:8123 --data-binary "SELECT count() FROM sched_on_cpu" 2>/dev/null || echo "0")
             echo "Attempt $i: $COUNT rows"
             if [[ "$COUNT" -gt 100 ]]; then
               break
@@ -87,7 +88,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: failure-logs
+          name: docker-failure-logs
           path: |
             docker-logs.txt
             kurtosis-dump/
@@ -98,3 +99,128 @@ jobs:
           docker compose down -v || true
           kurtosis enclave rm -f observoor-test || true
           kurtosis engine stop || true
+
+  # Kubernetes-based E2E tests using KIND with Kurtosis K8s backend.
+  e2e-kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install KIND
+        run: |
+          curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.24.0/kind-linux-amd64
+          chmod +x ./kind
+          sudo mv ./kind /usr/local/bin/kind
+
+      - name: Install kubectl
+        run: |
+          curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+          chmod +x kubectl
+          sudo mv kubectl /usr/local/bin/kubectl
+
+      - name: Install Kurtosis
+        run: |
+          echo "deb [trusted=yes] https://apt.fury.io/kurtosis-tech/ /" | \
+            sudo tee /etc/apt/sources.list.d/kurtosis.list
+          sudo apt update
+          sudo apt install -y kurtosis-cli
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+
+      - name: Build observoor
+        run: make docker-build
+
+      - name: Create KIND cluster with eBPF support
+        run: |
+          kind create cluster --name observoor-e2e --config e2e/kubernetes/kind-config.yaml
+          kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          kind load docker-image observoor:latest --name observoor-e2e
+
+      - name: Start Kurtosis engine
+        run: kurtosis engine start
+
+      - name: Configure Kurtosis for Kubernetes backend
+        run: kurtosis cluster set kubernetes
+
+      - name: Start Ethereum network via Kurtosis
+        run: |
+          kurtosis run --enclave observoor-k8s-test \
+            github.com/ethpandaops/ethereum-package \
+            --args-file e2e/kubernetes/network-params.yaml
+
+      - name: Wait for beacon sync
+        run: |
+          BEACON_URL=$(kurtosis port print observoor-k8s-test cl-1-lighthouse-geth http)
+          echo "Beacon URL: $BEACON_URL"
+          for i in $(seq 1 60); do
+            if curl -sf "$BEACON_URL/eth/v1/node/syncing" 2>/dev/null | jq -e '.data.is_syncing == false' > /dev/null 2>&1; then
+              echo "Synced!"
+              break
+            fi
+            echo "Attempt $i..."
+            sleep 10
+          done
+
+      - name: Get beacon endpoint
+        id: beacon
+        run: |
+          BEACON_ENDPOINT=$(kurtosis port print observoor-k8s-test cl-1-lighthouse-geth http)
+          echo "endpoint=$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: Deploy ClickHouse and observoor
+        env:
+          BEACON_ENDPOINT: ${{ steps.beacon.outputs.endpoint }}
+        run: ./e2e/kubernetes/scripts/deploy-observoor.sh
+
+      - name: Wait for data collection
+        run: |
+          echo "Waiting for observoor to collect data..."
+          sleep 30
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=50 || true
+
+      - name: Run smoke tests
+        run: ./e2e/kubernetes/scripts/run-tests.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Observoor pods ===" > k8s-logs.txt
+          kubectl -n observoor-test get pods -o wide >> k8s-logs.txt
+          echo "" >> k8s-logs.txt
+          echo "=== Observoor logs ===" >> k8s-logs.txt
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=200 >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== ClickHouse logs ===" >> k8s-logs.txt
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=clickhouse --tail=100 >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== Describe pods ===" >> k8s-logs.txt
+          kubectl -n observoor-test describe pods >> k8s-logs.txt || true
+          kurtosis enclave dump observoor-k8s-test ./kurtosis-k8s-dump || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-failure-logs
+          path: |
+            k8s-logs.txt
+            kurtosis-k8s-dump/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kurtosis enclave rm -f observoor-k8s-test || true
+          kurtosis engine stop || true
+          kind delete cluster --name observoor-e2e || true
