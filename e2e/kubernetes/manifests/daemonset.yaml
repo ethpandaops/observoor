@@ -1,5 +1,7 @@
+# Using Deployment with 1 replica for E2E to avoid migration race conditions.
+# In production, DaemonSet is used (see deploy/kubernetes/daemonset.yaml).
 apiVersion: apps/v1
-kind: DaemonSet
+kind: Deployment
 metadata:
   name: observoor
   namespace: observoor-test
@@ -8,6 +10,7 @@ metadata:
     app.kubernetes.io/component: agent
     app.kubernetes.io/part-of: observoor-e2e
 spec:
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: observoor
