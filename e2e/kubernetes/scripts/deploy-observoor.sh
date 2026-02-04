@@ -24,9 +24,26 @@ kubectl apply -f "${MANIFESTS_DIR}/namespace.yaml"
 echo "Deploying ClickHouse..."
 kubectl apply -f "${MANIFESTS_DIR}/clickhouse.yaml"
 
-# Wait for ClickHouse to be ready.
-echo "Waiting for ClickHouse to be ready..."
+# Wait for ClickHouse deployment to be ready.
+echo "Waiting for ClickHouse deployment to be ready..."
 kubectl -n observoor-test rollout status deployment/clickhouse --timeout=180s
+
+# Wait for ClickHouse to be fully accepting connections.
+echo "Waiting for ClickHouse to accept connections..."
+for i in $(seq 1 60); do
+    if kubectl -n observoor-test exec deployment/clickhouse -- \
+        clickhouse-client --query "SELECT 1" > /dev/null 2>&1; then
+        echo "ClickHouse is ready"
+        break
+    fi
+    if [ $i -eq 60 ]; then
+        echo "ERROR: ClickHouse failed to become ready"
+        kubectl -n observoor-test logs deployment/clickhouse --tail=50 || true
+        exit 1
+    fi
+    echo "Waiting for ClickHouse... (attempt $i)"
+    sleep 2
+done
 
 # Update ConfigMap with beacon endpoint.
 echo "Configuring observoor with beacon endpoint..."
