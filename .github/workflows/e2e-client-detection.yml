@@ -229,7 +229,17 @@ jobs:
       - name: Get beacon endpoint
         id: beacon
         run: |
-          BEACON_ENDPOINT=$(kurtosis port print observoor-k8s-test cl-1-lighthouse-geth http)
+          # For in-cluster access, use the K8s service name instead of gateway URL
+          # Kurtosis creates services in kt-<enclave-name> namespace
+          KURTOSIS_NS="kt-observoor-k8s-test"
+
+          # Get the service name and port for the beacon node
+          SVC_NAME=$(kubectl get svc -n "$KURTOSIS_NS" -l "kurtosis.com/service-name=cl-1-lighthouse-geth" -o jsonpath='{.items[0].metadata.name}')
+          HTTP_PORT=$(kubectl get svc -n "$KURTOSIS_NS" "$SVC_NAME" -o jsonpath='{.spec.ports[?(@.name=="http")].port}')
+
+          # Use cluster-internal DNS name
+          BEACON_ENDPOINT="http://${SVC_NAME}.${KURTOSIS_NS}.svc.cluster.local:${HTTP_PORT}"
+          echo "In-cluster beacon endpoint: $BEACON_ENDPOINT"
           echo "endpoint=$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
 
       - name: Deploy ClickHouse and observoor
