@@ -167,23 +167,38 @@ jobs:
           EOF
           # Set the cluster to use KIND
           kurtosis cluster set kind-observoor-e2e
-          # Start the engine
-          kurtosis engine start
-          # Wait for engine to be fully ready
+
+          # Start gateway first (required for CLI to communicate with K8s engine)
+          echo "Starting Kurtosis gateway..."
+          nohup kurtosis gateway > /tmp/kurtosis-gateway.log 2>&1 &
+          GATEWAY_PID=$!
+          echo "Gateway started with PID: $GATEWAY_PID"
+
+          # Wait for gateway to initialize
           sleep 10
 
-      - name: Start Kurtosis gateway
-        run: |
-          # Start the gateway for port forwarding (runs in background)
-          nohup kurtosis gateway > /tmp/kurtosis-gateway.log 2>&1 &
-          # Wait for gateway to be ready
+          # Start the engine (gateway must be running first for K8s backend)
+          echo "Starting Kurtosis engine..."
+          kurtosis engine start || {
+            echo "First start attempt failed, trying restart..."
+            kurtosis engine restart
+          }
+
+          # Verify engine is running
+          echo "Verifying engine status..."
           for i in $(seq 1 30); do
             if kurtosis engine status 2>/dev/null | grep -q "RUNNING"; then
-              echo "Gateway ready"
+              echo "Engine is running"
+              kurtosis engine status
               break
             fi
-            echo "Waiting for gateway... (attempt $i)"
-            sleep 2
+            if [ $i -eq 30 ]; then
+              echo "Engine failed to start"
+              cat /tmp/kurtosis-gateway.log || true
+              exit 1
+            fi
+            echo "Waiting for engine... (attempt $i)"
+            sleep 5
           done
 
       - name: Start Ethereum network via Kurtosis
