@@ -5,6 +5,10 @@
 
 log_level: info
 
+# Metadata for exported data (used in ClickHouse meta_* columns)
+meta_client_name: "my-observoor-instance"
+meta_network_name: "mainnet"
+
 # Beacon node connection (required)
 beacon:
   endpoint: http://localhost:5052
@@ -40,6 +44,13 @@ sinks:
       flush_interval: 1s
     sample_rate: 1.0
     include_filenames: true
+    # Optional HTTP export (e.g., to Vector)
+    # http:
+    #   enabled: true
+    #   address: http://vector:8080/raw
+    #   compression: gzip
+    #   batch_size: 512
+    #   batch_timeout: 5s
 
   # Slot aggregation - aggregates metrics per Ethereum slot
   slot:
@@ -53,7 +64,42 @@ sinks:
   # Aggregated metrics - configurable resolution aggregation
   aggregated:
     enabled: false
-    resolution: 1s
+    resolution:
+      # Aggregation window duration (50ms, 100ms, 500ms, 1s, 5s, 1m)
+      interval: 1s
+      # Reset aggregation at slot boundaries
+      slot_aligned: true
+      # How often to write sync state (default: 12s)
+      sync_state_poll_interval: 12s
+    dimensions:
+      network:
+        # Include local port in network metrics
+        include_port: true
+        # Include TX/RX direction in network metrics
+        include_direction: true
+      disk:
+        # Include device ID in disk metrics
+        include_device: true
+        # Include read/write breakdown in disk metrics
+        include_rw: true
+    clickhouse:
+      endpoint: clickhouse:9000
+      database: observoor
+      batch_size: 10000
+      flush_interval: 1s
+    # Optional HTTP export (e.g., to Vector)
+    # http:
+    #   enabled: true
+    #   address: http://vector:8080/aggregated
+    #   compression: gzip      # none, gzip, zstd, zlib, snappy
+    #   batch_size: 512
+    #   batch_timeout: 5s
+    #   export_timeout: 30s
+    #   max_queue_size: 51200
+    #   workers: 1
+    #   keep_alive: true
+    #   headers:
+    #     Authorization: "Bearer token"
 
 # Prometheus metrics endpoint
 health:

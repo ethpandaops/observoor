@@ -2,13 +2,16 @@ package aggregated
 
 import (
 	"context"
+	"fmt"
 	"sync/atomic"
 	"time"
 
+	processor "github.com/ethpandaops/go-batch-processor"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/observoor/internal/beacon"
 	"github.com/ethpandaops/observoor/internal/export"
+	httpexport "github.com/ethpandaops/observoor/internal/export/http"
 	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
@@ -19,6 +22,16 @@ type Sink struct {
 	cfg    Config
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
+
+	// HTTP export processor (optional).
+	httpProcessor   *processor.BatchItemProcessor[AggregatedMetricJSON]
+	metaClientName  string
+	metaNetworkName string
+
+	// Unified exporter architecture.
+	collector  *Collector
+	exporters  []MetricExporter
+	chExporter *ClickHouseExporter // Keep reference for sync state.
 
 	buffer atomic.Pointer[Buffer]
 
@@ -40,7 +53,9 @@ func New(
 	log logrus.FieldLogger,
 	cfg Config,
 	health *export.HealthMetrics,
-) *Sink {
+	metaClientName string,
+	metaNetworkName string,
+) (*Sink, error) {
 	// Apply defaults.
 	if cfg.Resolution.Interval <= 0 {
 		cfg.Resolution.Interval = time.Second
@@ -54,14 +69,43 @@ func New(
 		cfg.ClickHouse.FlushInterval = time.Second
 	}
 
-	return &Sink{
-		log:     log.WithField("sink", "aggregated"),
-		cfg:     cfg,
-		writer:  export.NewClickHouseWriter(log, cfg.ClickHouse),
-		health:  health,
-		done:    make(chan struct{}),
-		eventCh: make(chan tracer.ParsedEvent, 65536),
+	writer := export.NewClickHouseWriter(log, cfg.ClickHouse)
+
+	sink := &Sink{
+		log:             log.WithField("sink", "aggregated"),
+		cfg:             cfg,
+		writer:          writer,
+		health:          health,
+		done:            make(chan struct{}),
+		eventCh:         make(chan tracer.ParsedEvent, 65536),
+		metaClientName:  metaClientName,
+		metaNetworkName: metaNetworkName,
+		collector:       NewCollector(cfg.Resolution.Interval),
+		exporters:       make([]MetricExporter, 0, 2),
 	}
+
+	// Initialize ClickHouse exporter.
+	chExporter := NewClickHouseExporter(log, writer, cfg.ClickHouse, health)
+	sink.chExporter = chExporter
+	sink.exporters = append(sink.exporters, chExporter)
+
+	// Initialize HTTP exporter if enabled.
+	if cfg.HTTP.Enabled {
+		proc, err := httpexport.NewProcessor[AggregatedMetricJSON](
+			log,
+			cfg.HTTP,
+			"aggregated_http",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("creating HTTP processor: %w", err)
+		}
+
+		sink.httpProcessor = proc
+		httpExporter := NewHTTPExporter(log, proc, cfg.HTTP)
+		sink.exporters = append(sink.exporters, httpExporter)
+	}
+
+	return sink, nil
 }
 
 // Name returns the sink name.
@@ -88,6 +132,12 @@ func (s *Sink) Start(ctx context.Context) error {
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
+
+	// Start HTTP processor if enabled.
+	if s.httpProcessor != nil {
+		s.httpProcessor.Start(ctx)
+		s.log.Info("HTTP export started")
+	}
 
 	// Initialize first buffer with current sync state.
 	now := time.Now()
@@ -128,6 +178,13 @@ func (s *Sink) Stop() error {
 	if finalBuffer != nil {
 		if err := s.flush(context.Background(), finalBuffer); err != nil {
 			s.log.WithError(err).Error("Final flush failed")
+		}
+	}
+
+	// Shutdown HTTP processor.
+	if s.httpProcessor != nil {
+		if err := s.httpProcessor.Shutdown(context.Background()); err != nil {
+			s.log.WithError(err).Error("HTTP processor shutdown failed")
 		}
 	}
 
@@ -434,20 +491,36 @@ func (s *Sink) rotateBuffer(now time.Time, slot uint64) {
 	}()
 }
 
-// flush writes the buffer contents to ClickHouse.
+// flush collects metrics from the buffer and exports to all destinations.
 func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 	start := time.Now()
-	flusher := newFlusher(s.log, s.writer, s.cfg, s.health)
 
-	err := flusher.Flush(ctx, buf)
+	meta := BatchMetadata{
+		ClientName:  s.metaClientName,
+		NetworkName: s.metaNetworkName,
+		UpdatedTime: time.Now(),
+	}
+
+	// Single-pass collection.
+	batch := s.collector.Collect(buf, meta)
+
+	// Export to all registered exporters.
+	var lastErr error
+
+	for _, exp := range s.exporters {
+		if err := exp.Export(ctx, batch); err != nil {
+			s.log.WithError(err).WithField("exporter", exp.Name()).Error("Export failed")
+			lastErr = err
+		}
+	}
 
 	// Record flush metrics.
-	if s.health != nil && err == nil {
+	if s.health != nil && lastErr == nil {
 		duration := time.Since(start)
 		s.health.SinkFlushDuration.WithLabelValues("aggregated").Observe(duration.Seconds())
 	}
 
-	return err
+	return lastErr
 }
 
 // flushSyncState writes the current sync state to ClickHouse.
@@ -456,7 +529,7 @@ func (s *Sink) flushSyncState(ctx context.Context) {
 	slotStartNs := s.currentSlotStart.Load()
 	slotStartTime := time.Unix(0, slotStartNs)
 
-	row := syncStateRow{
+	row := SyncStateRow{
 		UpdatedDateTime:            now,
 		EventTime:                  now,
 		WallclockSlot:              uint32(s.currentSlot.Load()),
@@ -466,7 +539,13 @@ func (s *Sink) flushSyncState(ctx context.Context) {
 		ELOffline:                  s.elOffline.Load() == 1,
 	}
 
-	if err := FlushSyncState(ctx, s.writer, s.cfg, s.health, row); err != nil {
+	meta := BatchMetadata{
+		ClientName:  s.metaClientName,
+		NetworkName: s.metaNetworkName,
+		UpdatedTime: now,
+	}
+
+	if err := s.chExporter.ExportSyncState(ctx, row, meta); err != nil {
 		s.log.WithError(err).Error("Sync state flush failed")
 	}
 }

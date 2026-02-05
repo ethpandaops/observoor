@@ -37,6 +37,12 @@ type Config struct {
 	// RingBufferSize is the BPF ring buffer size in bytes.
 	// Defaults to 4MB.
 	RingBufferSize int `yaml:"ring_buffer_size"`
+
+	// MetaClientName identifies this observoor instance in exported data.
+	MetaClientName string `yaml:"meta_client_name"`
+
+	// MetaNetworkName identifies the network (e.g., mainnet, holesky).
+	MetaNetworkName string `yaml:"meta_network_name"`
 }
 
 // DefaultConfig returns a Config with sensible defaults.
@@ -75,6 +81,14 @@ func LoadConfig(path string) (*Config, error) {
 func (c *Config) Validate() error {
 	if c.Beacon.Endpoint == "" {
 		return fmt.Errorf("beacon.endpoint is required")
+	}
+
+	if c.MetaClientName == "" {
+		return fmt.Errorf("meta_client_name is required")
+	}
+
+	if c.MetaNetworkName == "" {
+		return fmt.Errorf("meta_network_name is required")
 	}
 
 	// If no PID discovery method is configured, use default process names

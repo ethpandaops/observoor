@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/ethpandaops/observoor/internal/export"
+	httpexport "github.com/ethpandaops/observoor/internal/export/http"
 )
 
 // Config configures the aggregated metrics sink.
@@ -19,6 +20,9 @@ type Config struct {
 
 	// ClickHouse configures the ClickHouse connection.
 	ClickHouse export.ClickHouseConfig `yaml:"clickhouse"`
+
+	// HTTP configures optional HTTP export (e.g., to Vector).
+	HTTP httpexport.Config `yaml:"http"`
 }
 
 // ResolutionConfig configures aggregation time windows.
