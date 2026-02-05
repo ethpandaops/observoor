@@ -1,0 +1,7 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: observoor-test
+  labels:
+    app.kubernetes.io/name: observoor
+    app.kubernetes.io/part-of: observoor-e2e

@@ -1,0 +1,18 @@
+# Kurtosis ethereum-package configuration for K8s E2E testing.
+# Same clients as Docker E2E for parity.
+participants:
+  - el_type: geth
+    cl_type: lighthouse
+  - el_type: reth
+    cl_type: prysm
+  - el_type: besu
+    cl_type: teku
+  - el_type: nethermind
+    cl_type: lodestar
+  - el_type: erigon
+    cl_type: nimbus
+
+network_params:
+  seconds_per_slot: 12
+
+additional_services: []

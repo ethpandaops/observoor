@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 jobs:
-  e2e-client-detection:
+  # Docker-based E2E tests (existing tests, renamed).
+  e2e-docker:
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -66,7 +67,7 @@ jobs:
       - name: Wait for data
         run: |
           for i in $(seq 1 24); do
-            COUNT=$(curl -s http://localhost:8123 --data-binary "SELECT count() FROM aggregated_metrics" 2>/dev/null || echo "0")
+            COUNT=$(curl -s http://localhost:8123 --data-binary "SELECT count() FROM sched_on_cpu" 2>/dev/null || echo "0")
             echo "Attempt $i: $COUNT rows"
             if [[ "$COUNT" -gt 100 ]]; then
               break
@@ -87,7 +88,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: failure-logs
+          name: docker-failure-logs
           path: |
             docker-logs.txt
             kurtosis-dump/
@@ -98,3 +99,217 @@ jobs:
           docker compose down -v || true
           kurtosis enclave rm -f observoor-test || true
           kurtosis engine stop || true
+
+  # Kubernetes-based E2E tests using K3s with Kurtosis K8s backend.
+  # K3s runs directly on the host (no nested containers like KIND),
+  # so eBPF programs can properly trace pod processes.
+  e2e-kubernetes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install K3s
+        run: |
+          # Install K3s without traefik (we don't need ingress)
+          curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik" sh -
+
+          # Wait for K3s API to be available (takes a few seconds after install)
+          echo "Waiting for K3s API to be ready..."
+          for i in $(seq 1 30); do
+            if sudo k3s kubectl get nodes > /dev/null 2>&1; then
+              echo "K3s API is ready"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "K3s API failed to become ready"
+              sudo journalctl -u k3s --no-pager -n 50 || true
+              exit 1
+            fi
+            echo "Waiting for K3s API... (attempt $i)"
+            sleep 2
+          done
+
+          # Wait for node to be ready
+          sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
+
+          # Set up kubeconfig for non-root access
+          mkdir -p ~/.kube
+          sudo cp /etc/rancher/k3s/k3s.yaml ~/.kube/config
+          sudo chown $USER:$USER ~/.kube/config
+          chmod 600 ~/.kube/config
+
+          kubectl get nodes
+
+      - name: Install Kurtosis
+        run: |
+          echo "deb [trusted=yes] https://apt.fury.io/kurtosis-tech/ /" | \
+            sudo tee /etc/apt/sources.list.d/kurtosis.list
+          sudo apt update
+          sudo apt install -y kurtosis-cli
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23'
+          cache: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang llvm libbpf-dev linux-headers-$(uname -r)
+
+      - name: Build observoor
+        run: make docker-build
+
+      - name: Import observoor image to K3s
+        run: |
+          # Save docker image and import to K3s containerd
+          docker save observoor:latest -o /tmp/observoor.tar
+          sudo k3s ctr images import /tmp/observoor.tar
+          rm /tmp/observoor.tar
+
+          # Verify image is available
+          sudo k3s ctr images ls | grep observoor
+
+      - name: Configure Kurtosis for K3s backend
+        run: |
+          # Configure Kurtosis to use K3s
+          KURTOSIS_CONFIG=$(kurtosis config path)
+          cat > "$KURTOSIS_CONFIG" <<EOF
+          config-version: 2
+          should-send-metrics: false
+          kurtosis-clusters:
+            docker:
+              type: "docker"
+            k3s-local:
+              type: "kubernetes"
+              config:
+                kubernetes-cluster-name: "default"
+                storage-class: "local-path"
+                enclave-size-in-megabytes: 10
+          EOF
+
+          # Set the cluster to use K3s
+          kurtosis cluster set k3s-local
+
+          # Start gateway (required for CLI to communicate with K8s engine)
+          echo "Starting Kurtosis gateway..."
+          nohup kurtosis gateway > /tmp/kurtosis-gateway.log 2>&1 &
+          sleep 10
+
+          # Start the engine
+          echo "Starting Kurtosis engine..."
+          kurtosis engine start || kurtosis engine restart
+
+          # Verify engine is accessible
+          echo "Verifying engine is accessible..."
+          for i in $(seq 1 30); do
+            if kurtosis enclave ls 2>/dev/null; then
+              echo "Engine is accessible"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "Engine failed to become accessible"
+              cat /tmp/kurtosis-gateway.log || true
+              exit 1
+            fi
+            echo "Waiting for engine... (attempt $i)"
+            sleep 5
+          done
+
+      - name: Start Ethereum network via Kurtosis
+        run: |
+          kurtosis run --enclave observoor-k8s-test \
+            github.com/ethpandaops/ethereum-package \
+            --args-file e2e/kubernetes/network-params.yaml
+
+      - name: Wait for beacon sync
+        run: |
+          BEACON_URL=$(kurtosis port print observoor-k8s-test cl-1-lighthouse-geth http)
+          echo "Beacon URL: $BEACON_URL"
+          for i in $(seq 1 60); do
+            if curl -sf "$BEACON_URL/eth/v1/node/syncing" 2>/dev/null | jq -e '.data.is_syncing == false' > /dev/null 2>&1; then
+              echo "Synced!"
+              break
+            fi
+            echo "Attempt $i..."
+            sleep 10
+          done
+
+      - name: Get beacon endpoint
+        id: beacon
+        run: |
+          # For in-cluster access, use the K8s service name
+          KURTOSIS_NS="kt-observoor-k8s-test"
+
+          echo "Services in Kurtosis namespace:"
+          kubectl get svc -n "$KURTOSIS_NS" -o wide
+
+          # Find the beacon service
+          SVC_NAME=$(kubectl get svc -n "$KURTOSIS_NS" -o jsonpath='{.items[*].metadata.name}' | tr ' ' '\n' | grep 'cl-1-lighthouse-geth' | head -1)
+
+          if [ -z "$SVC_NAME" ]; then
+            echo "ERROR: Could not find beacon service"
+            kubectl get svc -n "$KURTOSIS_NS"
+            exit 1
+          fi
+
+          # Get the http port (default to 4000 for Lighthouse)
+          HTTP_PORT=$(kubectl get svc -n "$KURTOSIS_NS" "$SVC_NAME" -o jsonpath='{.spec.ports[?(@.name=="http")].port}')
+          HTTP_PORT="${HTTP_PORT:-4000}"
+
+          BEACON_ENDPOINT="http://${SVC_NAME}.${KURTOSIS_NS}.svc.cluster.local:${HTTP_PORT}"
+          echo "In-cluster beacon endpoint: $BEACON_ENDPOINT"
+          echo "endpoint=$BEACON_ENDPOINT" >> $GITHUB_OUTPUT
+
+      - name: Deploy ClickHouse and observoor
+        env:
+          BEACON_ENDPOINT: ${{ steps.beacon.outputs.endpoint }}
+        run: ./e2e/kubernetes/scripts/deploy-observoor.sh
+
+      - name: Wait for data collection
+        run: |
+          echo "Waiting for observoor to collect data..."
+          sleep 60
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=100 || true
+
+      - name: Run smoke tests
+        run: ./e2e/kubernetes/scripts/run-tests.sh
+
+      - name: Collect logs on failure
+        if: failure()
+        run: |
+          echo "=== Observoor pods ===" > k8s-logs.txt
+          kubectl -n observoor-test get pods -o wide >> k8s-logs.txt
+          echo "" >> k8s-logs.txt
+          echo "=== Observoor logs ===" >> k8s-logs.txt
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=200 >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== ClickHouse logs ===" >> k8s-logs.txt
+          kubectl -n observoor-test logs -l app.kubernetes.io/name=clickhouse --tail=100 >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== Describe pods ===" >> k8s-logs.txt
+          kubectl -n observoor-test describe pods >> k8s-logs.txt || true
+          echo "" >> k8s-logs.txt
+          echo "=== All pods ===" >> k8s-logs.txt
+          kubectl get pods -A >> k8s-logs.txt || true
+          kurtosis enclave dump observoor-k8s-test ./kurtosis-k8s-dump || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kubernetes-failure-logs
+          path: |
+            k8s-logs.txt
+            kurtosis-k8s-dump/
+
+      - name: Cleanup
+        if: always()
+        run: |
+          kurtosis enclave rm -f observoor-k8s-test || true
+          kurtosis engine stop || true
+          /usr/local/bin/k3s-uninstall.sh || true
