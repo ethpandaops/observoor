@@ -24,11 +24,6 @@ sinks:
       table: "raw_events"
       batch_size: 10000
       flush_interval: 1s
-  slot:
-    enabled: true
-  window:
-    enabled: false
-    interval: 500ms
 
 health:
   addr: ":9090"

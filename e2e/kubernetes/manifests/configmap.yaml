@@ -10,6 +10,9 @@ data:
   config.yaml: |
     log_level: debug
 
+    meta_client_name: "e2e-kubernetes"
+    meta_network_name: "e2e-devnet"
+
     beacon:
       endpoint: ${BEACON_ENDPOINT}
       timeout: 30s
@@ -43,10 +46,6 @@ data:
 
     sinks:
       raw:
-        enabled: false
-      slot:
-        enabled: false
-      window:
         enabled: false
       aggregated:
         enabled: true

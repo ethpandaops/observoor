@@ -60,10 +60,6 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	}
 
 	// Configure enabled sinks.
-	if cfg.Sinks.Slot.Enabled {
-		a.sinks = append(a.sinks, sink.NewSlotSink(log, cfg.Sinks.Slot))
-	}
-
 	if cfg.Sinks.Raw.Enabled {
 		rawSink, err := sink.NewRawSink(
 			log, cfg.Sinks.Raw, a.health,
@@ -74,12 +70,6 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 		}
 
 		a.sinks = append(a.sinks, rawSink)
-	}
-
-	if cfg.Sinks.Window.Enabled {
-		a.sinks = append(a.sinks, sink.NewWindowSink(
-			log, cfg.Sinks.Window,
-		))
 	}
 
 	if cfg.Sinks.Aggregated.Enabled {

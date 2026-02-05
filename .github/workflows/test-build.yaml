@@ -24,7 +24,7 @@ jobs:
 
       - name: Install BPF build dependencies
         run: |
-          sudo apt-get -y install clang llvm libbpf-dev linux-headers-generic make
+          sudo apt-get -y install clang llvm libbpf-dev make
 
       - name: Generate BPF code for all architectures
         run: make generate-all
