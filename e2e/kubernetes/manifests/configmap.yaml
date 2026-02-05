@@ -44,10 +44,6 @@ data:
     sinks:
       raw:
         enabled: false
-      slot:
-        enabled: false
-      window:
-        enabled: false
       aggregated:
         enabled: true
         resolution:

@@ -35,11 +35,6 @@ pid:
 sinks:
   raw:
     enabled: false
-  slot:
-    enabled: true
-  window:
-    enabled: false
-    interval: 500ms
 health:
   addr: ":9091"
 sync_poll_interval: 15s
@@ -61,7 +56,6 @@ ring_buffer_size: 8388608
 		"/sys/fs/cgroup/ethereum.slice",
 		cfg.PID.CgroupPath,
 	)
-	assert.True(t, cfg.Sinks.Slot.Enabled)
 	assert.False(t, cfg.Sinks.Raw.Enabled)
 	assert.Equal(t, ":9091", cfg.Health.Addr)
 	assert.Equal(t, 8388608, cfg.RingBufferSize)

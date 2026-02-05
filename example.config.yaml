@@ -52,15 +52,6 @@ sinks:
     #   batch_size: 512
     #   batch_timeout: 5s
 
-  # Slot aggregation - aggregates metrics per Ethereum slot
-  slot:
-    enabled: true
-
-  # Window aggregation - aggregates over fixed time intervals
-  window:
-    enabled: false
-    interval: 500ms
-
   # Aggregated metrics - configurable resolution aggregation
   aggregated:
     enabled: false
