@@ -1,0 +1,80 @@
+[package]
+name = "observoor"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+description = "eBPF-based Ethereum client monitoring agent"
+license = "MIT"
+
+[[bin]]
+name = "observoor"
+path = "src/main.rs"
+
+[dependencies]
+# Core
+tokio = { version = "1", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+humantime-serde = "1"
+humantime = "2"
+
+# eBPF (Linux only)
+aya = { version = "0.13", optional = true }
+
+# ClickHouse (native TCP protocol, suharev7)
+clickhouse-rs = { version = "1.0.0-alpha.1", default-features = true }
+
+# HTTP server
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors"] }
+
+# Prometheus metrics
+prometheus = { version = "0.13", features = ["process"] }
+
+# HTTP client (beacon node, HTTP export)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+
+# Compression (HTTP export)
+flate2 = "1"
+zstd = "0.13"
+snap = "1"
+
+# Profiling (Linux only)
+pprof = { version = "0.14", features = ["flamegraph", "protobuf-codec"], optional = true }
+
+# Utilities
+futures = "0.3"
+dashmap = "6"
+parking_lot = "0.12"
+chrono = { version = "0.4", features = ["serde"] }
+tokio-util = "0.7"
+
+[features]
+default = ["bpf", "profiling"]
+bpf = ["dep:aya"]
+profiling = ["dep:pprof"]
+
+[lints.clippy]
+unwrap_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "warn"
+unimplemented = "deny"
+future_not_send = "warn"
+large_futures = "warn"
+inefficient_to_string = "warn"
+module_name_repetitions = "allow"
+type_complexity = "allow"
+too_many_arguments = "allow"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

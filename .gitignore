@@ -1,24 +1,6 @@
-# Binaries
-/observoor
-/bin/
+# Rust build artifacts
+/target/
 *.o
-
-# BPF generated files
-*_bpfel.go
-*_bpfeb.go
-*_bpfel.o
-*_bpfeb.o
-
-# Go
-*.exe
-*.exe~
-*.dll
-*.so
-*.dylib
-*.test
-*.out
-go.work
-go.work.sum
 
 # IDE
 .idea/
@@ -31,9 +13,8 @@ go.work.sum
 .DS_Store
 Thumbs.db
 
-# Docker
+# Docker / env
 .env
 
-# Coverage
-coverage.out
-coverage.html
+# Generated config (e2e)
+/config.yaml

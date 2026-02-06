@@ -1,7 +1,7 @@
 .git
 .gitignore
 .github
-bin/
+target/
 *.md
 LICENSE
 .idea/
