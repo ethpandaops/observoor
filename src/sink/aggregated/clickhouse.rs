@@ -367,6 +367,7 @@ impl ClickHouseExporter {
 }
 
 /// Sync state row for the sync_state table.
+#[allow(dead_code)]
 pub struct SyncStateRow {
     pub updated_date_time: SystemTime,
     pub event_time: SystemTime,
@@ -379,6 +380,7 @@ pub struct SyncStateRow {
 
 impl ClickHouseExporter {
     /// Writes a sync state row to the sync_state table.
+    #[allow(dead_code)]
     pub async fn export_sync_state(&self, row: &SyncStateRow, meta: &BatchMetadata) -> Result<()> {
         let table = format!("{}.sync_state", self.database);
 

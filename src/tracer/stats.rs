@@ -26,6 +26,7 @@ impl EventStats {
     }
 
     /// Increment the counter for the given event type by n.
+    #[allow(dead_code)]
     pub fn record_n(&self, t: EventType, n: u64) {
         if let Some(counter) = self.counts.get(t as usize) {
             counter.fetch_add(n, Ordering::Relaxed);

@@ -122,6 +122,7 @@ pub enum ClientType {
 }
 
 /// Maximum ClientType value, used for array sizing.
+#[allow(dead_code)]
 pub const MAX_CLIENT_TYPE: usize = 11;
 
 impl ClientType {
@@ -218,6 +219,7 @@ impl fmt::Display for Direction {
 
 /// Common event header (24 bytes in BPF, matches event_header in observoor.h).
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct Event {
     pub timestamp_ns: u64,
     pub pid: u32,
@@ -228,6 +230,7 @@ pub struct Event {
 
 /// Syscall event with latency measurement.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct SyscallEvent {
     pub event: Event,
     pub latency_ns: u64,
@@ -238,6 +241,7 @@ pub struct SyscallEvent {
 
 /// Block I/O operation event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct DiskIOEvent {
     pub event: Event,
     pub latency_ns: u64,
@@ -252,6 +256,7 @@ pub struct DiskIOEvent {
 /// Network send/receive event.
 /// When `has_metrics` is true, `srtt_us` and `cwnd` contain inline TCP metrics.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct NetIOEvent {
     pub event: Event,
     pub bytes: u32,
@@ -265,6 +270,7 @@ pub struct NetIOEvent {
 
 /// Context switch event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct SchedEvent {
     pub event: Event,
     pub on_cpu_ns: u64,
@@ -273,6 +279,7 @@ pub struct SchedEvent {
 
 /// Runqueue/off-CPU latency event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct SchedRunqueueEvent {
     pub event: Event,
     pub runqueue_ns: u64,
@@ -281,6 +288,7 @@ pub struct SchedRunqueueEvent {
 
 /// Page fault event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct PageFaultEvent {
     pub event: Event,
     pub address: u64,
@@ -289,6 +297,7 @@ pub struct PageFaultEvent {
 
 /// File descriptor open/close event.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FDEvent {
     pub event: Event,
     pub fd: i32,
@@ -297,6 +306,7 @@ pub struct FDEvent {
 
 /// Merged block I/O request event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct BlockMergeEvent {
     pub event: Event,
     pub bytes: u32,
@@ -306,6 +316,7 @@ pub struct BlockMergeEvent {
 
 /// TCP retransmission event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct TcpRetransmitEvent {
     pub event: Event,
     pub bytes: u32,
@@ -315,6 +326,7 @@ pub struct TcpRetransmitEvent {
 
 /// TCP state transition event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct TcpStateEvent {
     pub event: Event,
     pub src_port: u16,
@@ -325,6 +337,7 @@ pub struct TcpStateEvent {
 
 /// Memory reclaim/compaction latency event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct MemLatencyEvent {
     pub event: Event,
     pub duration_ns: u64,
@@ -332,6 +345,7 @@ pub struct MemLatencyEvent {
 
 /// Swap-in/out event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct SwapEvent {
     pub event: Event,
     pub pages: u64,
@@ -339,6 +353,7 @@ pub struct SwapEvent {
 
 /// OOM kill event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct OOMKillEvent {
     pub event: Event,
     pub target_pid: u32,
@@ -346,6 +361,7 @@ pub struct OOMKillEvent {
 
 /// Process exit event.
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 pub struct ProcessExitEvent {
     pub event: Event,
     pub exit_code: u32,
@@ -362,6 +378,7 @@ pub struct ParsedEvent {
 
 /// Typed event payload variants.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TypedEvent {
     Syscall(SyscallEvent),
     DiskIO(DiskIOEvent),

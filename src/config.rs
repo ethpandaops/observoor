@@ -10,6 +10,7 @@ use serde::Deserialize;
 pub struct Config {
     /// Logging verbosity (debug, info, warn, error). Default: "info".
     #[serde(default = "default_log_level")]
+    #[allow(dead_code)]
     pub log_level: String,
 
     /// Beacon node connection configuration.
@@ -114,6 +115,7 @@ pub struct ResolutionConfig {
 
     /// Interval for writing sync state. Default: 12s.
     #[serde(default = "default_sync_state_poll_interval", with = "humantime_serde")]
+    #[allow(dead_code)]
     pub sync_state_poll_interval: Duration,
 }
 
@@ -174,14 +176,17 @@ pub struct ClickHouseConfig {
 
     /// Target table name. Default: "aggregated_metrics".
     #[serde(default = "default_table")]
+    #[allow(dead_code)]
     pub table: String,
 
     /// Number of events per batch insert. Default: 10000.
     #[serde(default = "default_batch_size")]
+    #[allow(dead_code)]
     pub batch_size: usize,
 
     /// Maximum time between flushes. Default: 1s.
     #[serde(default = "default_flush_interval", with = "humantime_serde")]
+    #[allow(dead_code)]
     pub flush_interval: Duration,
 
     /// ClickHouse username.
@@ -506,6 +511,7 @@ impl NetworkDimensionsConfig {
 
 impl ClickHouseConfig {
     /// Build a ClickHouse DSN string (clickhouse://user:pass@endpoint/database).
+    #[allow(dead_code)]
     pub fn dsn(&self) -> String {
         let mut dsn = "clickhouse://".to_string();
 

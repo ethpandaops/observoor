@@ -27,6 +27,7 @@ const BPF_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/observoor.bpf.o
 /// BPF map value for tracked_tids (matches `struct tracked_tid_val` in maps.h).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
+#[allow(dead_code)]
 struct BpfTrackedTidVal {
     pid: u32,
     client_type: u8,
@@ -73,6 +74,7 @@ impl BpfTracer {
     }
 
     /// Return a copy of the attachment statistics.
+    #[allow(dead_code)]
     pub fn attachment_stats(&self) -> AttachmentStats {
         self.attach_stats
     }
@@ -175,7 +177,7 @@ impl Tracer for BpfTracer {
                     .copied()
                     .unwrap_or(ClientType::Unknown);
                 map.insert(pid, ct as u8, 0)
-                    .with_context(|| format!("adding PID {} to BPF map", pid))?;
+                    .with_context(|| format!("adding PID {pid} to BPF map"))?;
 
                 tracing::debug!(pid, client = %ct, "added PID to BPF map");
             }
@@ -212,7 +214,7 @@ impl Tracer for BpfTracer {
                     _pad: [0; 3],
                 };
                 map.insert(tid, val, 0)
-                    .with_context(|| format!("adding TID {} to BPF map", tid))?;
+                    .with_context(|| format!("adding TID {tid} to BPF map"))?;
             }
         }
 
@@ -314,15 +316,15 @@ async fn read_loop(
 }
 
 fn report_error(handlers: &[ErrorHandler], err: &std::io::Error) {
-    let anyhow_err = anyhow::anyhow!("{}", err);
+    let anyhow_err = anyhow::anyhow!("{err}");
     for handler in handlers {
-        handler(anyhow::anyhow!("{}", anyhow_err));
+        handler(anyhow::anyhow!("{anyhow_err}"));
     }
 }
 
 fn report_parse_error(handlers: &[ErrorHandler], err: &ParseError) {
     for handler in handlers {
-        handler(anyhow::anyhow!("{}", err));
+        handler(anyhow::anyhow!("{err}"));
     }
 }
 
@@ -509,13 +511,13 @@ fn attach_tracepoint_required(
 ) -> Result<()> {
     let prog: &mut TracePoint = ebpf
         .program_mut(prog_name)
-        .ok_or_else(|| anyhow::anyhow!("tracepoint program '{}' not found", prog_name))?
+        .ok_or_else(|| anyhow::anyhow!("tracepoint program '{prog_name}' not found"))?
         .try_into()
-        .with_context(|| format!("'{}' is not a tracepoint program", prog_name))?;
+        .with_context(|| format!("'{prog_name}' is not a tracepoint program"))?;
     prog.load()
-        .with_context(|| format!("loading tracepoint {}/{}", group, name))?;
+        .with_context(|| format!("loading tracepoint {group}/{name}"))?;
     prog.attach(group, name)
-        .with_context(|| format!("attaching tracepoint {}/{}", group, name))?;
+        .with_context(|| format!("attaching tracepoint {group}/{name}"))?;
     stats.tracepoints_attached += 1;
     tracing::debug!(group, name, "attached tracepoint");
     Ok(())
@@ -531,7 +533,7 @@ fn attach_tracepoint_optional(
     let result: Result<()> = (|| {
         let prog: &mut TracePoint = ebpf
             .program_mut(prog_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{}' not found", prog_name))?
+            .ok_or_else(|| anyhow::anyhow!("program '{prog_name}' not found"))?
             .try_into()?;
         prog.load()?;
         prog.attach(group, name)?;
@@ -567,13 +569,13 @@ fn attach_kprobe_required(
 
     let prog: &mut KProbe = ebpf
         .program_mut(prog_name)
-        .ok_or_else(|| anyhow::anyhow!("kprobe program '{}' not found", prog_name))?
+        .ok_or_else(|| anyhow::anyhow!("kprobe program '{prog_name}' not found"))?
         .try_into()
-        .with_context(|| format!("'{}' is not a kprobe program", prog_name))?;
+        .with_context(|| format!("'{prog_name}' is not a kprobe program"))?;
     prog.load()
-        .with_context(|| format!("loading kprobe {}", symbol))?;
+        .with_context(|| format!("loading kprobe {symbol}"))?;
     prog.attach(symbol, 0)
-        .with_context(|| format!("attaching kprobe {}", symbol))?;
+        .with_context(|| format!("attaching kprobe {symbol}"))?;
 
     if is_kretprobe {
         stats.kretprobes_attached += 1;
@@ -597,7 +599,7 @@ fn attach_kprobe_optional(
     let result: Result<()> = (|| {
         let prog: &mut KProbe = ebpf
             .program_mut(prog_name)
-            .ok_or_else(|| anyhow::anyhow!("program '{}' not found", prog_name))?
+            .ok_or_else(|| anyhow::anyhow!("program '{prog_name}' not found"))?
             .try_into()?;
         prog.load()?;
         prog.attach(symbol, 0)?;
@@ -639,7 +641,7 @@ fn clear_hash_map<K: aya::Pod, V: aya::Pod>(ebpf: &mut Ebpf, map_name: &str) -> 
     let keys: Vec<K> = {
         let map: BpfHashMap<_, K, V> = BpfHashMap::try_from(
             ebpf.map_mut(map_name)
-                .ok_or_else(|| anyhow::anyhow!("map '{}' not found", map_name))?,
+                .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found"))?,
         )?;
         map.keys().filter_map(|k| k.ok()).collect()
     };
@@ -648,7 +650,7 @@ fn clear_hash_map<K: aya::Pod, V: aya::Pod>(ebpf: &mut Ebpf, map_name: &str) -> 
     if !keys.is_empty() {
         let mut map: BpfHashMap<_, K, V> = BpfHashMap::try_from(
             ebpf.map_mut(map_name)
-                .ok_or_else(|| anyhow::anyhow!("map '{}' not found", map_name))?,
+                .ok_or_else(|| anyhow::anyhow!("map '{map_name}' not found"))?,
         )?;
         for key in &keys {
             if let Err(e) = map.remove(key) {

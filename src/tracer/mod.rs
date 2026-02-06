@@ -14,6 +14,7 @@ use self::event::{ClientType, ParsedEvent};
 
 /// Ring buffer usage statistics.
 #[derive(Debug, Clone, Copy, Default)]
+#[allow(dead_code)]
 pub struct RingbufStats {
     pub used_bytes: usize,
     pub size_bytes: usize,

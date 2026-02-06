@@ -69,6 +69,7 @@ impl Clock {
     }
 
     /// Return how many milliseconds have elapsed in the current slot.
+    #[allow(dead_code)]
     pub fn millis_into_slot(&self) -> u64 {
         let slot = self.current_slot();
         let slot_start = self.slot_start_time(slot);

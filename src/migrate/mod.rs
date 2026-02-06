@@ -26,6 +26,7 @@ static MIGRATIONS: &[Migration] = &[
 ///
 /// Compatible with golang-migrate's `schema_migrations` table format.
 /// Embeds SQL files from `internal/migrate/sql/` and applies them in order.
+#[allow(dead_code)]
 pub trait Migrator: Send {
     /// Applies all pending forward migrations.
     fn up(&self) -> impl std::future::Future<Output = Result<()>> + Send;

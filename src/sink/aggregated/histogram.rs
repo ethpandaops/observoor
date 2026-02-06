@@ -78,6 +78,7 @@ fn bucket_index(value_ns: u64) -> usize {
 
 /// Returns the upper bounds for each bucket in nanoseconds.
 /// The last bucket (index 9) is unbounded (+inf, represented as 0).
+#[allow(dead_code)]
 pub fn bucket_boundaries() -> [u64; NUM_BUCKETS] {
     [
         BOUNDARIES[0],

@@ -8,6 +8,7 @@ use crate::beacon::SyncStatus;
 use crate::tracer::event::ParsedEvent;
 
 /// Sink consumes parsed events and exports them.
+#[allow(dead_code)]
 pub trait Sink: Send {
     /// Returns the sink's name for logging.
     fn name(&self) -> &str;

@@ -45,6 +45,7 @@ impl ClickHouseWriter {
     }
 
     /// Returns the writer configuration.
+    #[allow(dead_code)]
     pub fn config(&self) -> &ClickHouseConfig {
         &self.cfg
     }

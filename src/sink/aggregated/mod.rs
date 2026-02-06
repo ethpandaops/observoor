@@ -64,6 +64,7 @@ pub struct AggregatedSink {
     cfg: AggregatedSinkConfig,
     meta_client_name: String,
     meta_network_name: String,
+    #[allow(dead_code)]
     collector: Collector,
     exporters: Vec<Exporter>,
 
