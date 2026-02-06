@@ -48,7 +48,7 @@ snap = "1"
 
 # Profiling (Linux only)
 pprof = { version = "0.14", features = ["flamegraph", "prost-codec"], optional = true }
-prost = { version = "0.13", optional = true }
+prost = { version = "0.12", optional = true }
 
 # Utilities
 futures = "0.3"
