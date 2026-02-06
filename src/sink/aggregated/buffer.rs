@@ -12,6 +12,7 @@ use super::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetri
 ///
 /// Uses `DashMap` for concurrent map access, eliminating the need for
 /// a global RWMutex. Each map entry is independently lockable.
+#[allow(dead_code)]
 pub struct Buffer {
     /// Start of this aggregation window.
     pub start_time: SystemTime,

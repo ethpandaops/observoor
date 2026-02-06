@@ -7,6 +7,7 @@ use crate::tracer::event::ClientType;
 
 /// Discovered port information for a PID.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct PortInfo {
     pub pid: u32,
     pub client_type: ClientType,

@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 /// - Tier 1: critical failure-detection metrics
 /// - Tier 2: performance diagnostic metrics
 /// - Tier 3: deep observability metrics
+#[allow(dead_code)]
 pub struct HealthMetrics {
     registry: Registry,
     addr: String,
@@ -34,7 +35,6 @@ pub struct HealthMetrics {
     /// Total slot aggregation flushes.
     pub slots_flushed: Counter,
     /// Total export errors across all sinks.
-    #[allow(dead_code)]
     pub export_errors: Counter,
     /// Number of PIDs currently tracked.
     pub pids_tracked: Gauge,
@@ -57,10 +57,8 @@ pub struct HealthMetrics {
     /// Total ring buffer overflow events.
     pub bpf_ringbuf_overflows: Counter,
     /// Event parse errors by error_type.
-    #[allow(dead_code)]
     pub event_parse_errors: CounterVec,
     /// PID discovery errors by source (process/cgroup).
-    #[allow(dead_code)]
     pub pid_discovery_errors: CounterVec,
     /// PIDs tracked per client type.
     pub pids_by_client: GaugeVec,
