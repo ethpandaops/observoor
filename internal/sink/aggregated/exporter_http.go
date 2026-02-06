@@ -10,21 +10,57 @@ import (
 	httpexport "github.com/ethpandaops/observoor/internal/export/http"
 )
 
+// HistogramJSON is the JSON schema for histogram data, matching the ClickHouse
+// named Tuple(le_1us, le_10us, le_100us, le_1ms, le_10ms, le_100ms, le_1s, le_10s, le_100s, inf).
+type HistogramJSON struct {
+	Le1us   uint32 `json:"le_1us"`
+	Le10us  uint32 `json:"le_10us"`
+	Le100us uint32 `json:"le_100us"`
+	Le1ms   uint32 `json:"le_1ms"`
+	Le10ms  uint32 `json:"le_10ms"`
+	Le100ms uint32 `json:"le_100ms"`
+	Le1s    uint32 `json:"le_1s"`
+	Le10s   uint32 `json:"le_10s"`
+	Le100s  uint32 `json:"le_100s"`
+	Inf     uint32 `json:"inf"`
+}
+
+// histogramToJSON converts a histogram slice to the named JSON struct.
+// The slice must have exactly 10 elements matching the bucket order.
+func histogramToJSON(h []uint32) *HistogramJSON {
+	if len(h) != numBuckets {
+		return nil
+	}
+
+	return &HistogramJSON{
+		Le1us:   h[0],
+		Le10us:  h[1],
+		Le100us: h[2],
+		Le1ms:   h[3],
+		Le10ms:  h[4],
+		Le100ms: h[5],
+		Le1s:    h[6],
+		Le10s:   h[7],
+		Le100s:  h[8],
+		Inf:     h[9],
+	}
+}
+
 // AggregatedMetricJSON is the JSON schema for HTTP export of aggregated metrics.
 type AggregatedMetricJSON struct {
-	MetricType                 string   `json:"metric_type"`
-	UpdatedDateTime            string   `json:"updated_date_time"`
-	WindowStart                string   `json:"window_start"`
-	IntervalMs                 uint16   `json:"interval_ms"`
-	WallclockSlot              uint32   `json:"wallclock_slot"`
-	WallclockSlotStartDateTime string   `json:"wallclock_slot_start_date_time"`
-	PID                        uint32   `json:"pid"`
-	ClientType                 string   `json:"client_type"`
-	Sum                        int64    `json:"sum"`
-	Count                      uint32   `json:"count"`
-	Min                        int64    `json:"min,omitempty"`
-	Max                        int64    `json:"max,omitempty"`
-	Histogram                  []uint32 `json:"histogram,omitempty"`
+	MetricType                 string         `json:"metric_type"`
+	UpdatedDateTime            string         `json:"updated_date_time"`
+	WindowStart                string         `json:"window_start"`
+	IntervalMs                 uint16         `json:"interval_ms"`
+	WallclockSlot              uint32         `json:"wallclock_slot"`
+	WallclockSlotStartDateTime string         `json:"wallclock_slot_start_date_time"`
+	PID                        uint32         `json:"pid"`
+	ClientType                 string         `json:"client_type"`
+	Sum                        int64          `json:"sum"`
+	Count                      uint32         `json:"count"`
+	Min                        int64          `json:"min,omitempty"`
+	Max                        int64          `json:"max,omitempty"`
+	Histogram                  *HistogramJSON `json:"histogram,omitempty"`
 	// Dimension fields (optional, depending on metric type).
 	LocalPort uint16 `json:"local_port,omitempty"`
 	Direction string `json:"direction,omitempty"`
@@ -114,7 +150,7 @@ func (e *HTTPExporter) latencyToJSON(m LatencyMetric, meta BatchMetadata) *Aggre
 		Count:                      m.Count,
 		Min:                        m.Min,
 		Max:                        m.Max,
-		Histogram:                  m.Histogram,
+		Histogram:                  histogramToJSON(m.Histogram),
 		MetaClientName:             meta.ClientName,
 		MetaNetworkName:            meta.NetworkName,
 	}
