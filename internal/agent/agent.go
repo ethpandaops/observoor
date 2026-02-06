@@ -41,6 +41,10 @@ type agent struct {
 	// aggregatedSink is a reference to the aggregated sink for port whitelist configuration.
 	aggregatedSink *aggregated.Sink
 
+	// Event pipeline stats for periodic reporting.
+	capturedStats *tracer.EventStats
+	shippedStats  []*tracer.EventStats
+
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -50,19 +54,23 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 	health := export.NewHealthMetrics(log, cfg.Health)
 
 	a := &agent{
-		log:    log.WithField("component", "agent"),
-		cfg:    cfg,
-		health: health,
-		beacon: beacon.NewClient(log, cfg.Beacon, health),
-		disc:   pid.NewDiscovery(log, cfg.PID, health),
-		tracer: tracer.New(log, cfg.RingBufferSize, health),
-		sinks:  make([]sink.Sink, 0, 3),
+		log:           log.WithField("component", "agent"),
+		cfg:           cfg,
+		health:        health,
+		beacon:        beacon.NewClient(log, cfg.Beacon, health),
+		disc:          pid.NewDiscovery(log, cfg.PID, health),
+		tracer:        tracer.New(log, cfg.RingBufferSize, health),
+		sinks:         make([]sink.Sink, 0, 3),
+		capturedStats: tracer.NewEventStats(),
+		shippedStats:  make([]*tracer.EventStats, 0, 2),
 	}
 
 	// Configure enabled sinks.
 	if cfg.Sinks.Raw.Enabled {
+		rawShipped := tracer.NewEventStats()
+
 		rawSink, err := sink.NewRawSink(
-			log, cfg.Sinks.Raw, a.health,
+			log, cfg.Sinks.Raw, a.health, rawShipped,
 			cfg.MetaClientName, cfg.MetaNetworkName,
 		)
 		if err != nil {
@@ -70,11 +78,14 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 		}
 
 		a.sinks = append(a.sinks, rawSink)
+		a.shippedStats = append(a.shippedStats, rawShipped)
 	}
 
 	if cfg.Sinks.Aggregated.Enabled {
+		aggShipped := tracer.NewEventStats()
+
 		aggSink, err := aggregated.New(
-			log, cfg.Sinks.Aggregated, health,
+			log, cfg.Sinks.Aggregated, health, aggShipped,
 			cfg.MetaClientName, cfg.MetaNetworkName,
 		)
 		if err != nil {
@@ -83,6 +94,7 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 
 		a.aggregatedSink = aggSink
 		a.sinks = append(a.sinks, a.aggregatedSink)
+		a.shippedStats = append(a.shippedStats, aggShipped)
 	}
 
 	return a, nil
@@ -227,6 +239,7 @@ func (a *agent) Start(ctx context.Context) error {
 		start := time.Now()
 
 		a.health.EventsReceived.Inc()
+		a.capturedStats.Record(event.Raw.Type)
 
 		// Track events by type and client.
 		a.health.EventsByType.WithLabelValues(event.Raw.Type.String()).Inc()
@@ -280,6 +293,11 @@ func (a *agent) Start(ctx context.Context) error {
 	a.wg.Add(1)
 
 	go a.monitorPIDs(ctx)
+
+	// 14. Start periodic event stats reporter.
+	a.wg.Add(1)
+
+	go a.reportEventStats(ctx)
 
 	a.log.Info("Agent fully started")
 
@@ -419,6 +437,63 @@ func (a *agent) monitorPIDs(ctx context.Context) {
 
 			a.log.WithField("count", len(tids)).
 				Debug("Updated tracked TIDs")
+		}
+	}
+}
+
+// reportEventStats logs a periodic summary of captured vs shipped events.
+func (a *agent) reportEventStats(ctx context.Context) {
+	defer a.wg.Done()
+
+	const interval = 60 * time.Second
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			captured := a.capturedStats.Snapshot()
+
+			// Merge shipped snapshots across all sinks.
+			shipped := make(map[tracer.EventType]uint64, len(captured))
+
+			for _, ss := range a.shippedStats {
+				for t, n := range ss.Snapshot() {
+					shipped[t] += n
+				}
+			}
+
+			var capturedTotal, shippedTotal uint64
+
+			for _, n := range captured {
+				capturedTotal += n
+			}
+
+			for _, n := range shipped {
+				shippedTotal += n
+			}
+
+			if capturedTotal == 0 && shippedTotal == 0 {
+				continue
+			}
+
+			a.log.WithFields(logrus.Fields{
+				"captured": capturedTotal,
+				"shipped":  shippedTotal,
+			}).Info("Event stats (60s)")
+
+			// Build per-type breakdown from captured counts.
+			byType := make(logrus.Fields, len(captured))
+
+			for t, n := range captured {
+				byType[t.String()] = n
+			}
+
+			a.log.WithFields(byType).
+				Info("  by type (60s)")
 		}
 	}
 }

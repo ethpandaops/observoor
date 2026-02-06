@@ -2,7 +2,6 @@ package aggregated
 
 import (
 	"context"
-	"time"
 
 	processor "github.com/ethpandaops/go-batch-processor"
 	"github.com/sirupsen/logrus"
@@ -139,11 +138,11 @@ func (e *HTTPExporter) Export(ctx context.Context, batch MetricBatch) error {
 func (e *HTTPExporter) latencyToJSON(m LatencyMetric, meta BatchMetadata) *AggregatedMetricJSON {
 	json := &AggregatedMetricJSON{
 		MetricType:                 m.MetricType,
-		UpdatedDateTime:            meta.UpdatedTime.Format(time.RFC3339Nano),
-		WindowStart:                m.Window.Start.Format(time.RFC3339Nano),
+		UpdatedDateTime:            meta.UpdatedTime.Format("2006-01-02 15:04:05.000"),
+		WindowStart:                m.Window.Start.Format("2006-01-02 15:04:05.000"),
 		IntervalMs:                 m.Window.IntervalMs,
 		WallclockSlot:              m.Slot.Number,
-		WallclockSlotStartDateTime: m.Slot.StartTime.Format(time.RFC3339Nano),
+		WallclockSlotStartDateTime: m.Slot.StartTime.Format("2006-01-02 15:04:05.000"),
 		PID:                        m.PID,
 		ClientType:                 m.ClientType,
 		Sum:                        m.Sum,
@@ -171,11 +170,11 @@ func (e *HTTPExporter) latencyToJSON(m LatencyMetric, meta BatchMetadata) *Aggre
 func (e *HTTPExporter) counterToJSON(m CounterMetric, meta BatchMetadata) *AggregatedMetricJSON {
 	json := &AggregatedMetricJSON{
 		MetricType:                 m.MetricType,
-		UpdatedDateTime:            meta.UpdatedTime.Format(time.RFC3339Nano),
-		WindowStart:                m.Window.Start.Format(time.RFC3339Nano),
+		UpdatedDateTime:            meta.UpdatedTime.Format("2006-01-02 15:04:05.000"),
+		WindowStart:                m.Window.Start.Format("2006-01-02 15:04:05.000"),
 		IntervalMs:                 m.Window.IntervalMs,
 		WallclockSlot:              m.Slot.Number,
-		WallclockSlotStartDateTime: m.Slot.StartTime.Format(time.RFC3339Nano),
+		WallclockSlotStartDateTime: m.Slot.StartTime.Format("2006-01-02 15:04:05.000"),
 		PID:                        m.PID,
 		ClientType:                 m.ClientType,
 		Sum:                        m.Sum,
@@ -208,11 +207,11 @@ func (e *HTTPExporter) counterToJSON(m CounterMetric, meta BatchMetadata) *Aggre
 func (e *HTTPExporter) gaugeToJSON(m GaugeMetric, meta BatchMetadata) *AggregatedMetricJSON {
 	json := &AggregatedMetricJSON{
 		MetricType:                 m.MetricType,
-		UpdatedDateTime:            meta.UpdatedTime.Format(time.RFC3339Nano),
-		WindowStart:                m.Window.Start.Format(time.RFC3339Nano),
+		UpdatedDateTime:            meta.UpdatedTime.Format("2006-01-02 15:04:05.000"),
+		WindowStart:                m.Window.Start.Format("2006-01-02 15:04:05.000"),
 		IntervalMs:                 m.Window.IntervalMs,
 		WallclockSlot:              m.Slot.Number,
-		WallclockSlotStartDateTime: m.Slot.StartTime.Format(time.RFC3339Nano),
+		WallclockSlotStartDateTime: m.Slot.StartTime.Format("2006-01-02 15:04:05.000"),
 		PID:                        m.PID,
 		ClientType:                 m.ClientType,
 		Sum:                        m.Sum,

@@ -22,6 +22,7 @@ type Sink struct {
 	cfg    Config
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
+	stats  *tracer.EventStats
 
 	// HTTP export processor (optional).
 	httpProcessor   *processor.BatchItemProcessor[AggregatedMetricJSON]
@@ -53,6 +54,7 @@ func New(
 	log logrus.FieldLogger,
 	cfg Config,
 	health *export.HealthMetrics,
+	stats *tracer.EventStats,
 	metaClientName string,
 	metaNetworkName string,
 ) (*Sink, error) {
@@ -75,6 +77,7 @@ func New(
 		log:             log.WithField("sink", "aggregated"),
 		cfg:             cfg,
 		health:          health,
+		stats:           stats,
 		done:            make(chan struct{}),
 		eventCh:         make(chan tracer.ParsedEvent, 65536),
 		metaClientName:  metaClientName,
@@ -314,6 +317,10 @@ func (s *Sink) processEvent(event tracer.ParsedEvent) {
 	buf := s.buffer.Load()
 	if buf == nil {
 		return
+	}
+
+	if s.stats != nil {
+		s.stats.Record(event.Raw.Type)
 	}
 
 	basicDim := BasicDimension{

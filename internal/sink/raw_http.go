@@ -1,9 +1,5 @@
 package sink
 
-import (
-	"time"
-)
-
 // RawEventJSON is the JSON schema for HTTP export of raw events.
 type RawEventJSON struct {
 	TimestampNs                uint64 `json:"timestamp_ns"`
@@ -47,7 +43,7 @@ func toRawEventJSON(row rawRow, metaClientName, metaNetworkName string) RawEvent
 	return RawEventJSON{
 		TimestampNs:                row.TimestampNs,
 		WallclockSlot:              row.WallclockSlot,
-		WallclockSlotStartDateTime: row.SlotStart.Format(time.RFC3339Nano),
+		WallclockSlotStartDateTime: row.SlotStart.Format("2006-01-02 15:04:05.000000000"),
 		PID:                        row.PID,
 		TID:                        row.TID,
 		EventType:                  row.EventType,
