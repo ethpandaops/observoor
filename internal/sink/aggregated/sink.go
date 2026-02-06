@@ -7,6 +7,7 @@ import (
 	"time"
 
 	processor "github.com/ethpandaops/go-batch-processor"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/observoor/internal/beacon"
@@ -33,6 +34,9 @@ type Sink struct {
 	collector  *Collector
 	exporters  []MetricExporter
 	chExporter *ClickHouseExporter // Keep reference for sync state.
+
+	// Cached Prometheus counter to avoid per-event WithLabelValues lookup.
+	cachedEventsProcessed prometheus.Counter
 
 	buffer atomic.Pointer[Buffer]
 
@@ -133,6 +137,11 @@ func (s *Sink) Start(ctx context.Context) error {
 		}
 	}
 
+	// Pre-resolve Prometheus counter to avoid per-event WithLabelValues lookup.
+	if s.health != nil {
+		s.cachedEventsProcessed = s.health.SinkEventsProcessed.WithLabelValues("aggregated")
+	}
+
 	// Record channel capacity metric.
 	if s.health != nil {
 		s.health.SinkEventChannelCapacity.WithLabelValues("aggregated").
@@ -215,8 +224,8 @@ func (s *Sink) Stop() error {
 func (s *Sink) HandleEvent(event tracer.ParsedEvent) {
 	select {
 	case s.eventCh <- event:
-		if s.health != nil {
-			s.health.SinkEventsProcessed.WithLabelValues("aggregated").Inc()
+		if s.cachedEventsProcessed != nil {
+			s.cachedEventsProcessed.Inc()
 		}
 	default:
 		s.log.Warn("Aggregated sink event channel full, dropping event")
@@ -325,16 +334,22 @@ func (s *Sink) processEvent(event tracer.ParsedEvent) {
 
 	basicDim := BasicDimension{
 		PID:        event.Raw.PID,
-		ClientType: event.Raw.Client.String(),
+		ClientType: uint8(event.Raw.Client),
 	}
 
 	switch e := event.Typed.(type) {
 	case tracer.SyscallEvent:
-		buf.AddSyscall(event.Raw.Type.String(), basicDim, e.LatencyNs)
+		buf.AddSyscall(event.Raw.Type, basicDim, e.LatencyNs)
 
 	case tracer.NetIOEvent:
 		netDim := s.buildNetworkDimension(event.Raw, e)
 		buf.AddNetIO(netDim, int64(e.Bytes))
+
+		// Extract inline TCP metrics from merged net_tx events.
+		if e.HasMetrics {
+			tcpDim := s.buildTcpMetricsDimFromNetIO(event.Raw, e)
+			buf.AddTcpMetrics(tcpDim, e.SrttUs, e.Cwnd)
+		}
 
 	case tracer.TcpRetransmitEvent:
 		netDim := s.buildNetworkDimensionFromTcpRetransmit(event.Raw, e)
@@ -400,7 +415,7 @@ func (s *Sink) buildNetworkDimension(
 ) NetworkDimension {
 	dim := NetworkDimension{
 		PID:        raw.PID,
-		ClientType: raw.Client.String(),
+		ClientType: uint8(raw.Client),
 	}
 
 	if s.cfg.Dimensions.Network.IncludeDirection() {
@@ -422,13 +437,30 @@ func (s *Sink) buildNetworkDimensionFromTcpRetransmit(
 ) NetworkDimension {
 	dim := NetworkDimension{
 		PID:        raw.PID,
-		ClientType: raw.Client.String(),
+		ClientType: uint8(raw.Client),
 		Direction:  0, // Retransmits are always TX.
 	}
 
 	if s.cfg.Dimensions.Network.IncludePort() {
 		// For retransmits, source port is local port.
 		dim.LocalPort = s.cfg.Dimensions.Network.FilterPort(e.SrcPort)
+	}
+
+	return dim
+}
+
+// buildTcpMetricsDimFromNetIO creates a TCPMetricsDimension from a merged NetIOEvent.
+func (s *Sink) buildTcpMetricsDimFromNetIO(
+	raw tracer.Event,
+	e tracer.NetIOEvent,
+) TCPMetricsDimension {
+	dim := TCPMetricsDimension{
+		PID:        raw.PID,
+		ClientType: uint8(raw.Client),
+	}
+
+	if s.cfg.Dimensions.Network.IncludePort() {
+		dim.LocalPort = s.cfg.Dimensions.Network.FilterPort(localPort(e))
 	}
 
 	return dim
@@ -441,7 +473,7 @@ func (s *Sink) buildTcpMetricsDimension(
 ) TCPMetricsDimension {
 	dim := TCPMetricsDimension{
 		PID:        raw.PID,
-		ClientType: raw.Client.String(),
+		ClientType: uint8(raw.Client),
 	}
 
 	if s.cfg.Dimensions.Network.IncludePort() {
@@ -460,7 +492,7 @@ func (s *Sink) buildDiskDimension(
 ) DiskDimension {
 	dim := DiskDimension{
 		PID:        raw.PID,
-		ClientType: raw.Client.String(),
+		ClientType: uint8(raw.Client),
 	}
 
 	if s.cfg.Dimensions.Disk.IncludeDevice() {

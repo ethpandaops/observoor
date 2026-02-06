@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 
 	"github.com/ethpandaops/observoor/internal/beacon"
@@ -41,6 +42,10 @@ type agent struct {
 	// aggregatedSink is a reference to the aggregated sink for port whitelist configuration.
 	aggregatedSink *aggregated.Sink
 
+	// Cached Prometheus counters to avoid per-event WithLabelValues lookups.
+	eventsByTypeCached   [tracer.MaxEventType + 1]prometheus.Counter
+	eventsByClientCached [tracer.MaxClientType + 1]prometheus.Counter
+
 	// Event pipeline stats for periodic reporting.
 	capturedStats *tracer.EventStats
 	shippedStats  []*tracer.EventStats
@@ -63,6 +68,15 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 		sinks:         make([]sink.Sink, 0, 3),
 		capturedStats: tracer.NewEventStats(),
 		shippedStats:  make([]*tracer.EventStats, 0, 2),
+	}
+
+	// Pre-resolve Prometheus label lookups to avoid per-event hash/map overhead.
+	for i := tracer.EventType(0); i <= tracer.MaxEventType; i++ {
+		a.eventsByTypeCached[i] = health.EventsByType.WithLabelValues(i.String())
+	}
+
+	for i := tracer.ClientType(0); i <= tracer.MaxClientType; i++ {
+		a.eventsByClientCached[i] = health.EventsByClient.WithLabelValues(i.String())
 	}
 
 	// Configure enabled sinks.
@@ -236,21 +250,21 @@ func (a *agent) Start(ctx context.Context) error {
 
 	// 10. Register tracer handlers for events, errors, and ringbuf stats.
 	a.tracer.OnEvent(func(event tracer.ParsedEvent) {
-		start := time.Now()
-
 		a.health.EventsReceived.Inc()
 		a.capturedStats.Record(event.Raw.Type)
 
-		// Track events by type and client.
-		a.health.EventsByType.WithLabelValues(event.Raw.Type.String()).Inc()
-		a.health.EventsByClient.WithLabelValues(event.Raw.Client.String()).Inc()
+		// Use pre-resolved counters — no WithLabelValues hash/map lookup per event.
+		if event.Raw.Type <= tracer.MaxEventType {
+			a.eventsByTypeCached[event.Raw.Type].Inc()
+		}
+
+		if event.Raw.Client <= tracer.MaxClientType {
+			a.eventsByClientCached[event.Raw.Client].Inc()
+		}
 
 		for _, s := range a.sinks {
 			s.HandleEvent(event)
 		}
-
-		// Track event processing duration.
-		a.health.EventProcessingDuration.Observe(time.Since(start).Seconds())
 	})
 
 	a.tracer.OnError(func(err error) {

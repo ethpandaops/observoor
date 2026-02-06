@@ -1,6 +1,10 @@
 package aggregated
 
-import "time"
+import (
+	"time"
+
+	"github.com/ethpandaops/observoor/internal/tracer"
+)
 
 // Collector performs single-pass collection from a Buffer into a MetricBatch.
 type Collector struct {
@@ -83,7 +87,7 @@ func (c *Collector) collectBasicLatency(
 				Window:     window,
 				Slot:       slot,
 				PID:        dim.PID,
-				ClientType: dim.ClientType,
+				ClientType: tracer.ClientType(dim.ClientType).String(),
 				Sum:        snap.Sum,
 				Count:      uint32(snap.Count),
 				Min:        snap.Min,
@@ -115,7 +119,7 @@ func (c *Collector) collectDiskLatency(
 			Window:     window,
 			Slot:       slot,
 			PID:        dim.PID,
-			ClientType: dim.ClientType,
+			ClientType: tracer.ClientType(dim.ClientType).String(),
 			DeviceID:   &deviceID,
 			RW:         &rw,
 			Sum:        snap.Sum,
@@ -161,7 +165,7 @@ func (c *Collector) collectBasicCounters(
 				Window:     window,
 				Slot:       slot,
 				PID:        dim.PID,
-				ClientType: dim.ClientType,
+				ClientType: tracer.ClientType(dim.ClientType).String(),
 				Sum:        snap.Sum,
 				Count:      uint32(snap.Count),
 			})
@@ -199,7 +203,7 @@ func (c *Collector) collectNetworkCounters(
 				Window:     window,
 				Slot:       slot,
 				PID:        dim.PID,
-				ClientType: dim.ClientType,
+				ClientType: tracer.ClientType(dim.ClientType).String(),
 				LocalPort:  &localPort,
 				Direction:  &direction,
 				Sum:        snap.Sum,
@@ -239,7 +243,7 @@ func (c *Collector) collectDiskCounters(
 				Window:     window,
 				Slot:       slot,
 				PID:        dim.PID,
-				ClientType: dim.ClientType,
+				ClientType: tracer.ClientType(dim.ClientType).String(),
 				DeviceID:   &deviceID,
 				RW:         &rw,
 				Sum:        snap.Sum,
@@ -278,7 +282,7 @@ func (c *Collector) collectTCPGauges(
 				Window:     window,
 				Slot:       slot,
 				PID:        dim.PID,
-				ClientType: dim.ClientType,
+				ClientType: tracer.ClientType(dim.ClientType).String(),
 				LocalPort:  &localPort,
 				Sum:        snap.Sum,
 				Count:      uint32(snap.Count),
@@ -310,7 +314,7 @@ func (c *Collector) collectDiskGauges(
 			Window:     window,
 			Slot:       slot,
 			PID:        dim.PID,
-			ClientType: dim.ClientType,
+			ClientType: tracer.ClientType(dim.ClientType).String(),
 			DeviceID:   &deviceID,
 			RW:         &rw,
 			Sum:        snap.Sum,

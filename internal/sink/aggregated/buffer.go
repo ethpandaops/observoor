@@ -3,6 +3,8 @@ package aggregated
 import (
 	"sync"
 	"time"
+
+	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
 // Buffer is a thread-safe aggregation buffer that collects events
@@ -210,25 +212,26 @@ func getOrCreateGauge[K comparable](
 }
 
 // AddSyscall adds a syscall latency event to the appropriate map.
-func (b *Buffer) AddSyscall(syscallType string, dim BasicDimension, latencyNs uint64) {
+// Uses EventType integer dispatch instead of string matching.
+func (b *Buffer) AddSyscall(eventType tracer.EventType, dim BasicDimension, latencyNs uint64) {
 	var m map[BasicDimension]*LatencyAggregate
 
-	switch syscallType {
-	case "syscall_read":
+	switch eventType {
+	case tracer.EventTypeSyscallRead:
 		m = b.SyscallRead
-	case "syscall_write":
+	case tracer.EventTypeSyscallWrite:
 		m = b.SyscallWrite
-	case "syscall_futex":
+	case tracer.EventTypeSyscallFutex:
 		m = b.SyscallFutex
-	case "syscall_mmap":
+	case tracer.EventTypeSyscallMmap:
 		m = b.SyscallMmap
-	case "syscall_epoll_wait":
+	case tracer.EventTypeSyscallEpollWait:
 		m = b.SyscallEpollWait
-	case "syscall_fsync":
+	case tracer.EventTypeSyscallFsync:
 		m = b.SyscallFsync
-	case "syscall_fdatasync":
+	case tracer.EventTypeSyscallFdatasync:
 		m = b.SyscallFdatasync
-	case "syscall_pwrite":
+	case tracer.EventTypeSyscallPwrite:
 		m = b.SyscallPwrite
 	default:
 		return

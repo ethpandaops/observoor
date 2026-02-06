@@ -33,8 +33,8 @@ const (
 	EventTypeOOMKill          EventType = 25
 	EventTypeProcessExit      EventType = 26
 
-	// maxEventType is the highest EventType value, used for array sizing.
-	maxEventType = 26
+	// MaxEventType is the highest EventType value, used for array sizing.
+	MaxEventType = 26
 )
 
 // String returns the human-readable name of the event type.
@@ -113,6 +113,9 @@ const (
 	ClientTypeLodestar   ClientType = 9
 	ClientTypeNimbus     ClientType = 10
 	ClientTypeEthrex     ClientType = 11
+
+	// MaxClientType is the highest ClientType value, used for array sizing.
+	MaxClientType = 11
 )
 
 // String returns the human-readable name of the client type.
@@ -213,12 +216,16 @@ type DiskIOEvent struct {
 }
 
 // NetIOEvent represents a network send or receive.
+// When HasMetrics is true, SrttUs and Cwnd contain inline TCP metrics.
 type NetIOEvent struct {
 	Event
-	Bytes   uint32    `json:"bytes"`
-	SrcPort uint16    `json:"sport"`
-	DstPort uint16    `json:"dport"`
-	Dir     Direction `json:"direction"`
+	Bytes      uint32    `json:"bytes"`
+	SrcPort    uint16    `json:"sport"`
+	DstPort    uint16    `json:"dport"`
+	Dir        Direction `json:"direction"`
+	HasMetrics bool      `json:"has_metrics"`
+	SrttUs     uint32    `json:"srtt_us"`
+	Cwnd       uint32    `json:"cwnd"`
 }
 
 // SchedEvent represents a context switch.

@@ -595,11 +595,14 @@ func parseNetIOEvent(
 	reader *bytes.Reader,
 ) (NetIOEvent, error) {
 	var raw struct {
-		Bytes uint32
-		Sport uint16
-		Dport uint16
-		Dir   uint8
-		Pad   [3]byte
+		Bytes      uint32
+		Sport      uint16
+		Dport      uint16
+		Dir        uint8
+		HasMetrics uint8
+		Pad        [2]byte
+		SrttUs     uint32
+		SndCwnd    uint32
 	}
 
 	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
@@ -607,11 +610,14 @@ func parseNetIOEvent(
 	}
 
 	return NetIOEvent{
-		Event:   base,
-		Bytes:   raw.Bytes,
-		SrcPort: raw.Sport,
-		DstPort: raw.Dport,
-		Dir:     Direction(raw.Dir),
+		Event:      base,
+		Bytes:      raw.Bytes,
+		SrcPort:    raw.Sport,
+		DstPort:    raw.Dport,
+		Dir:        Direction(raw.Dir),
+		HasMetrics: raw.HasMetrics != 0,
+		SrttUs:     raw.SrttUs,
+		Cwnd:       raw.SndCwnd,
 	}, nil
 }
 

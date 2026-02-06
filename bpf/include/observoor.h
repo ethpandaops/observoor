@@ -61,15 +61,17 @@ struct disk_io_event {
     __u32 dev; // Block device ID (major:minor encoded)
 };
 
-// Network I/O event (40 bytes total).
+// Network I/O event (48 bytes total).
 struct net_io_event {
     struct event_header hdr;
     __u32 bytes;
     __u16 sport;
     __u16 dport;
-    __u8  direction; // 0=TX, 1=RX
-    __u8  pad[3];
-    __u32 pad2;
+    __u8  direction;    // 0=TX, 1=RX
+    __u8  has_metrics;  // 1 if srtt_us/snd_cwnd are populated
+    __u8  pad[2];
+    __u32 srtt_us;      // Smoothed RTT (0 when has_metrics==0)
+    __u32 snd_cwnd;     // Congestion window (0 when has_metrics==0)
 };
 
 // Scheduler event (40 bytes total).

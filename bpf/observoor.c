@@ -701,24 +701,15 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
         BPF_CORE_READ(sk, __sk_common.skc_dport));
     e->direction = 0; // TX
 
-    bpf_ringbuf_submit(e, 0);
-
-    struct tcp_metrics_event *m = bpf_ringbuf_reserve(
-        &events, sizeof(*m), 0);
-    if (!m)
-        return 0;
-
-    fill_header(&m->hdr, EVENT_TCP_METRICS, ct);
+    // Inline TCP metrics into the net_tx event (saves a separate ring buffer entry).
+    e->has_metrics = 1;
     {
         __u32 srtt = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
-        m->srtt_us = srtt >> 3;
+        e->srtt_us = srtt >> 3;
     }
-    m->snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
-    m->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
-    m->dport = __builtin_bswap16(
-        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    e->snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
 
-    bpf_ringbuf_submit(m, 0);
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
@@ -776,6 +767,9 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     e->sport = val->sport;
     e->dport = val->dport;
     e->direction = 1; // RX
+    e->has_metrics = 0;
+    e->srtt_us = 0;
+    e->snd_cwnd = 0;
 
     bpf_ringbuf_submit(e, 0);
 

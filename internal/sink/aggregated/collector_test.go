@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/ethpandaops/observoor/internal/tracer"
 )
 
 func TestCollector_HistogramConversion(t *testing.T) {
@@ -23,7 +25,7 @@ func TestCollector_HistogramConversion(t *testing.T) {
 	// Add a syscall event to populate the buffer.
 	dim := BasicDimension{
 		PID:        1234,
-		ClientType: "geth",
+		ClientType: uint8(tracer.ClientTypeGeth),
 	}
 	agg := NewLatencyAggregate()
 	// Add values to create known histogram.
@@ -83,7 +85,7 @@ func TestCollector_ZeroCountMetricsSkipped(t *testing.T) {
 	// Create an aggregate but don't add any values.
 	dim := BasicDimension{
 		PID:        1234,
-		ClientType: "reth",
+		ClientType: uint8(tracer.ClientTypeReth),
 	}
 	buf.SyscallWrite[dim] = NewLatencyAggregate()
 
@@ -113,7 +115,7 @@ func TestCollector_DiskLatencyWithDimensions(t *testing.T) {
 
 	dim := DiskDimension{
 		PID:        1234,
-		ClientType: "geth",
+		ClientType: uint8(tracer.ClientTypeGeth),
 		DeviceID:   259,
 		ReadWrite:  0, // Read
 	}
@@ -155,7 +157,7 @@ func TestCollector_DiskLatencyWriteDirection(t *testing.T) {
 
 	dim := DiskDimension{
 		PID:        1234,
-		ClientType: "reth",
+		ClientType: uint8(tracer.ClientTypeReth),
 		DeviceID:   259,
 		ReadWrite:  1, // Write
 	}
@@ -192,7 +194,7 @@ func TestCollector_NetworkCounterWithDimensions(t *testing.T) {
 
 	dim := NetworkDimension{
 		PID:        1234,
-		ClientType: "lighthouse",
+		ClientType: uint8(tracer.ClientTypeLighthouse),
 		LocalPort:  9000,
 		Direction:  0, // TX
 	}
@@ -236,7 +238,7 @@ func TestCollector_TCPGaugeWithDimensions(t *testing.T) {
 
 	dim := TCPMetricsDimension{
 		PID:        1234,
-		ClientType: "prysm",
+		ClientType: uint8(tracer.ClientTypePrysm),
 		LocalPort:  13000,
 	}
 	agg := NewGaugeAggregate()
@@ -279,10 +281,11 @@ func TestCollector_AllMetricTypesCollected(t *testing.T) {
 	)
 
 	// Add one of each category.
-	basicDim := BasicDimension{PID: 1, ClientType: "test"}
-	diskDim := DiskDimension{PID: 1, ClientType: "test", DeviceID: 1}
-	netDim := NetworkDimension{PID: 1, ClientType: "test", LocalPort: 9000}
-	tcpDim := TCPMetricsDimension{PID: 1, ClientType: "test", LocalPort: 9000}
+	ct := uint8(tracer.ClientTypeGeth)
+	basicDim := BasicDimension{PID: 1, ClientType: ct}
+	diskDim := DiskDimension{PID: 1, ClientType: ct, DeviceID: 1}
+	netDim := NetworkDimension{PID: 1, ClientType: ct, LocalPort: 9000}
+	tcpDim := TCPMetricsDimension{PID: 1, ClientType: ct, LocalPort: 9000}
 
 	// Basic latency.
 	latAgg := NewLatencyAggregate()
@@ -355,7 +358,7 @@ func TestCollector_WindowAndSlotInfo(t *testing.T) {
 		false,
 	)
 
-	dim := BasicDimension{PID: 1, ClientType: "test"}
+	dim := BasicDimension{PID: 1, ClientType: uint8(tracer.ClientTypeGeth)}
 	agg := NewLatencyAggregate()
 	agg.Add(1000)
 	buf.SyscallRead[dim] = agg
@@ -392,7 +395,7 @@ func TestCollector_MetadataPassedThrough(t *testing.T) {
 		false,
 	)
 
-	dim := BasicDimension{PID: 1, ClientType: "test"}
+	dim := BasicDimension{PID: 1, ClientType: uint8(tracer.ClientTypeGeth)}
 	agg := NewLatencyAggregate()
 	agg.Add(1000)
 	buf.SyscallRead[dim] = agg
