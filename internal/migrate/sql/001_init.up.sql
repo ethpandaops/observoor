@@ -11,7 +11,7 @@ CREATE TABLE raw_events_local ON CLUSTER '{cluster}' (
     -- Timing
     timestamp_ns UInt64 CODEC(DoubleDelta, ZSTD(1)),
     wallclock_slot UInt64 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(9) CODEC(DoubleDelta, ZSTD(1)),
 
     -- Sync state
     cl_syncing Bool CODEC(ZSTD(1)),
@@ -120,10 +120,10 @@ ENGINE = Distributed('{cluster}', currentDatabase(), raw_events_local, rand());
 --------------------------------------------------------------------------------
 
 CREATE TABLE sync_state_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    event_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    event_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     cl_syncing Bool CODEC(ZSTD(1)),
     el_optimistic Bool CODEC(ZSTD(1)),
     el_offline Bool CODEC(ZSTD(1)),
@@ -166,11 +166,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), sync_state_local, cityHash6
 --------------------------------------------------------------------------------
 
 CREATE TABLE syscall_read_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -203,11 +203,11 @@ CREATE TABLE syscall_read ON CLUSTER '{cluster}' AS syscall_read_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_read_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_write_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -240,11 +240,11 @@ CREATE TABLE syscall_write ON CLUSTER '{cluster}' AS syscall_write_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_write_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_futex_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -277,11 +277,11 @@ CREATE TABLE syscall_futex ON CLUSTER '{cluster}' AS syscall_futex_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_futex_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_mmap_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -314,11 +314,11 @@ CREATE TABLE syscall_mmap ON CLUSTER '{cluster}' AS syscall_mmap_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_mmap_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_epoll_wait_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -351,11 +351,11 @@ CREATE TABLE syscall_epoll_wait ON CLUSTER '{cluster}' AS syscall_epoll_wait_loc
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_epoll_wait_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_fsync_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -388,11 +388,11 @@ CREATE TABLE syscall_fsync ON CLUSTER '{cluster}' AS syscall_fsync_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_fsync_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_fdatasync_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -425,11 +425,11 @@ CREATE TABLE syscall_fdatasync ON CLUSTER '{cluster}' AS syscall_fdatasync_local
 ENGINE = Distributed('{cluster}', currentDatabase(), syscall_fdatasync_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE syscall_pwrite_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -468,11 +468,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), syscall_pwrite_local, cityH
 --------------------------------------------------------------------------------
 
 CREATE TABLE sched_on_cpu_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -505,11 +505,11 @@ CREATE TABLE sched_on_cpu ON CLUSTER '{cluster}' AS sched_on_cpu_local
 ENGINE = Distributed('{cluster}', currentDatabase(), sched_on_cpu_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE sched_off_cpu_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -542,11 +542,11 @@ CREATE TABLE sched_off_cpu ON CLUSTER '{cluster}' AS sched_off_cpu_local
 ENGINE = Distributed('{cluster}', currentDatabase(), sched_off_cpu_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE sched_runqueue_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -585,11 +585,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), sched_runqueue_local, cityH
 --------------------------------------------------------------------------------
 
 CREATE TABLE mem_reclaim_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -622,11 +622,11 @@ CREATE TABLE mem_reclaim ON CLUSTER '{cluster}' AS mem_reclaim_local
 ENGINE = Distributed('{cluster}', currentDatabase(), mem_reclaim_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE mem_compaction_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -665,11 +665,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), mem_compaction_local, cityH
 --------------------------------------------------------------------------------
 
 CREATE TABLE disk_latency_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     device_id UInt32 CODEC(ZSTD(1)),
@@ -710,11 +710,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), disk_latency_local, cityHas
 --------------------------------------------------------------------------------
 
 CREATE TABLE page_fault_major_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -733,11 +733,11 @@ CREATE TABLE page_fault_major ON CLUSTER '{cluster}' AS page_fault_major_local
 ENGINE = Distributed('{cluster}', currentDatabase(), page_fault_major_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE page_fault_minor_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -756,11 +756,11 @@ CREATE TABLE page_fault_minor ON CLUSTER '{cluster}' AS page_fault_minor_local
 ENGINE = Distributed('{cluster}', currentDatabase(), page_fault_minor_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE swap_in_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -779,11 +779,11 @@ CREATE TABLE swap_in ON CLUSTER '{cluster}' AS swap_in_local
 ENGINE = Distributed('{cluster}', currentDatabase(), swap_in_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE swap_out_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -802,11 +802,11 @@ CREATE TABLE swap_out ON CLUSTER '{cluster}' AS swap_out_local
 ENGINE = Distributed('{cluster}', currentDatabase(), swap_out_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE oom_kill_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -831,11 +831,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), oom_kill_local, cityHash64(
 --------------------------------------------------------------------------------
 
 CREATE TABLE fd_open_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -854,11 +854,11 @@ CREATE TABLE fd_open ON CLUSTER '{cluster}' AS fd_open_local
 ENGINE = Distributed('{cluster}', currentDatabase(), fd_open_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE fd_close_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -877,11 +877,11 @@ CREATE TABLE fd_close ON CLUSTER '{cluster}' AS fd_close_local
 ENGINE = Distributed('{cluster}', currentDatabase(), fd_close_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE process_exit_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -906,11 +906,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), process_exit_local, cityHas
 --------------------------------------------------------------------------------
 
 CREATE TABLE tcp_state_change_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     sum Int64 CODEC(ZSTD(1)),
@@ -929,11 +929,11 @@ CREATE TABLE tcp_state_change ON CLUSTER '{cluster}' AS tcp_state_change_local
 ENGINE = Distributed('{cluster}', currentDatabase(), tcp_state_change_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE net_io_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     local_port UInt16 CODEC(ZSTD(1)),
@@ -954,11 +954,11 @@ CREATE TABLE net_io ON CLUSTER '{cluster}' AS net_io_local
 ENGINE = Distributed('{cluster}', currentDatabase(), net_io_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE tcp_retransmit_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     local_port UInt16 CODEC(ZSTD(1)),
@@ -985,11 +985,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), tcp_retransmit_local, cityH
 --------------------------------------------------------------------------------
 
 CREATE TABLE disk_bytes_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     device_id UInt32 CODEC(ZSTD(1)),
@@ -1010,11 +1010,11 @@ CREATE TABLE disk_bytes ON CLUSTER '{cluster}' AS disk_bytes_local
 ENGINE = Distributed('{cluster}', currentDatabase(), disk_bytes_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE block_merge_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     device_id UInt32 CODEC(ZSTD(1)),
@@ -1041,11 +1041,11 @@ ENGINE = Distributed('{cluster}', currentDatabase(), block_merge_local, cityHash
 --------------------------------------------------------------------------------
 
 CREATE TABLE tcp_rtt_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     local_port UInt16 CODEC(ZSTD(1)),
@@ -1067,11 +1067,11 @@ CREATE TABLE tcp_rtt ON CLUSTER '{cluster}' AS tcp_rtt_local
 ENGINE = Distributed('{cluster}', currentDatabase(), tcp_rtt_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE tcp_cwnd_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     local_port UInt16 CODEC(ZSTD(1)),
@@ -1093,11 +1093,11 @@ CREATE TABLE tcp_cwnd ON CLUSTER '{cluster}' AS tcp_cwnd_local
 ENGINE = Distributed('{cluster}', currentDatabase(), tcp_cwnd_local, cityHash64(window_start, meta_network_name, meta_client_name));
 
 CREATE TABLE disk_queue_depth_local ON CLUSTER '{cluster}' (
-    updated_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
-    window_start DateTime CODEC(DoubleDelta, ZSTD(1)),
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    window_start DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     interval_ms UInt16 CODEC(ZSTD(1)),
     wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
-    wallclock_slot_start_date_time DateTime CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
     pid UInt32 CODEC(ZSTD(1)),
     client_type LowCardinality(String),
     device_id UInt32 CODEC(ZSTD(1)),
