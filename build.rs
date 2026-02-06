@@ -65,7 +65,6 @@ fn main() {
 
     // Strip DWARF debug sections from the BPF object, keeping BTF.
     //
-    // Clang-14+ defaults to DWARFv5 which aya-obj's ELF parser cannot handle.
     // BTF sections (.BTF, .BTF.ext) are preserved for CO-RE relocations.
     // This matches what Go's bpf2go does (cilium/ebpf#429).
     let strip_status = Command::new("llvm-strip")
@@ -76,18 +75,6 @@ fn main() {
     if !strip_status.success() {
         eprintln!("BPF DWARF strip failed with status: {strip_status}");
         std::process::exit(1);
-    }
-
-    // Log BPF object size for diagnostics.
-    match std::fs::metadata(&bpf_out) {
-        Ok(meta) => println!(
-            "cargo:warning=BPF object size after strip: {} bytes",
-            meta.len()
-        ),
-        Err(e) => {
-            eprintln!("Failed to stat BPF object: {e}");
-            std::process::exit(1);
-        }
     }
 
     // Tell cargo to rerun if BPF sources change.

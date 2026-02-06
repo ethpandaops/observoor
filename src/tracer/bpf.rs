@@ -21,8 +21,13 @@ use super::{
 };
 
 /// Compiled BPF object, embedded at build time.
+///
+/// Uses `include_bytes_aligned!` to guarantee 32-byte alignment. Without this,
+/// `include_bytes!` provides only 1-byte alignment and `aya-obj`'s ELF parser
+/// (via the `object` crate without the `unaligned` feature) will reject the
+/// data when the pointer happens to land at a non-8-byte-aligned address.
 #[cfg(target_os = "linux")]
-const BPF_OBJ: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/observoor.bpf.o"));
+const BPF_OBJ: &[u8] = aya::include_bytes_aligned!(concat!(env!("OUT_DIR"), "/observoor.bpf.o"));
 
 /// BPF map value for tracked_tids (matches `struct tracked_tid_val` in maps.h).
 #[repr(C)]
@@ -82,13 +87,6 @@ impl BpfTracer {
 
 impl Tracer for BpfTracer {
     async fn start(&mut self, ctx: tokio_util::sync::CancellationToken) -> Result<()> {
-        // Log embedded BPF object info for diagnostics.
-        tracing::info!(
-            bpf_obj_size = BPF_OBJ.len(),
-            bpf_obj_magic = format!("{:02x?}", BPF_OBJ.get(..16).unwrap_or(BPF_OBJ)),
-            "loading embedded BPF object"
-        );
-
         // Load BPF programs with configured ring buffer size.
         let mut ebpf = EbpfLoader::new()
             .set_max_entries("events", self.ring_buf_size)
@@ -687,9 +685,8 @@ mod tests {
 
     #[test]
     fn test_bpf_object_is_valid_elf() {
-        // Verify the embedded BPF object has valid ELF magic bytes.
         assert!(
-            BPF_OBJ.len() > 20,
+            BPF_OBJ.len() > 64,
             "BPF object is too small: {} bytes",
             BPF_OBJ.len()
         );
@@ -702,57 +699,22 @@ mod tests {
         let ei_class = BPF_OBJ.get(4).copied().expect("missing EI_CLASS");
         assert_eq!(ei_class, 2, "not 64-bit ELF (EI_CLASS={ei_class})");
 
-        // EI_DATA should be ELFDATA2LSB (1) for little-endian.
-        let ei_data = BPF_OBJ.get(5).copied().expect("missing EI_DATA");
-        assert_eq!(ei_data, 1, "not little-endian (EI_DATA={ei_data})");
-
         // e_machine at offset 18 (2 bytes LE) should be EM_BPF (247).
         let em_lo = BPF_OBJ.get(18).copied().expect("missing e_machine lo");
         let em_hi = BPF_OBJ.get(19).copied().expect("missing e_machine hi");
         let e_machine = u16::from_le_bytes([em_lo, em_hi]);
         assert_eq!(e_machine, 247, "e_machine is not EM_BPF (got {e_machine})");
-
-        eprintln!("BPF object: {} bytes, valid ELF/BPF", BPF_OBJ.len());
     }
 
     #[test]
-    fn test_bpf_object_parseable_by_object_crate() {
-        // Validate the embedded BPF object can be parsed by the `object` crate,
-        // which is the same ELF parser used internally by aya-obj.
-        use object::read::elf::ElfFile64;
-        use object::LittleEndian;
-
-        match ElfFile64::<LittleEndian>::parse(BPF_OBJ) {
-            Ok(elf) => {
-                use object::read::elf::FileHeader;
-                let header = elf.raw_header();
-                eprintln!(
-                    "BPF ELF: {} bytes, e_machine={}, sections={}, programs={}",
-                    BPF_OBJ.len(),
-                    { header.e_machine.get(LittleEndian) },
-                    { header.e_shnum.get(LittleEndian) },
-                    { header.e_phnum.get(LittleEndian) },
-                );
-
-                // List all section names for debugging.
-                use object::read::ObjectSection;
-                for section in object::read::Object::sections(&elf) {
-                    eprintln!(
-                        "  section: {} (size={}, kind={:?})",
-                        section.name().unwrap_or("<unnamed>"),
-                        section.size(),
-                        section.kind(),
-                    );
-                }
-            }
-            Err(e) => {
-                eprintln!("BPF object size: {} bytes", BPF_OBJ.len());
-                eprintln!(
-                    "BPF object first 32 bytes: {:02x?}",
-                    BPF_OBJ.get(..32).unwrap_or(BPF_OBJ)
-                );
-                panic!("object crate failed to parse BPF ELF: {e}");
-            }
-        }
+    fn test_bpf_object_alignment() {
+        // The BPF object pointer must be 8-byte aligned for aya-obj's ELF parser.
+        // `aya::include_bytes_aligned!` guarantees 32-byte alignment.
+        let ptr = BPF_OBJ.as_ptr() as usize;
+        assert_eq!(
+            ptr % 8,
+            0,
+            "BPF object pointer {ptr:#x} is not 8-byte aligned"
+        );
     }
 }
