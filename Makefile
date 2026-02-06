@@ -34,7 +34,6 @@ BPF_TYPES := -type syscall_event \
 	-type block_merge_event \
 	-type tcp_retransmit_event \
 	-type tcp_state_event \
-	-type tcp_metrics_event \
 	-type mem_latency_event \
 	-type swap_event \
 	-type oom_kill_event \

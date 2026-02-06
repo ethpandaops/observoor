@@ -1,9 +1,5 @@
 -- Observoor ClickHouse Schema Teardown
 
--- Raw events
-DROP TABLE IF EXISTS raw_events ON CLUSTER '{cluster}';
-DROP TABLE IF EXISTS raw_events_local ON CLUSTER '{cluster}';
-
 -- Sync state
 DROP TABLE IF EXISTS sync_state ON CLUSTER '{cluster}';
 DROP TABLE IF EXISTS sync_state_local ON CLUSTER '{cluster}';

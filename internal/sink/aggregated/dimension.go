@@ -2,16 +2,18 @@ package aggregated
 
 // BasicDimension is the key for metrics that only need PID + client type.
 // Used for syscalls, page faults, scheduler events, memory events.
+// ClientType is stored as uint8 for compact map keys; convert back
+// to string at export time via tracer.ClientType(dim.ClientType).String().
 type BasicDimension struct {
 	PID        uint32
-	ClientType string
+	ClientType uint8
 }
 
 // NetworkDimension is the key for network I/O metrics.
 // Includes local port and direction for detailed network breakdown.
 type NetworkDimension struct {
 	PID        uint32
-	ClientType string
+	ClientType uint8
 	LocalPort  uint16
 	Direction  uint8 // 0=TX, 1=RX
 }
@@ -20,7 +22,7 @@ type NetworkDimension struct {
 // Similar to network but without direction since these are connection-level.
 type TCPMetricsDimension struct {
 	PID        uint32
-	ClientType string
+	ClientType uint8
 	LocalPort  uint16
 }
 
@@ -28,7 +30,7 @@ type TCPMetricsDimension struct {
 // Includes device ID and read/write for per-device breakdown.
 type DiskDimension struct {
 	PID        uint32
-	ClientType string
+	ClientType uint8
 	DeviceID   uint32
 	ReadWrite  uint8 // 0=read, 1=write
 }

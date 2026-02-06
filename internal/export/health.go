@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -439,6 +440,13 @@ func (h *HealthMetrics) Start(_ context.Context) error {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, "ok")
 	})
+
+	// pprof endpoints for CPU/memory profiling.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	ln, err := net.Listen("tcp", h.addr)
 	if err != nil {

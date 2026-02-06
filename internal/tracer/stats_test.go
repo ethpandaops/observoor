@@ -67,14 +67,14 @@ func TestEventStats_AllEventTypes(t *testing.T) {
 	s := NewEventStats()
 
 	// Record one of each known event type.
-	for i := EventType(1); i <= maxEventType; i++ {
+	for i := EventType(1); i <= MaxEventType; i++ {
 		s.Record(i)
 	}
 
 	snap := s.Snapshot()
-	assert.Len(t, snap, int(maxEventType))
+	assert.Len(t, snap, int(MaxEventType))
 
-	for i := EventType(1); i <= maxEventType; i++ {
+	for i := EventType(1); i <= MaxEventType; i++ {
 		assert.Equal(t, uint64(1), snap[i], "event type %d", i)
 	}
 }

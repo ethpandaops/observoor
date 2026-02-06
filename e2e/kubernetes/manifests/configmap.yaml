@@ -45,8 +45,6 @@ data:
     sync_poll_interval: 10s
 
     sinks:
-      raw:
-        enabled: false
       aggregated:
         enabled: true
         resolution:

@@ -11,7 +11,6 @@ import (
 
 // Config holds configuration for all sinks.
 type Config struct {
-	Raw        RawConfig         `yaml:"raw"`
 	Aggregated aggregated.Config `yaml:"aggregated"`
 }
 

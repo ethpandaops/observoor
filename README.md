@@ -26,11 +26,10 @@ eBPF agent that monitors Ethereum execution and consensus layer processes at the
 | `syscall_pwrite` | pwrite64() syscall with latency |
 | `disk_io` | Block I/O read/write with latency and byte count |
 | `block_merge` | Block I/O request merge |
-| `net_tx` | TCP send with byte count and ports |
+| `net_tx` | TCP send with byte count, ports, and inline RTT/cwnd metrics |
 | `net_rx` | TCP receive with byte count and ports |
 | `tcp_retransmit` | TCP retransmission with byte count and ports |
 | `tcp_state` | TCP state transition with ports |
-| `tcp_metrics` | TCP congestion/RTT metrics (cwnd/srtt) |
 | `sched_switch` | Context switch with on-CPU time |
 | `sched_runqueue` | Runqueue/off-CPU latency for scheduled threads |
 | `page_fault` | Page fault (major/minor) |

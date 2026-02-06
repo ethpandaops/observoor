@@ -25,16 +25,15 @@ const (
 	EventTypeBlockMerge       EventType = 17
 	EventTypeTcpRetransmit    EventType = 18
 	EventTypeTcpState         EventType = 19
-	EventTypeTcpMetrics       EventType = 20
-	EventTypeMemReclaim       EventType = 21
-	EventTypeMemCompaction    EventType = 22
-	EventTypeSwapIn           EventType = 23
-	EventTypeSwapOut          EventType = 24
-	EventTypeOOMKill          EventType = 25
-	EventTypeProcessExit      EventType = 26
+	EventTypeMemReclaim       EventType = 20
+	EventTypeMemCompaction    EventType = 21
+	EventTypeSwapIn           EventType = 22
+	EventTypeSwapOut          EventType = 23
+	EventTypeOOMKill          EventType = 24
+	EventTypeProcessExit      EventType = 25
 
-	// maxEventType is the highest EventType value, used for array sizing.
-	maxEventType = 26
+	// MaxEventType is the highest EventType value, used for array sizing.
+	MaxEventType = 25
 )
 
 // String returns the human-readable name of the event type.
@@ -78,8 +77,6 @@ func (e EventType) String() string {
 		return "tcp_retransmit"
 	case EventTypeTcpState:
 		return "tcp_state"
-	case EventTypeTcpMetrics:
-		return "tcp_metrics"
 	case EventTypeMemReclaim:
 		return "mem_reclaim"
 	case EventTypeMemCompaction:
@@ -113,6 +110,9 @@ const (
 	ClientTypeLodestar   ClientType = 9
 	ClientTypeNimbus     ClientType = 10
 	ClientTypeEthrex     ClientType = 11
+
+	// MaxClientType is the highest ClientType value, used for array sizing.
+	MaxClientType = 11
 )
 
 // String returns the human-readable name of the client type.
@@ -213,12 +213,16 @@ type DiskIOEvent struct {
 }
 
 // NetIOEvent represents a network send or receive.
+// When HasMetrics is true, SrttUs and Cwnd contain inline TCP metrics.
 type NetIOEvent struct {
 	Event
-	Bytes   uint32    `json:"bytes"`
-	SrcPort uint16    `json:"sport"`
-	DstPort uint16    `json:"dport"`
-	Dir     Direction `json:"direction"`
+	Bytes      uint32    `json:"bytes"`
+	SrcPort    uint16    `json:"sport"`
+	DstPort    uint16    `json:"dport"`
+	Dir        Direction `json:"direction"`
+	HasMetrics bool      `json:"has_metrics"`
+	SrttUs     uint32    `json:"srtt_us"`
+	Cwnd       uint32    `json:"cwnd"`
 }
 
 // SchedEvent represents a context switch.
@@ -273,15 +277,6 @@ type TcpStateEvent struct {
 	OldState uint8  `json:"old_state"`
 }
 
-// TcpMetricsEvent represents TCP congestion/RTT metrics.
-type TcpMetricsEvent struct {
-	Event
-	SrttUs  uint32 `json:"srtt_us"`
-	Cwnd    uint32 `json:"cwnd"`
-	SrcPort uint16 `json:"sport"`
-	DstPort uint16 `json:"dport"`
-}
-
 // MemLatencyEvent represents memory reclaim/compaction latency.
 type MemLatencyEvent struct {
 	Event
@@ -314,7 +309,6 @@ type ParsedEvent struct {
 	// Typed is one of SyscallEvent, DiskIOEvent, NetIOEvent,
 	// SchedEvent, SchedRunqueueEvent, PageFaultEvent, FDEvent,
 	// BlockMergeEvent, TcpRetransmitEvent, TcpStateEvent,
-	// TcpMetricsEvent, MemLatencyEvent, SwapEvent, OOMKillEvent,
-	// or ProcessExitEvent.
+	// MemLatencyEvent, SwapEvent, OOMKillEvent, or ProcessExitEvent.
 	Typed any
 }

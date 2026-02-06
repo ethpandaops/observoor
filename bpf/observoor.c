@@ -28,7 +28,6 @@ const struct sched_runqueue_event *__unused_sched_rq_ev __attribute__((unused));
 const struct block_merge_event *__unused_block_merge_ev __attribute__((unused));
 const struct tcp_retransmit_event *__unused_tcp_retx_ev __attribute__((unused));
 const struct tcp_state_event *__unused_tcp_state_ev __attribute__((unused));
-const struct tcp_metrics_event *__unused_tcp_metrics_ev __attribute__((unused));
 const struct mem_latency_event *__unused_mem_latency_ev __attribute__((unused));
 const struct swap_event *__unused_swap_ev __attribute__((unused));
 const struct oom_kill_event *__unused_oom_kill_ev __attribute__((unused));
@@ -701,24 +700,15 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
         BPF_CORE_READ(sk, __sk_common.skc_dport));
     e->direction = 0; // TX
 
-    bpf_ringbuf_submit(e, 0);
-
-    struct tcp_metrics_event *m = bpf_ringbuf_reserve(
-        &events, sizeof(*m), 0);
-    if (!m)
-        return 0;
-
-    fill_header(&m->hdr, EVENT_TCP_METRICS, ct);
+    // Inline TCP metrics into the net_tx event (saves a separate ring buffer entry).
+    e->has_metrics = 1;
     {
         __u32 srtt = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
-        m->srtt_us = srtt >> 3;
+        e->srtt_us = srtt >> 3;
     }
-    m->snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
-    m->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
-    m->dport = __builtin_bswap16(
-        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    e->snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
 
-    bpf_ringbuf_submit(m, 0);
+    bpf_ringbuf_submit(e, 0);
     return 0;
 }
 
@@ -776,6 +766,9 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     e->sport = val->sport;
     e->dport = val->dport;
     e->direction = 1; // RX
+    e->has_metrics = 0;
+    e->srtt_us = 0;
+    e->snd_cwnd = 0;
 
     bpf_ringbuf_submit(e, 0);
 
