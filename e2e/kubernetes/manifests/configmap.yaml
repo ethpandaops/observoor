@@ -53,6 +53,7 @@ data:
           interval: 100ms
           slot_aligned: true
         clickhouse:
+          enabled: true
           endpoint: clickhouse.observoor-test.svc.cluster.local:9000
           database: default
           table: aggregated_metrics
