@@ -295,12 +295,14 @@ impl Agent {
         // Signal all background tasks to stop.
         self.cancel.cancel();
 
-        // Allow spawned tasks to process cancellation.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-
-        // Stop clock.
+        // Stop clock so slot callbacks cannot rotate buffers during shutdown.
         if let Some(clock) = &self.clock {
             clock.stop();
+        }
+
+        // Wait for sink task to finish final flush/export shutdown.
+        if let Some(sink) = &self.sink {
+            sink.wait_for_shutdown().await;
         }
 
         // Stop tracer.
@@ -398,6 +400,11 @@ impl Agent {
 
     /// Update PIDs-by-client metrics.
     fn update_pids_by_client(&self, client_types: &HashMap<u32, ClientType>) {
+        Self::set_pids_by_client_metrics(&self.health, client_types);
+    }
+
+    /// Set PIDs-by-client metrics from resolved client types.
+    fn set_pids_by_client_metrics(health: &HealthMetrics, client_types: &HashMap<u32, ClientType>) {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for ct in client_types.values() {
             *counts.entry(ct.to_string()).or_default() += 1;
@@ -405,7 +412,7 @@ impl Agent {
 
         for name in ClientType::all_names() {
             let count = counts.get(&name).copied().unwrap_or(0);
-            self.health
+            health
                 .pids_by_client
                 .with_label_values(&[&name])
                 .set(count as f64);
@@ -486,6 +493,7 @@ impl Agent {
 
                         health.pids_tracked.set(pids.len() as f64);
                         let client_types = pid::resolve_client_types(&pids);
+                        Agent::set_pids_by_client_metrics(&health, &client_types);
 
                         #[cfg(feature = "bpf")]
                         if let Some(tracer) = &tracer {

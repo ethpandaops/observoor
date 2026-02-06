@@ -24,6 +24,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, EventType, NetIOEvent, ParsedEvent, TypedEvent};
 
 use self::buffer::Buffer;
+use self::clickhouse::SyncStateRow;
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
@@ -73,11 +74,19 @@ pub struct AggregatedSink {
     /// Event channel receiver, taken by `start`.
     event_rx: Option<mpsc::Receiver<ParsedEvent>>,
 
+    /// Queue of slot-rotation buffers waiting to be flushed.
+    rotation_tx: mpsc::UnboundedSender<Arc<Buffer>>,
+    /// Queue receiver, taken by `start`.
+    rotation_rx: Option<mpsc::UnboundedReceiver<Arc<Buffer>>>,
+
     /// Atomic buffer pointer for lock-free rotation.
     buffer: Arc<atomic_buffer::AtomicBuffer>,
 
     /// Shared atomic state, cloned into the spawned task.
     state: Arc<SharedState>,
+
+    /// Handle for the sink run task.
+    run_task: Arc<tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
 }
 
 impl AggregatedSink {
@@ -88,6 +97,7 @@ impl AggregatedSink {
         meta_network_name: String,
     ) -> Self {
         let (event_tx, event_rx) = mpsc::channel(65536);
+        let (rotation_tx, rotation_rx) = mpsc::unbounded_channel();
 
         Self {
             collector: Collector::new(cfg.resolution.interval),
@@ -97,14 +107,27 @@ impl AggregatedSink {
             exporters: Vec::with_capacity(2),
             event_tx,
             event_rx: Some(event_rx),
+            rotation_tx,
+            rotation_rx: Some(rotation_rx),
             buffer: Arc::new(atomic_buffer::AtomicBuffer::new()),
             state: Arc::new(SharedState::new()),
+            run_task: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
     /// Registers a metric exporter.
     pub fn add_exporter(&mut self, exporter: Exporter) {
         self.exporters.push(exporter);
+    }
+
+    /// Waits for the sink run task to finish.
+    pub async fn wait_for_shutdown(&self) {
+        let run_task = { self.run_task.lock().await.take() };
+        if let Some(run_task) = run_task {
+            if let Err(e) = run_task.await {
+                warn!(error = %e, "aggregated sink task join failed");
+            }
+        }
     }
 
     /// Sets the port whitelist for network dimensions.
@@ -122,6 +145,20 @@ impl AggregatedSink {
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
         )
+    }
+
+    /// Builds a sync-state row from current shared state.
+    fn new_sync_state_row(state: &SharedState, now: SystemTime) -> SyncStateRow {
+        SyncStateRow {
+            updated_date_time: now,
+            event_time: now,
+            wallclock_slot: u32::try_from(state.current_slot.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            wallclock_slot_start_date_time: state.slot_start_time(),
+            cl_syncing: state.cl_syncing.load(Ordering::Relaxed) == 1,
+            el_optimistic: state.el_optimistic.load(Ordering::Relaxed) == 1,
+            el_offline: state.el_offline.load(Ordering::Relaxed) == 1,
+        }
     }
 
     /// Routes a parsed event to the appropriate buffer aggregator.
@@ -251,8 +288,12 @@ impl Sink for AggregatedSink {
         let initial_buf = Self::new_buffer_from_state(&self.state, now, 0);
         self.buffer.store(initial_buf);
 
-        // Take the receiver out of self for the run loop.
+        // Take the receivers out of self for the run loop.
         let mut event_rx = self.event_rx.take().expect("start called more than once");
+        let mut rotation_rx = self
+            .rotation_rx
+            .take()
+            .expect("start called more than once");
 
         // Take exporters and start them.
         let mut exporters = std::mem::take(&mut self.exporters);
@@ -265,19 +306,43 @@ impl Sink for AggregatedSink {
         let state = Arc::clone(&self.state);
         let dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
+        let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let collector = Collector::new(interval);
         let meta_client_name = self.meta_client_name.clone();
         let meta_network_name = self.meta_network_name.clone();
 
-        tokio::spawn(async move {
+        let run_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
+            sync_state_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             const BATCH_SIZE: usize = 256;
 
             loop {
                 tokio::select! {
                     _ = ctx.cancelled() => {
+                        // Flush pending slot-rotation buffers first.
+                        while let Ok(rotated_buf) = rotation_rx.try_recv() {
+                            let meta = BatchMetadata {
+                                client_name: meta_client_name.clone(),
+                                network_name: meta_network_name.clone(),
+                                updated_time: SystemTime::now(),
+                            };
+                            let batch = collector.collect(&rotated_buf, meta);
+                            if !batch.is_empty() {
+                                for exporter in &exporters {
+                                    if let Err(e) = exporter.export(&batch).await {
+                                        tracing::error!(
+                                            exporter = exporter.name(),
+                                            error = %e,
+                                            "final rotated-buffer export failed",
+                                        );
+                                    }
+                                }
+                            }
+                        }
+
                         // Final flush.
                         if let Some(final_buf) = buffer.take() {
                             let meta = BatchMetadata {
@@ -340,6 +405,32 @@ impl Sink for AggregatedSink {
                         }
                     }
 
+                    Some(rotated_buf) = rotation_rx.recv() => {
+                        let meta = BatchMetadata {
+                            client_name: meta_client_name.clone(),
+                            network_name: meta_network_name.clone(),
+                            updated_time: SystemTime::now(),
+                        };
+                        let batch = collector.collect(&rotated_buf, meta);
+                        if !batch.is_empty() {
+                            for exporter in &exporters {
+                                if let Err(e) = exporter.export(&batch).await {
+                                    tracing::error!(
+                                        exporter = exporter.name(),
+                                        error = %e,
+                                        "slot-aligned export failed",
+                                    );
+                                }
+                            }
+                            tracing::debug!(
+                                latency = batch.latency.len(),
+                                counter = batch.counter.len(),
+                                gauge = batch.gauge.len(),
+                                "slot-aligned buffer flushed"
+                            );
+                        }
+                    }
+
                     _ = ticker.tick() => {
                         let now = SystemTime::now();
                         let slot = state.current_slot.load(Ordering::Relaxed);
@@ -373,9 +464,30 @@ impl Sink for AggregatedSink {
                             }
                         }
                     }
+
+                    _ = sync_state_ticker.tick() => {
+                        let now = SystemTime::now();
+                        let row = AggregatedSink::new_sync_state_row(&state, now);
+                        let meta = BatchMetadata {
+                            client_name: meta_client_name.clone(),
+                            network_name: meta_network_name.clone(),
+                            updated_time: now,
+                        };
+
+                        for exporter in &exporters {
+                            if let Err(e) = exporter.export_sync_state(&row, &meta).await {
+                                tracing::error!(
+                                    exporter = exporter.name(),
+                                    error = %e,
+                                    "sync state export failed",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });
+        *self.run_task.lock().await = Some(run_task);
 
         info!(
             interval = ?self.cfg.resolution.interval,
@@ -410,8 +522,15 @@ impl Sink for AggregatedSink {
         if self.cfg.resolution.slot_aligned {
             let now = SystemTime::now();
             let new_buf = Self::new_buffer_from_state(&self.state, now, new_slot);
-            if let Some(_old_buf) = self.buffer.swap(new_buf) {
-                tracing::debug!(slot = new_slot, "slot-aligned buffer rotation");
+            if let Some(old_buf) = self.buffer.swap(new_buf) {
+                if self.rotation_tx.send(old_buf).is_err() {
+                    warn!(
+                        slot = new_slot,
+                        "slot-aligned buffer rotation queue closed, dropping flush"
+                    );
+                } else {
+                    tracing::debug!(slot = new_slot, "slot-aligned buffer rotation");
+                }
             }
         }
     }

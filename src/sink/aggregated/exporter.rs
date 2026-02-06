@@ -1,9 +1,9 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use super::clickhouse::ClickHouseExporter;
+use super::clickhouse::{ClickHouseExporter, SyncStateRow};
 use super::http::HttpExporter;
-use super::metric::MetricBatch;
+use super::metric::{BatchMetadata, MetricBatch};
 
 /// Exporter dispatches metric batches to ClickHouse or HTTP backends.
 ///
@@ -36,6 +36,14 @@ impl Exporter {
         match self {
             Self::ClickHouse(e) => e.export(batch).await,
             Self::Http(e) => e.export(batch).await,
+        }
+    }
+
+    /// Export a sync-state row (ClickHouse only).
+    pub async fn export_sync_state(&self, row: &SyncStateRow, meta: &BatchMetadata) -> Result<()> {
+        match self {
+            Self::ClickHouse(e) => e.export_sync_state(row, meta).await,
+            Self::Http(_) => Ok(()),
         }
     }
 

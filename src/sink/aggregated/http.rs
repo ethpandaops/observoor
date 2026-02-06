@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use tokio::sync::{mpsc, Semaphore};
@@ -195,6 +195,10 @@ impl HttpExporter {
 
     /// Start the HTTP exporter background accumulator task.
     pub async fn start(&mut self, ctx: tokio_util::sync::CancellationToken) -> Result<()> {
+        if self.cfg.max_queue_size == 0 {
+            bail!("http max_queue_size must be positive");
+        }
+
         let (tx, mut rx) = mpsc::channel::<AggregatedMetricJson>(self.cfg.max_queue_size);
         self.tx = Some(tx);
         self.cancel = Some(ctx.clone());

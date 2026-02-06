@@ -477,6 +477,10 @@ impl Config {
                 bail!("http address is required when enabled");
             }
 
+            if self.sinks.aggregated.http.max_queue_size == 0 {
+                bail!("http max_queue_size must be positive when enabled");
+            }
+
             let compression = &self.sinks.aggregated.http.compression;
             match compression.as_str() {
                 "none" | "gzip" | "zstd" | "zlib" | "snappy" => {}
@@ -622,5 +626,36 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("meta_client_name"));
+    }
+
+    #[test]
+    fn test_validation_http_max_queue_size_zero() {
+        let mut cfg = Config {
+            beacon: BeaconConfig {
+                endpoint: "http://localhost:5052".to_string(),
+                ..Default::default()
+            },
+            sinks: SinksConfig {
+                aggregated: AggregatedSinkConfig {
+                    enabled: true,
+                    http: HttpExportConfig {
+                        enabled: true,
+                        address: "http://localhost:8686".to_string(),
+                        max_queue_size: 0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            meta_client_name: "test".to_string(),
+            meta_network_name: "testnet".to_string(),
+            ..Default::default()
+        };
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("max_queue_size"));
+
+        cfg.sinks.aggregated.http.max_queue_size = 1;
+        assert!(cfg.validate().is_ok());
     }
 }
