@@ -82,6 +82,13 @@ impl BpfTracer {
 
 impl Tracer for BpfTracer {
     async fn start(&mut self, ctx: tokio_util::sync::CancellationToken) -> Result<()> {
+        // Log embedded BPF object info for diagnostics.
+        tracing::info!(
+            bpf_obj_size = BPF_OBJ.len(),
+            bpf_obj_magic = format!("{:02x?}", BPF_OBJ.get(..16).unwrap_or(BPF_OBJ)),
+            "loading embedded BPF object"
+        );
+
         // Load BPF programs with configured ring buffer size.
         let mut ebpf = EbpfLoader::new()
             .set_max_entries("events", self.ring_buf_size)
@@ -672,4 +679,80 @@ fn log_attachment_stats(stats: &AttachmentStats) {
         kretprobes_failed = stats.kretprobes_failed,
         "BPF program attachment summary"
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bpf_object_is_valid_elf() {
+        // Verify the embedded BPF object has valid ELF magic bytes.
+        assert!(
+            BPF_OBJ.len() > 20,
+            "BPF object is too small: {} bytes",
+            BPF_OBJ.len()
+        );
+
+        // ELF magic: 0x7f 'E' 'L' 'F'
+        let magic = BPF_OBJ.get(..4).expect("BPF object too small for magic");
+        assert_eq!(magic, b"\x7fELF", "invalid ELF magic: {magic:02x?}");
+
+        // EI_CLASS should be ELFCLASS64 (2) for BPF.
+        let ei_class = BPF_OBJ.get(4).copied().expect("missing EI_CLASS");
+        assert_eq!(ei_class, 2, "not 64-bit ELF (EI_CLASS={ei_class})");
+
+        // EI_DATA should be ELFDATA2LSB (1) for little-endian.
+        let ei_data = BPF_OBJ.get(5).copied().expect("missing EI_DATA");
+        assert_eq!(ei_data, 1, "not little-endian (EI_DATA={ei_data})");
+
+        // e_machine at offset 18 (2 bytes LE) should be EM_BPF (247).
+        let em_lo = BPF_OBJ.get(18).copied().expect("missing e_machine lo");
+        let em_hi = BPF_OBJ.get(19).copied().expect("missing e_machine hi");
+        let e_machine = u16::from_le_bytes([em_lo, em_hi]);
+        assert_eq!(e_machine, 247, "e_machine is not EM_BPF (got {e_machine})");
+
+        eprintln!("BPF object: {} bytes, valid ELF/BPF", BPF_OBJ.len());
+    }
+
+    #[test]
+    fn test_bpf_object_parseable_by_object_crate() {
+        // Validate the embedded BPF object can be parsed by the `object` crate,
+        // which is the same ELF parser used internally by aya-obj.
+        use object::read::elf::ElfFile64;
+        use object::LittleEndian;
+
+        match ElfFile64::<LittleEndian>::parse(BPF_OBJ) {
+            Ok(elf) => {
+                use object::read::elf::FileHeader;
+                let header = elf.raw_header();
+                eprintln!(
+                    "BPF ELF: {} bytes, e_machine={}, sections={}, programs={}",
+                    BPF_OBJ.len(),
+                    { header.e_machine.get(LittleEndian) },
+                    { header.e_shnum.get(LittleEndian) },
+                    { header.e_phnum.get(LittleEndian) },
+                );
+
+                // List all section names for debugging.
+                use object::read::ObjectSection;
+                for section in object::read::Object::sections(&elf) {
+                    eprintln!(
+                        "  section: {} (size={}, kind={:?})",
+                        section.name().unwrap_or("<unnamed>"),
+                        section.size(),
+                        section.kind(),
+                    );
+                }
+            }
+            Err(e) => {
+                eprintln!("BPF object size: {} bytes", BPF_OBJ.len());
+                eprintln!(
+                    "BPF object first 32 bytes: {:02x?}",
+                    BPF_OBJ.get(..32).unwrap_or(BPF_OBJ)
+                );
+                panic!("object crate failed to parse BPF ELF: {e}");
+            }
+        }
+    }
 }

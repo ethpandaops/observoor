@@ -78,6 +78,18 @@ fn main() {
         std::process::exit(1);
     }
 
+    // Log BPF object size for diagnostics.
+    match std::fs::metadata(&bpf_out) {
+        Ok(meta) => println!(
+            "cargo:warning=BPF object size after strip: {} bytes",
+            meta.len()
+        ),
+        Err(e) => {
+            eprintln!("Failed to stat BPF object: {e}");
+            std::process::exit(1);
+        }
+    }
+
     // Tell cargo to rerun if BPF sources change.
     println!("cargo:rerun-if-changed=bpf/");
     println!("cargo:rerun-if-changed=build.rs");
