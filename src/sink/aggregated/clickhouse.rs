@@ -31,9 +31,7 @@ impl ClickHouseExporter {
     }
 
     /// Groups latency metrics by table name.
-    fn group_latency_by_table<'a>(
-        metrics: &'a [LatencyMetric],
-    ) -> HashMap<&'a str, Vec<&'a LatencyMetric>> {
+    fn group_latency_by_table(metrics: &[LatencyMetric]) -> HashMap<&str, Vec<&LatencyMetric>> {
         let mut result: HashMap<&str, Vec<&LatencyMetric>> = HashMap::with_capacity(16);
         for m in metrics {
             result.entry(m.metric_type.as_str()).or_default().push(m);
@@ -42,9 +40,7 @@ impl ClickHouseExporter {
     }
 
     /// Groups counter metrics by table name.
-    fn group_counter_by_table<'a>(
-        metrics: &'a [CounterMetric],
-    ) -> HashMap<&'a str, Vec<&'a CounterMetric>> {
+    fn group_counter_by_table(metrics: &[CounterMetric]) -> HashMap<&str, Vec<&CounterMetric>> {
         let mut result: HashMap<&str, Vec<&CounterMetric>> = HashMap::with_capacity(16);
         for m in metrics {
             result.entry(m.metric_type.as_str()).or_default().push(m);
@@ -53,9 +49,7 @@ impl ClickHouseExporter {
     }
 
     /// Groups gauge metrics by table name.
-    fn group_gauge_by_table<'a>(
-        metrics: &'a [GaugeMetric],
-    ) -> HashMap<&'a str, Vec<&'a GaugeMetric>> {
+    fn group_gauge_by_table(metrics: &[GaugeMetric]) -> HashMap<&str, Vec<&GaugeMetric>> {
         let mut result: HashMap<&str, Vec<&GaugeMetric>> = HashMap::with_capacity(4);
         for m in metrics {
             result.entry(m.metric_type.as_str()).or_default().push(m);

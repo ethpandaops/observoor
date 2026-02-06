@@ -58,7 +58,7 @@ pub struct BeaconConfig {
 }
 
 /// Process discovery configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct PidConfig {
     /// Process names to discover by scanning /proc.
     #[serde(default)]
@@ -70,7 +70,7 @@ pub struct PidConfig {
 }
 
 /// Data export sink configuration.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct SinksConfig {
     /// Aggregated metrics sink configuration.
     #[serde(default)]
@@ -78,7 +78,7 @@ pub struct SinksConfig {
 }
 
 /// Aggregated metrics sink configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize)]
 pub struct AggregatedSinkConfig {
     /// Enable the aggregated metrics sink.
     #[serde(default)]
@@ -354,35 +354,6 @@ impl Default for BeaconConfig {
         Self {
             endpoint: String::new(),
             timeout: default_beacon_timeout(),
-        }
-    }
-}
-
-impl Default for PidConfig {
-    fn default() -> Self {
-        Self {
-            process_names: Vec::new(),
-            cgroup_path: String::new(),
-        }
-    }
-}
-
-impl Default for SinksConfig {
-    fn default() -> Self {
-        Self {
-            aggregated: AggregatedSinkConfig::default(),
-        }
-    }
-}
-
-impl Default for AggregatedSinkConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            resolution: ResolutionConfig::default(),
-            dimensions: DimensionsConfig::default(),
-            clickhouse: ClickHouseConfig::default(),
-            http: HttpExportConfig::default(),
         }
     }
 }

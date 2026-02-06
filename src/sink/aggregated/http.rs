@@ -34,7 +34,7 @@ fn histogram_to_json(h: &[u32]) -> Option<HistogramJson> {
         return None;
     }
     Some(HistogramJson {
-        le_1us: h.get(0).copied().unwrap_or(0),
+        le_1us: h.first().copied().unwrap_or(0),
         le_10us: h.get(1).copied().unwrap_or(0),
         le_100us: h.get(2).copied().unwrap_or(0),
         le_1ms: h.get(3).copied().unwrap_or(0),
@@ -225,7 +225,7 @@ impl HttpExporter {
                     _ = ctx.cancelled() => {
                         // Flush remaining items.
                         if !batch.is_empty() {
-                            let items = std::mem::replace(&mut batch, Vec::new());
+                            let items = std::mem::take(&mut batch);
                             let _ = send_batch(
                                 &client, &cfg, &semaphore, items,
                             ).await;

@@ -34,12 +34,7 @@ pub const DEFAULT_PROCESS_NAMES: &[&str] = &[
     "MainThread",
 ];
 
-/// Metadata for a tracked thread.
-#[derive(Debug, Clone, Copy)]
-pub struct TrackedTidInfo {
-    pub pid: u32,
-    pub client: ClientType,
-}
+pub use crate::tracer::TrackedTidInfo;
 
 /// PID discovery trait.
 pub trait Discovery: Send + Sync {

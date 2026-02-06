@@ -206,12 +206,12 @@ fn parse_ports_from_cmdline(cmdline: &str, client_type: ClientType) -> Vec<u16> 
 
 /// Parse a string as a port number (1-65535).
 fn parse_port(s: &str) -> Option<u16> {
-    let s = s.trim_end_matches(|c: char| matches!(c, ',' | ';' | ')' | ']' | '}'));
+    let s = s.trim_end_matches([',', ';', ')', ']', '}']);
     let s = s.trim();
 
     let port: u64 = s.parse().ok()?;
 
-    if port >= 1 && port <= 65535 {
+    if (1..=65535).contains(&port) {
         Some(port as u16)
     } else {
         None
@@ -236,7 +236,7 @@ fn find_port_patterns(cmdline: &str) -> Vec<u16> {
             }
             // Try to read digits.
             let start = j;
-            while j < bytes.len() && bytes.get(j).map_or(false, |b| b.is_ascii_digit()) {
+            while j < bytes.len() && bytes.get(j).is_some_and(|b| b.is_ascii_digit()) {
                 j += 1;
             }
             if j > start {

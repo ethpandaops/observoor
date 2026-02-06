@@ -106,7 +106,7 @@ impl Client {
         if !status_code.is_success() {
             let body = response.text().await.unwrap_or_default();
             self.record_request(endpoint, "error", start.elapsed());
-            bail!("unexpected status {} from {}: {}", status_code, path, body);
+            bail!("unexpected status {status_code} from {path}: {body}");
         }
 
         let result: T = response

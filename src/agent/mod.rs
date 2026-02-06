@@ -220,7 +220,8 @@ impl Agent {
         // 10. Set up BPF tracer (Linux with bpf feature only).
         #[cfg(feature = "bpf")]
         {
-            let mut tracer = BpfTracer::new(self.cfg.ring_buffer_size);
+            let ring_buf_size = u32::try_from(self.cfg.ring_buffer_size).unwrap_or(u32::MAX);
+            let mut tracer = BpfTracer::new(ring_buf_size);
 
             // Register event handler.
             let health_ev = Arc::clone(&self.health);

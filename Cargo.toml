@@ -47,7 +47,8 @@ zstd = "0.13"
 snap = "1"
 
 # Profiling (Linux only)
-pprof = { version = "0.14", features = ["flamegraph", "protobuf-codec"], optional = true }
+pprof = { version = "0.14", features = ["flamegraph", "prost-codec"], optional = true }
+prost = { version = "0.13", optional = true }
 
 # Utilities
 futures = "0.3"
@@ -59,7 +60,7 @@ tokio-util = "0.7"
 [features]
 default = ["bpf", "profiling"]
 bpf = ["dep:aya"]
-profiling = ["dep:pprof"]
+profiling = ["dep:pprof", "dep:prost"]
 
 [lints.clippy]
 unwrap_used = "deny"

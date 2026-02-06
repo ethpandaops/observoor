@@ -272,7 +272,7 @@ async fn read_loop(
                 };
 
                 // Drain all available events.
-                let rb = guard.get_mut();
+                let rb = guard.get_inner_mut();
                 while let Some(item) = rb.next() {
                     let data: &[u8] = &item;
 
