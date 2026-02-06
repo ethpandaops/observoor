@@ -34,6 +34,7 @@ type RawSink struct {
 	cfg    RawConfig
 	writer *export.ClickHouseWriter
 	health *export.HealthMetrics
+	stats  *tracer.EventStats
 
 	// HTTP export processor (optional).
 	httpProcessor   *processor.BatchItemProcessor[RawEventJSON]
@@ -58,6 +59,9 @@ type RawSink struct {
 }
 
 type rawRow struct {
+	// eventTypeID carries the original EventType for stats recording.
+	// Not appended to ClickHouse (explicit column list in batch.Append).
+	eventTypeID   tracer.EventType
 	TimestampNs   uint64
 	WallclockSlot uint64
 	SlotStart     time.Time
@@ -99,6 +103,7 @@ func NewRawSink(
 	log logrus.FieldLogger,
 	cfg RawConfig,
 	health *export.HealthMetrics,
+	stats *tracer.EventStats,
 	metaClientName string,
 	metaNetworkName string,
 ) (*RawSink, error) {
@@ -112,6 +117,7 @@ func NewRawSink(
 		cfg:              cfg,
 		writer:           export.NewClickHouseWriter(log, cfg.ClickHouse),
 		health:           health,
+		stats:            stats,
 		batch:            make([]rawRow, 0, cfg.ClickHouse.BatchSize),
 		done:             make(chan struct{}),
 		eventCh:          make(chan tracer.ParsedEvent, 65536),
@@ -397,6 +403,21 @@ func (s *RawSink) flush(ctx context.Context, rows []rawRow) error {
 		return fmt.Errorf("sending batch of %d rows: %w", len(rows), err)
 	}
 
+	// Record shipped event counts by type.
+	if s.stats != nil {
+		var typeCounts [256]uint64
+
+		for i := range rows {
+			typeCounts[rows[i].eventTypeID]++
+		}
+
+		for i, n := range typeCounts {
+			if n > 0 {
+				s.stats.RecordN(tracer.EventType(i), n)
+			}
+		}
+	}
+
 	// Record success metrics.
 	if s.health != nil {
 		duration := time.Since(start)
@@ -441,6 +462,7 @@ func toRawRow(
 	}
 
 	row := rawRow{
+		eventTypeID: event.Raw.Type,
 		// Use wall clock time for storage. The BPF ktime_get_ns()
 		// value is monotonic (since boot), not Unix epoch.
 		TimestampNs:   uint64(timestampNs),

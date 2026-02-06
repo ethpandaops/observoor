@@ -32,6 +32,9 @@ const (
 	EventTypeSwapOut          EventType = 24
 	EventTypeOOMKill          EventType = 25
 	EventTypeProcessExit      EventType = 26
+
+	// maxEventType is the highest EventType value, used for array sizing.
+	maxEventType = 26
 )
 
 // String returns the human-readable name of the event type.

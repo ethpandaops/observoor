@@ -80,7 +80,7 @@ func (d *compositeDiscovery) Discover(
 		d.log.Warn("No PIDs discovered")
 	} else {
 		d.log.WithField("count", len(result)).
-			Info("Discovered PIDs")
+			Debug("Discovered PIDs")
 	}
 
 	return result, nil
