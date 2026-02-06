@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -313,6 +314,7 @@ func (t *tracer) readLoop(ctx context.Context) {
 	// Only report stats every N events to reduce overhead.
 	const statsInterval = 1000
 	eventCount := 0
+	var record ringbuf.Record
 
 	for {
 		select {
@@ -321,8 +323,7 @@ func (t *tracer) readLoop(ctx context.Context) {
 		default:
 		}
 
-		record, err := t.reader.Read()
-		if err != nil {
+		if err := t.reader.ReadInto(&record); err != nil {
 			if errors.Is(err, os.ErrClosed) {
 				return
 			}
@@ -340,7 +341,7 @@ func (t *tracer) readLoop(ctx context.Context) {
 		}
 
 		// Check if this is a lost record (overflow indicator).
-		if record.RawSample == nil {
+		if len(record.RawSample) == 0 {
 			if t.health != nil {
 				t.health.BPFRingbufOverflows.Inc()
 			}
@@ -457,37 +458,25 @@ func categorizeParseError(err error) string {
 	}
 }
 
+const eventHeaderSize = 24
+
 // parseEvent decodes a raw ring buffer sample into a ParsedEvent.
 func parseEvent(data []byte) (ParsedEvent, error) {
-	if len(data) < 24 {
+	if len(data) < eventHeaderSize {
 		return ParsedEvent{}, fmt.Errorf(
 			"event too short: %d bytes", len(data),
 		)
 	}
 
-	reader := bytes.NewReader(data)
-
-	var header struct {
-		TimestampNs uint64
-		PID         uint32
-		TID         uint32
-		EventType   uint8
-		ClientType  uint8
-		Pad         [6]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &header); err != nil {
-		return ParsedEvent{}, fmt.Errorf("reading event header: %w", err)
-	}
-
 	event := Event{
-		TimestampNs: header.TimestampNs,
-		PID:         header.PID,
-		TID:         header.TID,
-		Type:        EventType(header.EventType),
-		Client:      ClientType(header.ClientType),
+		TimestampNs: binary.LittleEndian.Uint64(data[0:8]),
+		PID:         binary.LittleEndian.Uint32(data[8:12]),
+		TID:         binary.LittleEndian.Uint32(data[12:16]),
+		Type:        EventType(data[16]),
+		Client:      ClientType(data[17]),
 	}
 
+	payload := data[eventHeaderSize:]
 	parsed := ParsedEvent{Raw: event}
 
 	var err error
@@ -497,33 +486,33 @@ func parseEvent(data []byte) (ParsedEvent, error) {
 		EventTypeSyscallFutex, EventTypeSyscallMmap,
 		EventTypeSyscallEpollWait, EventTypeSyscallFsync,
 		EventTypeSyscallFdatasync, EventTypeSyscallPwrite:
-		parsed.Typed, err = parseSyscallEvent(event, reader)
+		parsed.Typed, err = parseSyscallEvent(event, payload)
 	case EventTypeDiskIO:
-		parsed.Typed, err = parseDiskIOEvent(event, reader)
+		parsed.Typed, err = parseDiskIOEvent(event, payload)
 	case EventTypeNetTX, EventTypeNetRX:
-		parsed.Typed, err = parseNetIOEvent(event, reader)
+		parsed.Typed, err = parseNetIOEvent(event, payload)
 	case EventTypeSchedSwitch:
-		parsed.Typed, err = parseSchedEvent(event, reader)
+		parsed.Typed, err = parseSchedEvent(event, payload)
 	case EventTypeSchedRunqueue:
-		parsed.Typed, err = parseSchedRunqueueEvent(event, reader)
+		parsed.Typed, err = parseSchedRunqueueEvent(event, payload)
 	case EventTypePageFault:
-		parsed.Typed, err = parsePageFaultEvent(event, reader)
+		parsed.Typed, err = parsePageFaultEvent(event, payload)
 	case EventTypeFDOpen, EventTypeFDClose:
-		parsed.Typed, err = parseFDEvent(event, reader)
+		parsed.Typed, err = parseFDEvent(event, payload)
 	case EventTypeBlockMerge:
-		parsed.Typed, err = parseBlockMergeEvent(event, reader)
+		parsed.Typed, err = parseBlockMergeEvent(event, payload)
 	case EventTypeTcpRetransmit:
-		parsed.Typed, err = parseTcpRetransmitEvent(event, reader)
+		parsed.Typed, err = parseTcpRetransmitEvent(event, payload)
 	case EventTypeTcpState:
-		parsed.Typed, err = parseTcpStateEvent(event, reader)
+		parsed.Typed, err = parseTcpStateEvent(event, payload)
 	case EventTypeMemReclaim, EventTypeMemCompaction:
-		parsed.Typed, err = parseMemLatencyEvent(event, reader)
+		parsed.Typed, err = parseMemLatencyEvent(event, payload)
 	case EventTypeSwapIn, EventTypeSwapOut:
-		parsed.Typed, err = parseSwapEvent(event, reader)
+		parsed.Typed, err = parseSwapEvent(event, payload)
 	case EventTypeOOMKill:
-		parsed.Typed, err = parseOOMKillEvent(event, reader)
+		parsed.Typed, err = parseOOMKillEvent(event, payload)
 	case EventTypeProcessExit:
-		parsed.Typed, err = parseProcessExitEvent(event, reader)
+		parsed.Typed, err = parseProcessExitEvent(event, payload)
 	default:
 		return ParsedEvent{}, fmt.Errorf(
 			"unknown event type: %d", event.Type,
@@ -537,332 +526,234 @@ func parseEvent(data []byte) (ParsedEvent, error) {
 	return parsed, nil
 }
 
-func parseSyscallEvent(
-	base Event,
-	reader *bytes.Reader,
-) (SyscallEvent, error) {
-	var raw struct {
-		LatencyNs uint64
-		Return    int64
-		SyscallNr uint32
-		FD        int32
+func ensurePayloadSize(data []byte, need int, eventName string) error {
+	if len(data) < need {
+		return fmt.Errorf(
+			"reading %s: %w", eventName, io.ErrUnexpectedEOF,
+		)
 	}
 
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return SyscallEvent{}, fmt.Errorf("reading syscall event: %w", err)
+	return nil
+}
+
+func parseSyscallEvent(
+	base Event,
+	data []byte,
+) (SyscallEvent, error) {
+	if err := ensurePayloadSize(data, 24, "syscall event"); err != nil {
+		return SyscallEvent{}, err
 	}
 
 	return SyscallEvent{
 		Event:     base,
-		LatencyNs: raw.LatencyNs,
-		Return:    raw.Return,
-		SyscallNr: raw.SyscallNr,
-		FD:        raw.FD,
+		LatencyNs: binary.LittleEndian.Uint64(data[0:8]),
+		Return:    int64(binary.LittleEndian.Uint64(data[8:16])),
+		SyscallNr: binary.LittleEndian.Uint32(data[16:20]),
+		FD:        int32(binary.LittleEndian.Uint32(data[20:24])),
 	}, nil
 }
 
 func parseDiskIOEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (DiskIOEvent, error) {
-	var raw struct {
-		LatencyNs  uint64
-		Bytes      uint32
-		ReadWrite  uint8
-		Pad        [3]byte
-		QueueDepth uint32
-		DeviceID   uint32
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return DiskIOEvent{}, fmt.Errorf("reading disk IO event: %w", err)
+	if err := ensurePayloadSize(data, 24, "disk IO event"); err != nil {
+		return DiskIOEvent{}, err
 	}
 
 	return DiskIOEvent{
 		Event:      base,
-		LatencyNs:  raw.LatencyNs,
-		Bytes:      raw.Bytes,
-		ReadWrite:  raw.ReadWrite,
-		QueueDepth: raw.QueueDepth,
-		DeviceID:   raw.DeviceID,
+		LatencyNs:  binary.LittleEndian.Uint64(data[0:8]),
+		Bytes:      binary.LittleEndian.Uint32(data[8:12]),
+		ReadWrite:  data[12],
+		QueueDepth: binary.LittleEndian.Uint32(data[16:20]),
+		DeviceID:   binary.LittleEndian.Uint32(data[20:24]),
 	}, nil
 }
 
 func parseNetIOEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (NetIOEvent, error) {
-	var raw struct {
-		Bytes      uint32
-		Sport      uint16
-		Dport      uint16
-		Dir        uint8
-		HasMetrics uint8
-		Pad        [2]byte
-		SrttUs     uint32
-		SndCwnd    uint32
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return NetIOEvent{}, fmt.Errorf("reading net IO event: %w", err)
+	if err := ensurePayloadSize(data, 20, "net IO event"); err != nil {
+		return NetIOEvent{}, err
 	}
 
 	return NetIOEvent{
 		Event:      base,
-		Bytes:      raw.Bytes,
-		SrcPort:    raw.Sport,
-		DstPort:    raw.Dport,
-		Dir:        Direction(raw.Dir),
-		HasMetrics: raw.HasMetrics != 0,
-		SrttUs:     raw.SrttUs,
-		Cwnd:       raw.SndCwnd,
+		Bytes:      binary.LittleEndian.Uint32(data[0:4]),
+		SrcPort:    binary.LittleEndian.Uint16(data[4:6]),
+		DstPort:    binary.LittleEndian.Uint16(data[6:8]),
+		Dir:        Direction(data[8]),
+		HasMetrics: data[9] != 0,
+		SrttUs:     binary.LittleEndian.Uint32(data[12:16]),
+		Cwnd:       binary.LittleEndian.Uint32(data[16:20]),
 	}, nil
 }
 
 func parseSchedEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (SchedEvent, error) {
-	var raw struct {
-		OnCpuNs   uint64
-		Voluntary uint8
-		Pad       [7]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return SchedEvent{}, fmt.Errorf("reading sched event: %w", err)
+	if err := ensurePayloadSize(data, 16, "sched event"); err != nil {
+		return SchedEvent{}, err
 	}
 
 	return SchedEvent{
 		Event:     base,
-		OnCpuNs:   raw.OnCpuNs,
-		Voluntary: raw.Voluntary != 0,
+		OnCpuNs:   binary.LittleEndian.Uint64(data[0:8]),
+		Voluntary: data[8] != 0,
 	}, nil
 }
 
 func parsePageFaultEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (PageFaultEvent, error) {
-	var raw struct {
-		Address uint64
-		Major   uint8
-		Pad     [7]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return PageFaultEvent{}, fmt.Errorf(
-			"reading page fault event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 16, "page fault event"); err != nil {
+		return PageFaultEvent{}, err
 	}
 
 	return PageFaultEvent{
 		Event:   base,
-		Address: raw.Address,
-		Major:   raw.Major != 0,
+		Address: binary.LittleEndian.Uint64(data[0:8]),
+		Major:   data[8] != 0,
 	}, nil
 }
 
 func parseFDEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (FDEvent, error) {
-	var raw struct {
-		FD       int32
-		Pad      [4]byte
-		Filename [64]byte
+	if err := ensurePayloadSize(data, 72, "FD event"); err != nil {
+		return FDEvent{}, err
 	}
 
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return FDEvent{}, fmt.Errorf("reading FD event: %w", err)
-	}
-
-	// Null-terminate the filename.
-	filename := string(bytes.TrimRight(raw.Filename[:], "\x00"))
+	filename := string(bytes.TrimRight(data[8:72], "\x00"))
 
 	return FDEvent{
 		Event:    base,
-		FD:       raw.FD,
+		FD:       int32(binary.LittleEndian.Uint32(data[0:4])),
 		Filename: filename,
 	}, nil
 }
 
 func parseSchedRunqueueEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (SchedRunqueueEvent, error) {
-	var raw struct {
-		RunqueueNs uint64
-		OffCpuNs   uint64
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return SchedRunqueueEvent{}, fmt.Errorf(
-			"reading sched runqueue event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 16, "sched runqueue event"); err != nil {
+		return SchedRunqueueEvent{}, err
 	}
 
 	return SchedRunqueueEvent{
 		Event:      base,
-		RunqueueNs: raw.RunqueueNs,
-		OffCpuNs:   raw.OffCpuNs,
+		RunqueueNs: binary.LittleEndian.Uint64(data[0:8]),
+		OffCpuNs:   binary.LittleEndian.Uint64(data[8:16]),
 	}, nil
 }
 
 func parseBlockMergeEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (BlockMergeEvent, error) {
-	var raw struct {
-		Bytes     uint32
-		ReadWrite uint8
-		Pad       [3]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return BlockMergeEvent{}, fmt.Errorf(
-			"reading block merge event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 8, "block merge event"); err != nil {
+		return BlockMergeEvent{}, err
 	}
 
 	return BlockMergeEvent{
 		Event:     base,
-		Bytes:     raw.Bytes,
-		ReadWrite: raw.ReadWrite,
+		Bytes:     binary.LittleEndian.Uint32(data[0:4]),
+		ReadWrite: data[4],
 	}, nil
 }
 
 func parseTcpRetransmitEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (TcpRetransmitEvent, error) {
-	var raw struct {
-		Bytes uint32
-		Sport uint16
-		Dport uint16
-		Pad   [8]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return TcpRetransmitEvent{}, fmt.Errorf(
-			"reading tcp retransmit event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 16, "tcp retransmit event"); err != nil {
+		return TcpRetransmitEvent{}, err
 	}
 
 	return TcpRetransmitEvent{
 		Event:   base,
-		Bytes:   raw.Bytes,
-		SrcPort: raw.Sport,
-		DstPort: raw.Dport,
+		Bytes:   binary.LittleEndian.Uint32(data[0:4]),
+		SrcPort: binary.LittleEndian.Uint16(data[4:6]),
+		DstPort: binary.LittleEndian.Uint16(data[6:8]),
 	}, nil
 }
 
 func parseTcpStateEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (TcpStateEvent, error) {
-	var raw struct {
-		Sport    uint16
-		Dport    uint16
-		NewState uint8
-		OldState uint8
-		Pad      [10]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return TcpStateEvent{}, fmt.Errorf(
-			"reading tcp state event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 16, "tcp state event"); err != nil {
+		return TcpStateEvent{}, err
 	}
 
 	return TcpStateEvent{
 		Event:    base,
-		SrcPort:  raw.Sport,
-		DstPort:  raw.Dport,
-		NewState: raw.NewState,
-		OldState: raw.OldState,
+		SrcPort:  binary.LittleEndian.Uint16(data[0:2]),
+		DstPort:  binary.LittleEndian.Uint16(data[2:4]),
+		NewState: data[4],
+		OldState: data[5],
 	}, nil
 }
 
 func parseMemLatencyEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (MemLatencyEvent, error) {
-	var raw struct {
-		DurationNs uint64
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return MemLatencyEvent{}, fmt.Errorf(
-			"reading mem latency event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 8, "mem latency event"); err != nil {
+		return MemLatencyEvent{}, err
 	}
 
 	return MemLatencyEvent{
 		Event:      base,
-		DurationNs: raw.DurationNs,
+		DurationNs: binary.LittleEndian.Uint64(data[0:8]),
 	}, nil
 }
 
 func parseSwapEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (SwapEvent, error) {
-	var raw struct {
-		Pages uint64
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return SwapEvent{}, fmt.Errorf(
-			"reading swap event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 8, "swap event"); err != nil {
+		return SwapEvent{}, err
 	}
 
 	return SwapEvent{
 		Event: base,
-		Pages: raw.Pages,
+		Pages: binary.LittleEndian.Uint64(data[0:8]),
 	}, nil
 }
 
 func parseOOMKillEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (OOMKillEvent, error) {
-	var raw struct {
-		TargetPID uint32
-		Pad       [4]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return OOMKillEvent{}, fmt.Errorf(
-			"reading oom kill event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 8, "oom kill event"); err != nil {
+		return OOMKillEvent{}, err
 	}
 
 	return OOMKillEvent{
 		Event:     base,
-		TargetPID: raw.TargetPID,
+		TargetPID: binary.LittleEndian.Uint32(data[0:4]),
 	}, nil
 }
 
 func parseProcessExitEvent(
 	base Event,
-	reader *bytes.Reader,
+	data []byte,
 ) (ProcessExitEvent, error) {
-	var raw struct {
-		ExitCode uint32
-		Pad      [4]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return ProcessExitEvent{}, fmt.Errorf(
-			"reading process exit event: %w", err,
-		)
+	if err := ensurePayloadSize(data, 8, "process exit event"); err != nil {
+		return ProcessExitEvent{}, err
 	}
 
 	return ProcessExitEvent{
 		Event:    base,
-		ExitCode: raw.ExitCode,
+		ExitCode: binary.LittleEndian.Uint32(data[0:4]),
 	}, nil
 }
 
