@@ -61,20 +61,19 @@ func New(
 		cfg.Resolution.Interval = time.Second
 	}
 
-	if cfg.ClickHouse.BatchSize <= 0 {
-		cfg.ClickHouse.BatchSize = 10000
-	}
+	if cfg.ClickHouse.Enabled {
+		if cfg.ClickHouse.BatchSize <= 0 {
+			cfg.ClickHouse.BatchSize = 10000
+		}
 
-	if cfg.ClickHouse.FlushInterval <= 0 {
-		cfg.ClickHouse.FlushInterval = time.Second
+		if cfg.ClickHouse.FlushInterval <= 0 {
+			cfg.ClickHouse.FlushInterval = time.Second
+		}
 	}
-
-	writer := export.NewClickHouseWriter(log, cfg.ClickHouse)
 
 	sink := &Sink{
 		log:             log.WithField("sink", "aggregated"),
 		cfg:             cfg,
-		writer:          writer,
 		health:          health,
 		done:            make(chan struct{}),
 		eventCh:         make(chan tracer.ParsedEvent, 65536),
@@ -84,10 +83,15 @@ func New(
 		exporters:       make([]MetricExporter, 0, 2),
 	}
 
-	// Initialize ClickHouse exporter.
-	chExporter := NewClickHouseExporter(log, writer, cfg.ClickHouse, health)
-	sink.chExporter = chExporter
-	sink.exporters = append(sink.exporters, chExporter)
+	// Initialize ClickHouse exporter if enabled.
+	if cfg.ClickHouse.Enabled {
+		writer := export.NewClickHouseWriter(log, cfg.ClickHouse)
+		sink.writer = writer
+
+		chExporter := NewClickHouseExporter(log, writer, cfg.ClickHouse, health)
+		sink.chExporter = chExporter
+		sink.exporters = append(sink.exporters, chExporter)
+	}
 
 	// Initialize HTTP exporter if enabled.
 	if cfg.HTTP.Enabled {
@@ -120,15 +124,20 @@ func (s *Sink) SetPortWhitelist(ports map[uint16]struct{}) {
 
 // Start initializes the sink and starts the event processing loop.
 func (s *Sink) Start(ctx context.Context) error {
-	if err := s.writer.Start(ctx); err != nil {
-		return err
+	if s.writer != nil {
+		if err := s.writer.Start(ctx); err != nil {
+			return err
+		}
 	}
 
 	// Record channel capacity metric.
 	if s.health != nil {
 		s.health.SinkEventChannelCapacity.WithLabelValues("aggregated").
 			Set(float64(cap(s.eventCh)))
-		s.health.ClickHouseConnected.WithLabelValues("aggregated").Set(1)
+
+		if s.writer != nil {
+			s.health.ClickHouseConnected.WithLabelValues("aggregated").Set(1)
+		}
 	}
 
 	ctx, s.cancel = context.WithCancel(ctx)
@@ -166,7 +175,11 @@ func (s *Sink) Start(ctx context.Context) error {
 // Stop shuts down the sink gracefully.
 func (s *Sink) Stop() error {
 	if s.cancel == nil {
-		return s.writer.Stop()
+		if s.writer != nil {
+			return s.writer.Stop()
+		}
+
+		return nil
 	}
 
 	s.cancel()
@@ -188,7 +201,11 @@ func (s *Sink) Stop() error {
 		}
 	}
 
-	return s.writer.Stop()
+	if s.writer != nil {
+		return s.writer.Stop()
+	}
+
+	return nil
 }
 
 // HandleEvent processes a single event from the tracer.
@@ -524,7 +541,11 @@ func (s *Sink) flush(ctx context.Context, buf *Buffer) error {
 }
 
 // flushSyncState writes the current sync state to ClickHouse.
-func (s *Sink) flushSyncState(ctx context.Context) {
+func (s *Sink) flushSyncState(_ context.Context) {
+	if s.chExporter == nil {
+		return
+	}
+
 	now := time.Now()
 	slotStartNs := s.currentSlotStart.Load()
 	slotStartTime := time.Unix(0, slotStartNs)
@@ -545,7 +566,7 @@ func (s *Sink) flushSyncState(ctx context.Context) {
 		UpdatedTime: now,
 	}
 
-	if err := s.chExporter.ExportSyncState(ctx, row, meta); err != nil {
+	if err := s.chExporter.ExportSyncState(context.Background(), row, meta); err != nil {
 		s.log.WithError(err).Error("Sync state flush failed")
 	}
 }

@@ -11,6 +11,9 @@ import (
 
 // ClickHouseConfig configures the ClickHouse writer.
 type ClickHouseConfig struct {
+	// Enabled enables the ClickHouse writer. Defaults to false.
+	Enabled bool `yaml:"enabled"`
+
 	// Endpoint is the ClickHouse native protocol address.
 	Endpoint string `yaml:"endpoint"`
 
