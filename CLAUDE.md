@@ -6,23 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Observoor is an eBPF-based agent that monitors Ethereum execution and consensus layer processes at the kernel level. It captures syscalls, disk I/O, network I/O, scheduler events, memory faults, and file descriptor activity - aggregated per Ethereum slot and exported to ClickHouse. Zero client modifications required. **Linux only.**
 
+Written in Rust using `aya` for eBPF, `tokio` for async, `axum` for HTTP, and `clickhouse-rs` for native ClickHouse protocol.
+
 ## Build Commands
 
 ```bash
-# Generate BPF Go bindings (runs bpf2go)
-make generate
-
-# Build the binary (includes generate)
+# Build release binary (BPF compilation via build.rs on Linux)
 make build
 
-# Run tests with race detection
+# Run tests
 make test
 
-# Run a single test
-go test -race -count=1 ./internal/sink/... -run TestBucketFlush
-
-# Lint (new changes only vs origin/master)
+# Lint (fmt check + clippy)
 make lint
+
+# Format code
+make fmt
 
 # Clean build artifacts
 make clean
@@ -36,12 +35,12 @@ make e2e-test    # Run E2E tests
 make e2e-down    # Tear down
 ```
 
-**Build Requirements:** Linux with kernel headers and libbpf. BPF compilation requires clang.
+**Build Requirements:** Linux with kernel headers, clang, and libbpf for BPF compilation. On macOS, builds with `--no-default-features` (skips BPF).
 
 ## Running
 
 ```bash
-sudo ./bin/observoor --config config.yaml
+sudo ./target/release/observoor --config config.yaml
 ```
 
 Root or `CAP_BPF` + `CAP_PERFMON` capabilities required for eBPF program loading.
@@ -49,30 +48,48 @@ Root or `CAP_BPF` + `CAP_PERFMON` capabilities required for eBPF program loading
 ## Architecture
 
 ```
-cmd/observoor/main.go    CLI entry point (cobra)
-internal/
-  agent/                 Top-level orchestrator - coordinates all components
-    agent.go            Start/stop lifecycle, PID discovery, event routing
-    config.go           YAML configuration loading and validation
-    ports.go            Well-known port discovery for Ethereum clients
-  tracer/               BPF program management
-    tracer.go           Interface definition
-    tracer_linux.go     BPF loading, attachment, ring buffer reading
-    event.go            Event types (EventType, ClientType, parsed structs)
-    gen.go              bpf2go generation directive
-  sink/                 Event consumers (pluggable architecture)
-    sink.go             Sink interface definition
-    aggregated/         Configurable resolution aggregation
+Cargo.toml              Single crate binary
+build.rs                BPF C compilation via clang, embeds .o
+src/
+  main.rs               CLI entry point (clap derive), signal handling, tokio runtime
+  config.rs             YAML configuration + validation (serde_yaml)
+  agent/
+    mod.rs              Top-level orchestrator - startup sequence, monitors
+    ports.rs            Well-known port discovery for Ethereum clients
+  tracer/
+    mod.rs              Tracer trait (Start, Stop, UpdatePIDs, OnEvent)
+    event.rs            EventType (1-25), ClientType (0-11), parsed event structs
+    bpf.rs              aya: load .o, attach (required vs optional), ring buffer
+    parse.rs            Zero-copy event parsing (byte-slice reads)
+    stats.rs            Atomic per-event-type counters
+  sink/
+    mod.rs              Sink trait
+    aggregated/
+      mod.rs            Event loop, buffer rotation, flush
+      config.rs         Resolution, dimensions config
+      aggregate.rs      LatencyAggregate, CounterAggregate, GaugeAggregate
+      buffer.rs         Per-event-type HashMaps keyed by dimension
+      collector.rs      Buffer -> MetricBatch (single pass)
+      dimension.rs      BasicDimension, NetworkDimension, DiskDimension
+      histogram.rs      10-bucket latency histogram
+      metric.rs         MetricBatch, LatencyMetric, CounterMetric, GaugeMetric
+      exporter.rs       Exporter enum (ClickHouse | Http)
+      clickhouse.rs     ClickHouse batch exporter (native TCP protocol)
+      http.rs           HTTP NDJSON exporter (5 compression modes)
   export/
-    clickhouse.go       ClickHouse connection and batch writer
-    health.go           Prometheus metrics server
-  beacon/               Beacon node client (genesis, spec, sync status)
-  clock/                Ethereum wall clock (slot boundaries)
-  pid/                  Process discovery (by name or cgroup)
-  migrate/              Embedded ClickHouse schema migrations (golang-migrate)
+    mod.rs              ClickHouseWriter, connection pool management
+    health.rs           Prometheus metrics (40+) + axum server + pprof endpoints
+  beacon/
+    mod.rs              Beacon node client (genesis, spec, sync status)
+  clock/
+    mod.rs              Ethereum wall clock (slot timing from genesis)
+  pid/
+    mod.rs              Composite PID discovery (process name + cgroup)
+  migrate/
+    mod.rs              Embedded SQL migrations, golang-migrate compatible
 bpf/
   observoor.c           Main eBPF program (syscalls, block I/O, net, sched, etc.)
-  include/observoor.h   Event struct definitions (must match Go constants)
+  include/observoor.h   Event struct definitions (must match Rust constants)
   include/maps.h        BPF map definitions
   headers/              vmlinux.h and libbpf helpers
 deploy/
@@ -84,24 +101,28 @@ deploy/
 1. **Agent** fetches genesis/spec from beacon node, waits for sync
 2. **PID Discovery** finds Ethereum client processes by name or cgroup
 3. **Tracer** loads BPF programs, attaches to tracepoints/kprobes, populates PID map
-4. **Ring Buffer** receives events from kernel, parsed in Go
-5. **Sinks** consume events: aggregated (configurable)
-6. **ClickHouse** stores events in batches
+4. **Ring Buffer** receives events from kernel, parsed in Rust
+5. **Sinks** consume events: aggregated (configurable time windows)
+6. **ClickHouse** stores metrics in batches via native TCP protocol
 
 ## Key Interfaces
 
-**Tracer** (`internal/tracer/tracer.go`):
-- `Start(ctx)` - Load BPF, attach hooks, start reading
-- `UpdatePIDs(pids, clientTypes)` - Update tracked processes in BPF map
-- `OnEvent(handler)` - Register event callback
+**Tracer** (`src/tracer/mod.rs`):
+- `start(cancel)` - Load BPF, attach hooks, start reading
+- `update_pids(pids, client_types)` - Update tracked processes in BPF map
+- `on_event(handler)` - Register event callback
 
-**Sink** (`internal/sink/sink.go`):
-- `HandleEvent(event)` - Process a single event
-- `OnSlotChanged(slot, slotStart)` - Called at slot boundaries
+**Sink** (`src/sink/mod.rs`):
+- `handle_event(event)` - Process a single event
+- `on_slot_changed(slot, slot_start)` - Called at slot boundaries
+
+**Exporter** (`src/sink/aggregated/exporter.rs`):
+- `Exporter::ClickHouse(...)` / `Exporter::Http(...)` - Enum dispatch
+- `start(cancel)`, `export(batch)`, `stop()` - Lifecycle methods
 
 ## BPF Code Conventions
 
-- Event type constants in `bpf/include/observoor.h` must match `internal/tracer/event.go`
+- Event type constants in `bpf/include/observoor.h` must match `src/tracer/event.rs`
 - All event structs use 8-byte alignment with explicit padding
 - Event header is 24 bytes: timestamp(8) + pid(4) + tid(4) + type(1) + client(1) + pad(6)
 
@@ -123,4 +144,15 @@ Process: process_exit
 
 ## ClickHouse Migrations
 
-Migrations are embedded in the binary (`internal/migrate/sql/`) and run automatically on agent startup. The agent applies all pending migrations before starting event collection.
+Migrations are embedded in the binary (`src/migrate/`) and run when `sinks.aggregated.clickhouse.migrations.enabled` is true. Uses a `schema_migrations` table compatible with golang-migrate.
+
+## Feature Flags
+
+- `bpf` (default) - eBPF support via aya (Linux only)
+- `profiling` (default) - pprof CPU profiling endpoints (Linux only)
+
+Build without BPF for macOS development:
+```bash
+cargo build --no-default-features
+cargo test --no-default-features
+```

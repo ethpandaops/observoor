@@ -4,34 +4,28 @@ project_name: observoor
 
 before:
   hooks:
-    - go mod tidy
+    - cargo --version
 
 builds:
   - id: linux-amd64
-    main: ./cmd/observoor
-    env:
-      - CGO_ENABLED=0
+    builder: prebuilt
+    prebuilt:
+      path: target/x86_64-unknown-linux-gnu/release/observoor
     binary: observoor-{{.Version}}
     goos:
       - linux
     goarch:
       - amd64
-    ldflags:
-      - -s -w -X github.com/ethpandaops/observoor/internal/version.Release={{.Tag}} -X github.com/ethpandaops/observoor/internal/version.GitCommit={{.ShortCommit}} -X github.com/ethpandaops/observoor/internal/version.GOOS=linux -X github.com/ethpandaops/observoor/internal/version.GOARCH=amd64
-    mod_timestamp: "{{ .CommitTimestamp }}"
 
   - id: linux-arm64
-    main: ./cmd/observoor
-    env:
-      - CGO_ENABLED=0
+    builder: prebuilt
+    prebuilt:
+      path: target/aarch64-unknown-linux-gnu/release/observoor
     binary: observoor-{{.Version}}
     goos:
       - linux
     goarch:
       - arm64
-    ldflags:
-      - -s -w -X github.com/ethpandaops/observoor/internal/version.Release={{.Tag}} -X github.com/ethpandaops/observoor/internal/version.GitCommit={{.ShortCommit}} -X github.com/ethpandaops/observoor/internal/version.GOOS=linux -X github.com/ethpandaops/observoor/internal/version.GOARCH=arm64
-    mod_timestamp: "{{ .CommitTimestamp }}"
 
 checksum:
   name_template: 'checksums.txt'

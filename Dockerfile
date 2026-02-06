@@ -1,5 +1,5 @@
-# Stage 1: Build the BPF programs and Go binary.
-FROM golang:1.24-bookworm AS builder
+# Stage 1: Build the BPF programs and Rust binary.
+FROM rust:1.88-bookworm AS builder
 
 # Install BPF build dependencies.
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -11,15 +11,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Cache Go module downloads.
-COPY go.mod go.sum ./
-RUN go mod download
+# Cache dependency downloads by copying manifests first.
+COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 
-# Copy source.
+# Create a dummy main.rs so cargo can fetch dependencies.
+RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
+RUN cargo fetch
+
+# Copy full source.
 COPY . .
 
-# Generate BPF code and build.
-RUN make build
+# Touch main.rs so cargo rebuilds with real source.
+RUN touch src/main.rs
+
+# Build release binary.
+RUN cargo build --release
 
 # Stage 2: Minimal runtime image.
 FROM debian:bookworm-slim
@@ -28,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/bin/observoor /usr/local/bin/observoor
+COPY --from=builder /build/target/release/observoor /usr/local/bin/observoor
 
 ENTRYPOINT ["observoor"]
 CMD ["--config", "/etc/observoor/config.yaml"]
