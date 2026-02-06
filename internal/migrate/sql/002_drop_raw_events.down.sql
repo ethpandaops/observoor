@@ -1,0 +1,1 @@
+-- raw_events tables were removed; no rollback action.

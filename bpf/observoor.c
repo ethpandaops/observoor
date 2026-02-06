@@ -28,7 +28,6 @@ const struct sched_runqueue_event *__unused_sched_rq_ev __attribute__((unused));
 const struct block_merge_event *__unused_block_merge_ev __attribute__((unused));
 const struct tcp_retransmit_event *__unused_tcp_retx_ev __attribute__((unused));
 const struct tcp_state_event *__unused_tcp_state_ev __attribute__((unused));
-const struct tcp_metrics_event *__unused_tcp_metrics_ev __attribute__((unused));
 const struct mem_latency_event *__unused_mem_latency_ev __attribute__((unused));
 const struct swap_event *__unused_swap_ev __attribute__((unused));
 const struct oom_kill_event *__unused_oom_kill_ev __attribute__((unused));

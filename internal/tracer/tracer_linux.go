@@ -516,8 +516,6 @@ func parseEvent(data []byte) (ParsedEvent, error) {
 		parsed.Typed, err = parseTcpRetransmitEvent(event, reader)
 	case EventTypeTcpState:
 		parsed.Typed, err = parseTcpStateEvent(event, reader)
-	case EventTypeTcpMetrics:
-		parsed.Typed, err = parseTcpMetricsEvent(event, reader)
 	case EventTypeMemReclaim, EventTypeMemCompaction:
 		parsed.Typed, err = parseMemLatencyEvent(event, reader)
 	case EventTypeSwapIn, EventTypeSwapOut:
@@ -783,33 +781,6 @@ func parseTcpStateEvent(
 		DstPort:  raw.Dport,
 		NewState: raw.NewState,
 		OldState: raw.OldState,
-	}, nil
-}
-
-func parseTcpMetricsEvent(
-	base Event,
-	reader *bytes.Reader,
-) (TcpMetricsEvent, error) {
-	var raw struct {
-		SrttUs uint32
-		Cwnd   uint32
-		Sport  uint16
-		Dport  uint16
-		Pad    [4]byte
-	}
-
-	if err := binary.Read(reader, binary.LittleEndian, &raw); err != nil {
-		return TcpMetricsEvent{}, fmt.Errorf(
-			"reading tcp metrics event: %w", err,
-		)
-	}
-
-	return TcpMetricsEvent{
-		Event:   base,
-		SrttUs:  raw.SrttUs,
-		Cwnd:    raw.Cwnd,
-		SrcPort: raw.Sport,
-		DstPort: raw.Dport,
 	}, nil
 }
 

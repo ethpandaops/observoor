@@ -33,8 +33,8 @@ pid:
     - prysm
   cgroup_path: "/sys/fs/cgroup/ethereum.slice"
 sinks:
-  raw:
-    enabled: false
+  aggregated:
+    enabled: true
 health:
   addr: ":9091"
 sync_poll_interval: 15s
@@ -56,7 +56,7 @@ ring_buffer_size: 8388608
 		"/sys/fs/cgroup/ethereum.slice",
 		cfg.PID.CgroupPath,
 	)
-	assert.False(t, cfg.Sinks.Raw.Enabled)
+	assert.True(t, cfg.Sinks.Aggregated.Enabled)
 	assert.Equal(t, ":9091", cfg.Health.Addr)
 	assert.Equal(t, 8388608, cfg.RingBufferSize)
 }
@@ -116,6 +116,7 @@ func TestValidate_DefaultsPIDConfig(t *testing.T) {
 	cfg.Beacon.Endpoint = "http://localhost:3500"
 	cfg.MetaClientName = "test"
 	cfg.MetaNetworkName = "testnet"
+	cfg.Sinks.Aggregated.Enabled = true
 
 	// When no PID config is specified, Validate should apply defaults.
 	err := cfg.Validate()
@@ -128,6 +129,7 @@ func TestValidate_InvalidRingBufferSize(t *testing.T) {
 	cfg.Beacon.Endpoint = "http://localhost:3500"
 	cfg.MetaClientName = "test"
 	cfg.MetaNetworkName = "testnet"
+	cfg.Sinks.Aggregated.Enabled = true
 	cfg.PID.ProcessNames = []string{"geth"}
 	cfg.RingBufferSize = 0
 
@@ -141,6 +143,7 @@ func TestValidate_ValidConfig(t *testing.T) {
 	cfg.Beacon.Endpoint = "http://localhost:3500"
 	cfg.MetaClientName = "test"
 	cfg.MetaNetworkName = "testnet"
+	cfg.Sinks.Aggregated.Enabled = true
 	cfg.PID.ProcessNames = []string{"geth"}
 
 	err := cfg.Validate()
@@ -152,8 +155,21 @@ func TestValidate_CgroupPathOnly(t *testing.T) {
 	cfg.Beacon.Endpoint = "http://localhost:3500"
 	cfg.MetaClientName = "test"
 	cfg.MetaNetworkName = "testnet"
+	cfg.Sinks.Aggregated.Enabled = true
 	cfg.PID.CgroupPath = "/sys/fs/cgroup/test"
 
 	err := cfg.Validate()
 	require.NoError(t, err)
+}
+
+func TestValidate_MissingAggregatedSink(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Beacon.Endpoint = "http://localhost:3500"
+	cfg.MetaClientName = "test"
+	cfg.MetaNetworkName = "testnet"
+	cfg.PID.ProcessNames = []string{"geth"}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "sinks.aggregated.enabled must be true")
 }

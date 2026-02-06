@@ -30,7 +30,6 @@ func TestEventType_String(t *testing.T) {
 		{EventTypeBlockMerge, "block_merge"},
 		{EventTypeTcpRetransmit, "tcp_retransmit"},
 		{EventTypeTcpState, "tcp_state"},
-		{EventTypeTcpMetrics, "tcp_metrics"},
 		{EventTypeMemReclaim, "mem_reclaim"},
 		{EventTypeMemCompaction, "mem_compaction"},
 		{EventTypeSwapIn, "swap_in"},
@@ -90,13 +89,12 @@ func TestEventTypeValues(t *testing.T) {
 	assert.Equal(t, EventType(17), EventTypeBlockMerge)
 	assert.Equal(t, EventType(18), EventTypeTcpRetransmit)
 	assert.Equal(t, EventType(19), EventTypeTcpState)
-	assert.Equal(t, EventType(20), EventTypeTcpMetrics)
-	assert.Equal(t, EventType(21), EventTypeMemReclaim)
-	assert.Equal(t, EventType(22), EventTypeMemCompaction)
-	assert.Equal(t, EventType(23), EventTypeSwapIn)
-	assert.Equal(t, EventType(24), EventTypeSwapOut)
-	assert.Equal(t, EventType(25), EventTypeOOMKill)
-	assert.Equal(t, EventType(26), EventTypeProcessExit)
+	assert.Equal(t, EventType(20), EventTypeMemReclaim)
+	assert.Equal(t, EventType(21), EventTypeMemCompaction)
+	assert.Equal(t, EventType(22), EventTypeSwapIn)
+	assert.Equal(t, EventType(23), EventTypeSwapOut)
+	assert.Equal(t, EventType(24), EventTypeOOMKill)
+	assert.Equal(t, EventType(25), EventTypeProcessExit)
 }
 
 func TestClientTypeValues(t *testing.T) {

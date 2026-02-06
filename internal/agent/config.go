@@ -101,5 +101,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("ring_buffer_size must be positive")
 	}
 
+	if !c.Sinks.Aggregated.Enabled {
+		return fmt.Errorf("sinks.aggregated.enabled must be true")
+	}
+
 	return nil
 }

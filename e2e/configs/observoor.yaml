@@ -16,14 +16,20 @@ sync_poll_interval: 30s
 ring_buffer_size: 4194304  # 4MB
 
 sinks:
-  raw:
-    enabled: false
+  aggregated:
+    enabled: true
+    resolution:
+      interval: 100ms
+      slot_aligned: true
     clickhouse:
+      enabled: true
       endpoint: "clickhouse:9000"
       database: "observoor"
-      table: "raw_events"
+      table: "aggregated_metrics"
       batch_size: 10000
       flush_interval: 1s
+      migrations:
+        enabled: true
 
 health:
   addr: ":9090"

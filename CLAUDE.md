@@ -62,9 +62,6 @@ internal/
     gen.go              bpf2go generation directive
   sink/                 Event consumers (pluggable architecture)
     sink.go             Sink interface definition
-    raw.go              Writes every event to ClickHouse in batches
-    slot.go             Per-slot aggregation
-    window.go           Time-window aggregation
     aggregated/         Configurable resolution aggregation
   export/
     clickhouse.go       ClickHouse connection and batch writer
@@ -88,7 +85,7 @@ deploy/
 2. **PID Discovery** finds Ethereum client processes by name or cgroup
 3. **Tracer** loads BPF programs, attaches to tracepoints/kprobes, populates PID map
 4. **Ring Buffer** receives events from kernel, parsed in Go
-5. **Sinks** consume events: raw (all events), slot (per-slot), window (time-based), aggregated (configurable)
+5. **Sinks** consume events: aggregated (configurable)
 6. **ClickHouse** stores events in batches
 
 ## Key Interfaces
@@ -118,7 +115,7 @@ deploy/
 
 Syscalls: read, write, futex, mmap, epoll_wait, fsync, fdatasync, pwrite
 Block I/O: disk_io, block_merge
-Network: net_tx, net_rx, tcp_retransmit, tcp_state, tcp_metrics
+Network: net_tx, net_rx, tcp_retransmit, tcp_state
 Scheduler: sched_switch, sched_runqueue
 Memory: page_fault, mem_reclaim, mem_compaction, swap_in, swap_out, oom_kill
 FD: fd_open, fd_close

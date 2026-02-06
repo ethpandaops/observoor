@@ -33,28 +33,9 @@ sync_poll_interval: 30s
 
 # Data export sinks
 sinks:
-  # Raw events - writes every event to ClickHouse
-  raw:
-    enabled: true
-    clickhouse:
-      endpoint: clickhouse:9000
-      database: observoor
-      table: raw_events
-      batch_size: 10000
-      flush_interval: 1s
-    sample_rate: 1.0
-    include_filenames: true
-    # Optional HTTP export (e.g., to Vector)
-    # http:
-    #   enabled: true
-    #   address: http://vector:8080/raw
-    #   compression: gzip
-    #   batch_size: 512
-    #   batch_timeout: 5s
-
   # Aggregated metrics - configurable resolution aggregation
   aggregated:
-    enabled: false
+    enabled: true
     resolution:
       # Aggregation window duration (50ms, 100ms, 500ms, 1s, 5s, 1m)
       interval: 1s
@@ -74,10 +55,13 @@ sinks:
         # Include read/write breakdown in disk metrics
         include_rw: true
     clickhouse:
+      enabled: true
       endpoint: clickhouse:9000
       database: observoor
       batch_size: 10000
       flush_interval: 1s
+      migrations:
+        enabled: true
     # Optional HTTP export (e.g., to Vector)
     # http:
     #   enabled: true

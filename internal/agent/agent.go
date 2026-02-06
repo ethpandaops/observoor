@@ -65,9 +65,9 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 		beacon:        beacon.NewClient(log, cfg.Beacon, health),
 		disc:          pid.NewDiscovery(log, cfg.PID, health),
 		tracer:        tracer.New(log, cfg.RingBufferSize, health),
-		sinks:         make([]sink.Sink, 0, 3),
+		sinks:         make([]sink.Sink, 0, 1),
 		capturedStats: tracer.NewEventStats(),
-		shippedStats:  make([]*tracer.EventStats, 0, 2),
+		shippedStats:  make([]*tracer.EventStats, 0, 1),
 	}
 
 	// Pre-resolve Prometheus label lookups to avoid per-event hash/map overhead.
@@ -77,22 +77,6 @@ func New(log logrus.FieldLogger, cfg *Config) (Agent, error) {
 
 	for i := tracer.ClientType(0); i <= tracer.MaxClientType; i++ {
 		a.eventsByClientCached[i] = health.EventsByClient.WithLabelValues(i.String())
-	}
-
-	// Configure enabled sinks.
-	if cfg.Sinks.Raw.Enabled {
-		rawShipped := tracer.NewEventStats()
-
-		rawSink, err := sink.NewRawSink(
-			log, cfg.Sinks.Raw, a.health, rawShipped,
-			cfg.MetaClientName, cfg.MetaNetworkName,
-		)
-		if err != nil {
-			return nil, fmt.Errorf("creating raw sink: %w", err)
-		}
-
-		a.sinks = append(a.sinks, rawSink)
-		a.shippedStats = append(a.shippedStats, rawShipped)
 	}
 
 	if cfg.Sinks.Aggregated.Enabled {

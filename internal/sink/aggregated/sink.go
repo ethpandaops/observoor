@@ -355,10 +355,6 @@ func (s *Sink) processEvent(event tracer.ParsedEvent) {
 		netDim := s.buildNetworkDimensionFromTcpRetransmit(event.Raw, e)
 		buf.AddTcpRetransmit(netDim, int64(e.Bytes))
 
-	case tracer.TcpMetricsEvent:
-		tcpDim := s.buildTcpMetricsDimension(event.Raw, e)
-		buf.AddTcpMetrics(tcpDim, e.SrttUs, e.Cwnd)
-
 	case tracer.TcpStateEvent:
 		buf.AddTcpStateChange(basicDim)
 
@@ -461,24 +457,6 @@ func (s *Sink) buildTcpMetricsDimFromNetIO(
 
 	if s.cfg.Dimensions.Network.IncludePort() {
 		dim.LocalPort = s.cfg.Dimensions.Network.FilterPort(localPort(e))
-	}
-
-	return dim
-}
-
-// buildTcpMetricsDimension creates a TCPMetricsDimension based on config.
-func (s *Sink) buildTcpMetricsDimension(
-	raw tracer.Event,
-	e tracer.TcpMetricsEvent,
-) TCPMetricsDimension {
-	dim := TCPMetricsDimension{
-		PID:        raw.PID,
-		ClientType: uint8(raw.Client),
-	}
-
-	if s.cfg.Dimensions.Network.IncludePort() {
-		// Source port is typically local port for TCP metrics.
-		dim.LocalPort = s.cfg.Dimensions.Network.FilterPort(e.SrcPort)
 	}
 
 	return dim
