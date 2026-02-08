@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Docker-based E2E tests (existing tests, renamed).
+  # Docker-based E2E tests.
   e2e-docker:
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -149,12 +149,6 @@ jobs:
             sudo tee /etc/apt/sources.list.d/kurtosis.list
           sudo apt update
           sudo apt install -y kurtosis-cli
-
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: '1.23'
-          cache: true
 
       - name: Build observoor
         run: make docker-build
