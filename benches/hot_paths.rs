@@ -128,7 +128,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns);
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
         }
         TypedEvent::SchedRunqueue(e) => {
             buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
@@ -210,7 +210,7 @@ fn build_collector_input(cardinality: u32, repeats: usize) -> (Collector, Buffer
         for _ in 0..repeats {
             buffer.add_syscall(EventType::SyscallRead, basic, 1_200);
             buffer.add_syscall(EventType::SyscallFutex, basic, 450);
-            buffer.add_sched_switch(basic, 2_000);
+            buffer.add_sched_switch(basic, 2_000, i % 8);
             buffer.add_sched_runqueue(basic, 500, 1_000);
             buffer.add_page_fault(basic, i % 7 == 0);
             buffer.add_fd_open(basic);
@@ -269,6 +269,7 @@ fn bench_buffer_ingest(c: &mut Criterion) {
                             false,
                             false,
                             false,
+                            16,
                         )
                     },
                     |buffer| {
@@ -384,7 +385,7 @@ fn bench_pipeline(c: &mut Criterion) {
 
     c.bench_function("pipeline/parse_aggregate_collect_1024", |b| {
         b.iter_batched(
-            || Buffer::new(now, 42, now, false, false, false),
+            || Buffer::new(now, 42, now, false, false, false, 16),
             |buffer| {
                 for raw in &payloads {
                     let parsed = parse_event(raw).expect("parse pipeline event");
