@@ -4,6 +4,7 @@ pub mod collector;
 pub mod config;
 pub mod dimension;
 pub mod exporter;
+pub mod flush;
 pub mod histogram;
 pub mod metric;
 
@@ -28,6 +29,7 @@ use self::clickhouse::SyncStateRow;
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
+use self::flush::TieredFlushController;
 use self::metric::{BatchMetadata, MetricBatch};
 
 /// Shared atomic state that can be safely sent to a spawned task.
@@ -307,7 +309,9 @@ impl Sink for AggregatedSink {
         let dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
+        let resolution_overrides = self.cfg.resolution.overrides.clone();
         let collector = Collector::new(interval);
+        let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
 
@@ -336,6 +340,7 @@ impl Sink for AggregatedSink {
                         while let Ok(rotated_buf) = rotation_rx.try_recv() {
                             reusable_batch.metadata.updated_time = SystemTime::now();
                             collector.collect_into(&rotated_buf, &mut reusable_batch);
+                            flush_controller.force_flush_all(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
@@ -353,6 +358,7 @@ impl Sink for AggregatedSink {
                         if let Some(final_buf) = buffer.take() {
                             reusable_batch.metadata.updated_time = SystemTime::now();
                             collector.collect_into(&final_buf, &mut reusable_batch);
+                            flush_controller.force_flush_all(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
@@ -408,6 +414,7 @@ impl Sink for AggregatedSink {
                     Some(rotated_buf) = rotation_rx.recv() => {
                         reusable_batch.metadata.updated_time = SystemTime::now();
                         collector.collect_into(&rotated_buf, &mut reusable_batch);
+                        flush_controller.force_flush_all(&mut reusable_batch);
                         if !reusable_batch.is_empty() {
                             for exporter in &exporters {
                                 if let Err(e) = exporter.export(&reusable_batch).await {
@@ -437,6 +444,7 @@ impl Sink for AggregatedSink {
                         if let Some(old_buf) = buffer.swap(new_buf) {
                             reusable_batch.metadata.updated_time = SystemTime::now();
                             collector.collect_into(&old_buf, &mut reusable_batch);
+                            flush_controller.process_tick(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
@@ -484,6 +492,7 @@ impl Sink for AggregatedSink {
         info!(
             interval = ?self.cfg.resolution.interval,
             slot_aligned = self.cfg.resolution.slot_aligned,
+            tier_overrides = self.cfg.resolution.overrides.len(),
             "aggregated sink started"
         );
 

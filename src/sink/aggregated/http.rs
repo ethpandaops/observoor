@@ -95,7 +95,6 @@ fn is_arc_str_empty(v: &Arc<str>) -> bool {
 #[derive(Clone)]
 struct SharedBatchStrings {
     updated_date_time: Arc<str>,
-    window_start: Arc<str>,
     wallclock_slot_start_date_time: Arc<str>,
     meta_client_name: Arc<str>,
     meta_network_name: Arc<str>,
@@ -123,19 +122,18 @@ impl HttpExporter {
     }
 
     fn shared_strings(batch: &MetricBatch) -> Option<SharedBatchStrings> {
-        let (window_start, slot_start) = if let Some(m) = batch.latency.first() {
-            (m.window.start, m.slot.start_time)
+        let slot_start = if let Some(m) = batch.latency.first() {
+            m.slot.start_time
         } else if let Some(m) = batch.counter.first() {
-            (m.window.start, m.slot.start_time)
+            m.slot.start_time
         } else if let Some(m) = batch.gauge.first() {
-            (m.window.start, m.slot.start_time)
+            m.slot.start_time
         } else {
             return None;
         };
 
         Some(SharedBatchStrings {
             updated_date_time: Arc::from(format_datetime(batch.metadata.updated_time)),
-            window_start: Arc::from(format_datetime(window_start)),
             wallclock_slot_start_date_time: Arc::from(format_datetime(slot_start)),
             meta_client_name: Arc::clone(&batch.metadata.client_name),
             meta_network_name: Arc::clone(&batch.metadata.network_name),
@@ -147,7 +145,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -172,7 +170,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -197,7 +195,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -624,7 +622,11 @@ fn format_datetime(t: std::time::SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::SystemTime;
+
     use super::*;
+    use crate::sink::aggregated::metric::{BatchMetadata, SlotInfo, WindowInfo};
+    use crate::tracer::event::ClientType;
 
     #[test]
     fn test_compress_none() {
@@ -757,5 +759,66 @@ mod tests {
         assert!(!json_str.contains("local_port"));
         assert!(!json_str.contains("direction"));
         assert!(!json_str.contains("device_id"));
+    }
+
+    #[test]
+    fn test_window_start_is_serialized_per_metric() {
+        let slot_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12);
+
+        let batch = MetricBatch {
+            metadata: BatchMetadata {
+                client_name: Arc::from("node-a"),
+                network_name: Arc::from("mainnet"),
+                updated_time: SystemTime::UNIX_EPOCH,
+            },
+            latency: vec![LatencyMetric {
+                metric_type: "syscall_read",
+                window: WindowInfo {
+                    start: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1),
+                    interval_ms: 100,
+                },
+                slot: SlotInfo {
+                    number: 1,
+                    start_time: slot_start,
+                },
+                pid: 1,
+                client_type: ClientType::Geth,
+                device_id: None,
+                rw: None,
+                sum: 10,
+                count: 1,
+                min: 10,
+                max: 10,
+                histogram: [0; NUM_BUCKETS],
+            }],
+            counter: vec![CounterMetric {
+                metric_type: "net_io",
+                window: WindowInfo {
+                    start: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2),
+                    interval_ms: 100,
+                },
+                slot: SlotInfo {
+                    number: 1,
+                    start_time: slot_start,
+                },
+                pid: 1,
+                client_type: ClientType::Geth,
+                device_id: None,
+                rw: None,
+                local_port: Some(30303),
+                direction: Some("tx"),
+                sum: 1024,
+                count: 1,
+            }],
+            gauge: vec![],
+        };
+
+        let shared = HttpExporter::shared_strings(&batch).expect("batch should not be empty");
+        let latency_json = HttpExporter::latency_to_json(&batch.latency[0], &shared);
+        let counter_json = HttpExporter::counter_to_json(&batch.counter[0], &shared);
+
+        assert_eq!(&*latency_json.window_start, "1970-01-01 00:00:01.000");
+        assert_eq!(&*counter_json.window_start, "1970-01-01 00:00:02.000");
+        assert_ne!(latency_json.window_start, counter_json.window_start);
     }
 }

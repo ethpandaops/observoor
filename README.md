@@ -46,6 +46,23 @@ eBPF agent that monitors Ethereum execution and consensus layer processes at the
 
 See [`example.config.yaml`](example.config.yaml) for a complete configuration reference.
 
+Tiered per-metric aggregation intervals can be configured with
+`sinks.aggregated.resolution.overrides`:
+
+```yaml
+sinks:
+  aggregated:
+    resolution:
+      interval: 100ms
+      overrides:
+        - metrics: [syscall_futex, sched_runqueue, mem_reclaim, mem_compaction]
+          interval: 500ms
+        - metrics: [page_fault_major, page_fault_minor, swap_in, swap_out, oom_kill, fd_open, fd_close, process_exit, tcp_state_change]
+          interval: 1s
+```
+
+If `overrides` is omitted, all metrics use `resolution.interval`.
+
 ## ClickHouse Migrations
 
 Migrations live in `deploy/migrations/clickhouse/` and use [golang-migrate](https://github.com/golang-migrate/migrate) format.

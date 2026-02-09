@@ -12,6 +12,43 @@ use super::metric::{
     BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo, WindowInfo,
 };
 
+/// Canonical list of all metric names emitted by this collector.
+pub const ALL_METRIC_NAMES: &[&str] = &[
+    // Latency (14)
+    "syscall_read",
+    "syscall_write",
+    "syscall_futex",
+    "syscall_mmap",
+    "syscall_epoll_wait",
+    "syscall_fsync",
+    "syscall_fdatasync",
+    "syscall_pwrite",
+    "sched_on_cpu",
+    "sched_off_cpu",
+    "sched_runqueue",
+    "mem_reclaim",
+    "mem_compaction",
+    "disk_latency",
+    // Counter (13)
+    "page_fault_major",
+    "page_fault_minor",
+    "swap_in",
+    "swap_out",
+    "oom_kill",
+    "fd_open",
+    "fd_close",
+    "process_exit",
+    "tcp_state_change",
+    "net_io",
+    "tcp_retransmit",
+    "disk_bytes",
+    "block_merge",
+    // Gauge (3)
+    "tcp_rtt",
+    "tcp_cwnd",
+    "disk_queue_depth",
+];
+
 /// Performs single-pass collection from a Buffer into a MetricBatch.
 pub struct Collector {
     interval_ms: u16,
@@ -435,6 +472,14 @@ mod tests {
         assert!(batch.latency.is_empty());
         assert!(batch.counter.is_empty());
         assert!(batch.gauge.is_empty());
+    }
+
+    #[test]
+    fn test_all_metric_names_cardinality() {
+        assert_eq!(ALL_METRIC_NAMES.len(), 30);
+        assert!(ALL_METRIC_NAMES.contains(&"syscall_read"));
+        assert!(ALL_METRIC_NAMES.contains(&"net_io"));
+        assert!(ALL_METRIC_NAMES.contains(&"disk_queue_depth"));
     }
 
     #[test]
