@@ -133,7 +133,23 @@ jobs:
           done
 
           # Wait for node to be ready
-          sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=120s
+          echo "Waiting for K3s node registration..."
+          for i in $(seq 1 30); do
+            NODE_COUNT=$(sudo k3s kubectl get nodes --no-headers 2>/dev/null | wc -l | tr -d ' ')
+            if [ "${NODE_COUNT}" -ge 1 ]; then
+              echo "K3s nodes detected: ${NODE_COUNT}"
+              break
+            fi
+            if [ $i -eq 30 ]; then
+              echo "K3s node registration failed"
+              sudo journalctl -u k3s --no-pager -n 50 || true
+              exit 1
+            fi
+            echo "Waiting for K3s nodes... (attempt $i)"
+            sleep 2
+          done
+
+          sudo k3s kubectl wait --for=condition=Ready nodes --all --timeout=180s
 
           # Set up kubeconfig for non-root access
           mkdir -p ~/.kube

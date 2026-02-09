@@ -95,6 +95,25 @@ pub struct GaugeMetric {
     pub max: i64,
 }
 
+/// CPU utilization summary metric (per process, per window).
+#[derive(Debug, Clone)]
+pub struct CpuUtilMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub total_on_cpu_ns: i64,
+    pub event_count: u32,
+    pub active_cores: u16,
+    pub system_cores: u16,
+    pub max_core_on_cpu_ns: i64,
+    pub max_core_id: u32,
+    pub mean_core_pct: f32,
+    pub min_core_pct: f32,
+    pub max_core_pct: f32,
+}
+
 /// A batch of collected metrics ready for export.
 #[derive(Debug, Clone)]
 pub struct MetricBatch {
@@ -102,12 +121,13 @@ pub struct MetricBatch {
     pub latency: Vec<LatencyMetric>,
     pub counter: Vec<CounterMetric>,
     pub gauge: Vec<GaugeMetric>,
+    pub cpu_util: Vec<CpuUtilMetric>,
 }
 
 impl MetricBatch {
     /// Total number of metrics in this batch.
     pub fn len(&self) -> usize {
-        self.latency.len() + self.counter.len() + self.gauge.len()
+        self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len()
     }
 
     /// Whether the batch contains no metrics.

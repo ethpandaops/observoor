@@ -304,6 +304,7 @@ pub struct SchedEvent {
     pub event: Event,
     pub on_cpu_ns: u64,
     pub voluntary: bool,
+    pub cpu_id: u32,
 }
 
 /// Runqueue/off-CPU latency event.

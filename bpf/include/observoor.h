@@ -78,7 +78,8 @@ struct sched_event {
     struct event_header hdr;
     __u64 on_cpu_ns;
     __u8  voluntary;
-    __u8  pad[7];
+    __u8  pad[3];
+    __u32 cpu_id;
 };
 
 // Page fault event (40 bytes total).

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::Duration;
 
 use crate::tracer::event::ClientType;
@@ -9,7 +10,8 @@ use super::dimension::{
     TCPMetricsDimension,
 };
 use super::metric::{
-    BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo, WindowInfo,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo,
+    WindowInfo,
 };
 
 /// Canonical list of all metric names emitted by this collector.
@@ -67,12 +69,14 @@ impl Collector {
         let latency_capacity = self.estimate_latency_capacity(buf);
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
+        let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
 
         let mut batch = MetricBatch {
             metadata: meta,
             latency: Vec::with_capacity(latency_capacity),
             counter: Vec::with_capacity(counter_capacity),
             gauge: Vec::with_capacity(gauge_capacity),
+            cpu_util: Vec::with_capacity(cpu_util_capacity),
         };
 
         self.collect_into(buf, &mut batch);
@@ -96,14 +100,17 @@ impl Collector {
         let latency_capacity = self.estimate_latency_capacity(buf);
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
+        let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
 
         reserve_if_needed(&mut batch.latency, latency_capacity);
         reserve_if_needed(&mut batch.counter, counter_capacity);
         reserve_if_needed(&mut batch.gauge, gauge_capacity);
+        reserve_if_needed(&mut batch.cpu_util, cpu_util_capacity);
 
         batch.latency.clear();
         batch.counter.clear();
         batch.gauge.clear();
+        batch.cpu_util.clear();
 
         self.collect_basic_latency(batch, buf, window, slot);
         self.collect_disk_latency(batch, buf, window, slot);
@@ -112,6 +119,7 @@ impl Collector {
         self.collect_disk_counters(batch, buf, window, slot);
         self.collect_tcp_gauges(batch, buf, window, slot);
         self.collect_disk_gauges(batch, buf, window, slot);
+        self.collect_cpu_utilization(batch, buf, window, slot);
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
@@ -149,6 +157,10 @@ impl Collector {
 
     fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
         buf.tcp_rtt.len() + buf.tcp_cwnd.len() + buf.disk_queue_depth.len()
+    }
+
+    fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -422,6 +434,101 @@ impl Collector {
             });
         }
     }
+
+    /// Collects per-process CPU utilization summaries from per-core counters.
+    fn collect_cpu_utilization(
+        &self,
+        batch: &mut MetricBatch,
+        buf: &Buffer,
+        window: WindowInfo,
+        slot: SlotInfo,
+    ) {
+        let interval_ns = i64::from(self.interval_ms) * 1_000_000;
+        if interval_ns <= 0 {
+            return;
+        }
+
+        let mut grouped: HashMap<(u32, u8), Vec<(u32, super::aggregate::CounterSnapshot)>> =
+            HashMap::with_capacity(buf.cpu_on_core.len());
+
+        for entry in buf.cpu_on_core.iter() {
+            let dim = *entry.key();
+            let snap = entry.value().snapshot();
+            if snap.count == 0 {
+                continue;
+            }
+            grouped
+                .entry((dim.pid, dim.client_type))
+                .or_default()
+                .push((dim.cpu_id, snap));
+        }
+
+        for ((pid, client_type), cores) in grouped {
+            if cores.is_empty() {
+                continue;
+            }
+
+            let active_cores = u16::try_from(cores.len()).unwrap_or(u16::MAX);
+            let mut total_on_cpu_ns = 0i64;
+            let mut event_count = 0u32;
+            let mut max_core_on_cpu_ns = i64::MIN;
+            let mut max_core_id = 0u32;
+            let mut min_core_pct = f32::MAX;
+            let mut max_core_pct = f32::MIN;
+            let mut sum_core_pct = 0.0f32;
+
+            for (cpu_id, snap) in cores {
+                total_on_cpu_ns += snap.sum;
+                event_count = event_count.saturating_add(snap.count);
+
+                if snap.sum > max_core_on_cpu_ns {
+                    max_core_on_cpu_ns = snap.sum;
+                    max_core_id = cpu_id;
+                }
+
+                let pct = ((snap.sum as f64 / interval_ns as f64) * 100.0) as f32;
+                sum_core_pct += pct;
+                if pct < min_core_pct {
+                    min_core_pct = pct;
+                }
+                if pct > max_core_pct {
+                    max_core_pct = pct;
+                }
+            }
+
+            if max_core_on_cpu_ns == i64::MIN {
+                max_core_on_cpu_ns = 0;
+            }
+            if min_core_pct == f32::MAX {
+                min_core_pct = 0.0;
+            }
+            if max_core_pct == f32::MIN {
+                max_core_pct = 0.0;
+            }
+            let mean_core_pct = if active_cores == 0 {
+                0.0
+            } else {
+                sum_core_pct / f32::from(active_cores)
+            };
+
+            batch.cpu_util.push(CpuUtilMetric {
+                metric_type: "cpu_utilization",
+                window,
+                slot,
+                pid,
+                client_type: client_type_from_u8(client_type),
+                total_on_cpu_ns,
+                event_count,
+                active_cores,
+                system_cores: buf.system_cores,
+                max_core_on_cpu_ns,
+                max_core_id,
+                mean_core_pct,
+                min_core_pct,
+                max_core_pct,
+            });
+        }
+    }
 }
 
 /// Converts a raw u8 client type to the enum, defaulting to Unknown.
@@ -459,6 +566,7 @@ mod tests {
             false,
             false,
             false,
+            16,
         )
     }
 
@@ -472,6 +580,7 @@ mod tests {
         assert!(batch.latency.is_empty());
         assert!(batch.counter.is_empty());
         assert!(batch.gauge.is_empty());
+        assert!(batch.cpu_util.is_empty());
     }
 
     #[test]
@@ -684,6 +793,7 @@ mod tests {
         assert_eq!(direct.latency.len(), reused.latency.len());
         assert_eq!(direct.counter.len(), reused.counter.len());
         assert_eq!(direct.gauge.len(), reused.gauge.len());
+        assert_eq!(direct.cpu_util.len(), reused.cpu_util.len());
     }
 
     #[test]
@@ -703,11 +813,45 @@ mod tests {
         let latency_capacity = batch.latency.capacity();
         let counter_capacity = batch.counter.capacity();
         let gauge_capacity = batch.gauge.capacity();
+        let cpu_util_capacity = batch.cpu_util.capacity();
 
         collector.collect_into(&buf, &mut batch);
 
         assert_eq!(batch.latency.capacity(), latency_capacity);
         assert_eq!(batch.counter.capacity(), counter_capacity);
         assert_eq!(batch.gauge.capacity(), gauge_capacity);
+        assert_eq!(batch.cpu_util.capacity(), cpu_util_capacity);
+    }
+
+    #[test]
+    fn test_collect_cpu_utilization() {
+        let collector = Collector::new(Duration::from_secs(1));
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+
+        // 1.5ms on core 2, 0.5ms on core 4 over a 1s window.
+        buf.add_sched_switch(dim, 1_000_000, 2);
+        buf.add_sched_switch(dim, 500_000, 2);
+        buf.add_sched_switch(dim, 500_000, 4);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.cpu_util.len(), 1);
+
+        let m = &batch.cpu_util[0];
+        assert_eq!(m.metric_type, "cpu_utilization");
+        assert_eq!(m.pid, 123);
+        assert_eq!(m.client_type, ClientType::Geth);
+        assert_eq!(m.total_on_cpu_ns, 2_000_000);
+        assert_eq!(m.event_count, 3);
+        assert_eq!(m.active_cores, 2);
+        assert_eq!(m.system_cores, 16);
+        assert_eq!(m.max_core_on_cpu_ns, 1_500_000);
+        assert_eq!(m.max_core_id, 2);
+        assert!((m.mean_core_pct - 0.1).abs() < 0.0001);
+        assert!((m.min_core_pct - 0.05).abs() < 0.0001);
+        assert!((m.max_core_pct - 0.15).abs() < 0.0001);
     }
 }

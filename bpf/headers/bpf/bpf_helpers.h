@@ -55,6 +55,7 @@ static long (*bpf_map_delete_elem)(void *map, const void *key) = (void *) 3;
 static long (*bpf_probe_read)(void *dst, __u32 size,
                               const void *unsafe_ptr) = (void *) 4;
 static __u64 (*bpf_ktime_get_ns)(void) = (void *) 5;
+static __u32 (*bpf_get_smp_processor_id)(void) = (void *) 8;
 static __u64 (*bpf_get_current_pid_tgid)(void) = (void *) 14;
 static long (*bpf_probe_read_user)(void *dst, __u32 size,
                                    const void *unsafe_ptr) = (void *) 112;

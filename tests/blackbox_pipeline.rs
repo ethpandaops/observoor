@@ -219,7 +219,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns);
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
         }
         TypedEvent::SchedRunqueue(e) => {
             buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
@@ -297,7 +297,7 @@ fn gauge_totals(batch: &MetricBatch, metric_type: &str) -> (u32, i64) {
 fn pipeline_blackbox_correctness_and_invariants() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let collector = Collector::new(Duration::from_millis(200));
-    let buffer = Buffer::new(now, 42, now, false, false, false);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     let p1 = 2_001;
     let p2 = 2_002;
@@ -370,7 +370,8 @@ fn pipeline_blackbox_correctness_and_invariants() {
     assert_eq!(batch.latency.len(), 8);
     assert_eq!(batch.counter.len(), 14);
     assert_eq!(batch.gauge.len(), 3);
-    assert_eq!(batch.len(), 25);
+    assert_eq!(batch.cpu_util.len(), 1);
+    assert_eq!(batch.len(), 26);
 
     for metric in &batch.latency {
         assert!(metric.count > 0, "latency count must be positive");

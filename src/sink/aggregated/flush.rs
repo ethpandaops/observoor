@@ -314,6 +314,7 @@ mod tests {
             latency: Vec::new(),
             counter: Vec::new(),
             gauge: Vec::new(),
+            cpu_util: Vec::new(),
         }
     }
 

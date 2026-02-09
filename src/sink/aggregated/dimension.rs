@@ -6,6 +6,14 @@ pub struct BasicDimension {
     pub client_type: u8,
 }
 
+/// Dimension key for per-core scheduler utilization accumulation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CpuCoreDimension {
+    pub pid: u32,
+    pub client_type: u8,
+    pub cpu_id: u32,
+}
+
 /// Dimension key for network I/O metrics.
 /// Includes local port and direction for detailed network breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -97,6 +105,18 @@ mod tests {
             client_type: 1,
             local_port: 8545,
             direction: 0,
+        };
+        map.insert(dim, 42);
+        assert_eq!(map.get(&dim), Some(&42));
+    }
+
+    #[test]
+    fn test_cpu_core_dimension_as_map_key() {
+        let mut map: HashMap<CpuCoreDimension, u32> = HashMap::new();
+        let dim = CpuCoreDimension {
+            pid: 100,
+            client_type: 1,
+            cpu_id: 7,
         };
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));

@@ -42,6 +42,8 @@ struct SharedState {
     cl_syncing: AtomicU32,
     el_optimistic: AtomicU32,
     el_offline: AtomicU32,
+    /// Number of online CPU cores.
+    system_cores: AtomicU32,
 }
 
 impl SharedState {
@@ -52,6 +54,7 @@ impl SharedState {
             cl_syncing: AtomicU32::new(0),
             el_optimistic: AtomicU32::new(0),
             el_offline: AtomicU32::new(0),
+            system_cores: AtomicU32::new(0),
         }
     }
 
@@ -139,6 +142,8 @@ impl AggregatedSink {
 
     /// Creates a new buffer with current sync state.
     fn new_buffer_from_state(state: &SharedState, now: SystemTime, slot: u64) -> Buffer {
+        let system_cores =
+            u16::try_from(state.system_cores.load(Ordering::Relaxed)).unwrap_or(u16::MAX);
         Buffer::new(
             now,
             slot,
@@ -146,6 +151,7 @@ impl AggregatedSink {
             state.cl_syncing.load(Ordering::Relaxed) == 1,
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
+            system_cores,
         )
     }
 
@@ -233,7 +239,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                buf.add_sched_switch(basic_dim, e.on_cpu_ns);
+                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
             }
 
             TypedEvent::SchedRunqueue(e) => {
@@ -285,6 +291,16 @@ impl Sink for AggregatedSink {
     }
 
     async fn start(&mut self, ctx: tokio_util::sync::CancellationToken) -> Result<()> {
+        let system_cores = parse_cpu_online();
+        self.state
+            .system_cores
+            .store(system_cores, Ordering::Relaxed);
+        if system_cores == 0 {
+            warn!("failed to detect online CPU cores from /sys/devices/system/cpu/online");
+        } else {
+            info!(system_cores, "detected online CPU cores");
+        }
+
         // Initialize first buffer.
         let now = SystemTime::now();
         let initial_buf = Self::new_buffer_from_state(&self.state, now, 0);
@@ -329,6 +345,7 @@ impl Sink for AggregatedSink {
                 latency: Vec::new(),
                 counter: Vec::new(),
                 gauge: Vec::new(),
+                cpu_util: Vec::new(),
             };
 
             const BATCH_SIZE: usize = 256;
@@ -373,6 +390,7 @@ impl Sink for AggregatedSink {
                                     latency = reusable_batch.latency.len(),
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
+                                    cpu_util = reusable_batch.cpu_util.len(),
                                     "final flush"
                                 );
                             }
@@ -429,6 +447,7 @@ impl Sink for AggregatedSink {
                                 latency = reusable_batch.latency.len(),
                                 counter = reusable_batch.counter.len(),
                                 gauge = reusable_batch.gauge.len(),
+                                cpu_util = reusable_batch.cpu_util.len(),
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -459,6 +478,7 @@ impl Sink for AggregatedSink {
                                     latency = reusable_batch.latency.len(),
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
+                                    cpu_util = reusable_batch.cpu_util.len(),
                                     "buffer flushed"
                                 );
                             }
@@ -546,6 +566,45 @@ impl Sink for AggregatedSink {
         self.state
             .el_offline
             .store(u32::from(status.el_offline), Ordering::Relaxed);
+    }
+}
+
+fn parse_cpu_online() -> u32 {
+    let Ok(raw) = std::fs::read_to_string("/sys/devices/system/cpu/online") else {
+        return 0;
+    };
+    parse_cpu_online_text(raw.trim()).unwrap_or(0)
+}
+
+fn parse_cpu_online_text(text: &str) -> Option<u32> {
+    if text.is_empty() {
+        return None;
+    }
+
+    let mut total = 0u32;
+    for part in text.split(',') {
+        let part = part.trim();
+        if part.is_empty() {
+            continue;
+        }
+
+        if let Some((start, end)) = part.split_once('-') {
+            let start = start.trim().parse::<u32>().ok()?;
+            let end = end.trim().parse::<u32>().ok()?;
+            if end < start {
+                return None;
+            }
+            total = total.saturating_add(end.saturating_sub(start).saturating_add(1));
+        } else {
+            let _ = part.parse::<u32>().ok()?;
+            total = total.saturating_add(1);
+        }
+    }
+
+    if total == 0 {
+        None
+    } else {
+        Some(total)
     }
 }
 
@@ -717,7 +776,15 @@ mod tests {
 
     #[test]
     fn test_process_event_syscall() {
-        let buf = Buffer::new(SystemTime::now(), 0, SystemTime::now(), false, false, false);
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
         let dims = DimensionsConfig::default();
 
         let event = make_event(
@@ -749,7 +816,15 @@ mod tests {
 
     #[test]
     fn test_process_event_net_io() {
-        let buf = Buffer::new(SystemTime::now(), 0, SystemTime::now(), false, false, false);
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
         let dims = DimensionsConfig::default();
 
         let event = make_event(
@@ -784,7 +859,15 @@ mod tests {
 
     #[test]
     fn test_process_event_disk_io() {
-        let buf = Buffer::new(SystemTime::now(), 0, SystemTime::now(), false, false, false);
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
         let dims = DimensionsConfig::default();
 
         let event = make_event(
@@ -814,7 +897,15 @@ mod tests {
 
     #[test]
     fn test_process_event_fd_open_close() {
-        let buf = Buffer::new(SystemTime::now(), 0, SystemTime::now(), false, false, false);
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
         let dims = DimensionsConfig::default();
 
         let open_event = make_event(
@@ -856,7 +947,15 @@ mod tests {
 
     #[test]
     fn test_process_event_all_types() {
-        let buf = Buffer::new(SystemTime::now(), 0, SystemTime::now(), false, false, false);
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
         let dims = DimensionsConfig::default();
 
         // Sched switch
@@ -872,10 +971,12 @@ mod tests {
                 },
                 on_cpu_ns: 1_000_000,
                 voluntary: true,
+                cpu_id: 3,
             }),
         );
         AggregatedSink::process_event(&buf, &event, &dims);
         assert!(!buf.sched_on_cpu.is_empty());
+        assert!(!buf.cpu_on_core.is_empty());
 
         // Page fault
         let event = make_event(
@@ -1074,5 +1175,16 @@ mod tests {
         let disk_dim = build_disk_dimension(1, 1, 259, 1, &dims);
         assert_eq!(disk_dim.device_id, 0);
         assert_eq!(disk_dim.rw, 0);
+    }
+
+    #[test]
+    fn test_parse_cpu_online_text() {
+        assert_eq!(parse_cpu_online_text("0"), Some(1));
+        assert_eq!(parse_cpu_online_text("0-3"), Some(4));
+        assert_eq!(parse_cpu_online_text("0-3,8-11"), Some(8));
+        assert_eq!(parse_cpu_online_text("0,2,4"), Some(3));
+        assert_eq!(parse_cpu_online_text(""), None);
+        assert_eq!(parse_cpu_online_text("3-1"), None);
+        assert_eq!(parse_cpu_online_text("abc"), None);
     }
 }
