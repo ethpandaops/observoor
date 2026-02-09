@@ -43,6 +43,15 @@ sinks:
       slot_aligned: true
       # How often to write sync state (default: 12s)
       sync_state_poll_interval: 12s
+      # Optional per-metric slower intervals.
+      # - Each override interval must be greater than `interval`.
+      # - Each override interval must be an exact multiple of `interval`.
+      # - Metric names must be unique across all overrides.
+      # overrides:
+      #   - metrics: [syscall_futex, syscall_mmap, sched_runqueue, mem_reclaim, mem_compaction]
+      #     interval: 5s
+      #   - metrics: [page_fault_major, page_fault_minor, swap_in, swap_out, oom_kill, fd_open, fd_close, process_exit, tcp_state_change]
+      #     interval: 10s
     dimensions:
       network:
         # Include local port in network metrics
