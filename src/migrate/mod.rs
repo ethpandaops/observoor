@@ -20,6 +20,11 @@ static MIGRATIONS: &[Migration] = &[
         up_sql: include_str!("sql/002_drop_raw_events.up.sql"),
         down_sql: include_str!("sql/002_drop_raw_events.down.sql"),
     },
+    Migration {
+        version: 3,
+        up_sql: include_str!("sql/003_float32_sum_min_max.up.sql"),
+        down_sql: include_str!("sql/003_float32_sum_min_max.down.sql"),
+    },
 ];
 
 /// Manages ClickHouse schema migrations.
