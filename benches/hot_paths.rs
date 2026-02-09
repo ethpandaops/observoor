@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
 use criterion::{
@@ -8,7 +9,9 @@ use observoor::sink::aggregated::collector::Collector;
 use observoor::sink::aggregated::dimension::{
     BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
-use observoor::sink::aggregated::metric::BatchMetadata;
+use observoor::sink::aggregated::metric::{
+    BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, SlotInfo, WindowInfo,
+};
 use observoor::tracer::event::{Direction, EventType, ParsedEvent, TypedEvent};
 use observoor::tracer::parse::parse_event;
 
@@ -395,11 +398,224 @@ fn bench_pipeline(c: &mut Criterion) {
     });
 }
 
+fn build_export_grouping_input(
+    rows_per_table: usize,
+) -> (Vec<LatencyMetric>, Vec<CounterMetric>, Vec<GaugeMetric>) {
+    let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+    let window = WindowInfo {
+        start: now,
+        interval_ms: 200,
+    };
+    let slot = SlotInfo {
+        number: 42,
+        start_time: now,
+    };
+
+    let mut latency = Vec::with_capacity(rows_per_table * 2);
+    for i in 0..rows_per_table {
+        latency.push(LatencyMetric {
+            metric_type: "syscall_read",
+            window,
+            slot,
+            pid: 1_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: None,
+            rw: None,
+            sum: 5_000,
+            count: 1,
+            min: 5_000,
+            max: 5_000,
+            histogram: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+        });
+    }
+    for i in 0..rows_per_table {
+        latency.push(LatencyMetric {
+            metric_type: "disk_latency",
+            window,
+            slot,
+            pid: 2_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: Some(259),
+            rw: Some("read"),
+            sum: 8_000,
+            count: 1,
+            min: 8_000,
+            max: 8_000,
+            histogram: [0, 0, 1, 0, 0, 0, 0, 0, 0, 0],
+        });
+    }
+
+    let mut counter = Vec::with_capacity(rows_per_table * 2);
+    for i in 0..rows_per_table {
+        counter.push(CounterMetric {
+            metric_type: "page_fault_minor",
+            window,
+            slot,
+            pid: 3_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: None,
+            rw: None,
+            local_port: None,
+            direction: None,
+            sum: 1,
+            count: 1,
+        });
+    }
+    for i in 0..rows_per_table {
+        counter.push(CounterMetric {
+            metric_type: "net_io",
+            window,
+            slot,
+            pid: 4_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: None,
+            rw: None,
+            local_port: Some(30_303),
+            direction: Some("tx"),
+            sum: 1_500,
+            count: 1,
+        });
+    }
+
+    let mut gauge = Vec::with_capacity(rows_per_table * 2);
+    for i in 0..rows_per_table {
+        gauge.push(GaugeMetric {
+            metric_type: "tcp_rtt",
+            window,
+            slot,
+            pid: 5_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: None,
+            rw: None,
+            local_port: Some(30_303),
+            sum: 110,
+            count: 1,
+            min: 110,
+            max: 110,
+        });
+    }
+    for i in 0..rows_per_table {
+        gauge.push(GaugeMetric {
+            metric_type: "disk_queue_depth",
+            window,
+            slot,
+            pid: 6_000 + i as u32,
+            client_type: observoor::tracer::event::ClientType::Geth,
+            device_id: Some(259),
+            rw: Some("write"),
+            local_port: None,
+            sum: 8,
+            count: 1,
+            min: 8,
+            max: 8,
+        });
+    }
+
+    (latency, counter, gauge)
+}
+
+fn group_batch_hashmap(
+    latency: &[LatencyMetric],
+    counter: &[CounterMetric],
+    gauge: &[GaugeMetric],
+) -> usize {
+    let mut latency_map: HashMap<&str, Vec<&LatencyMetric>> = HashMap::with_capacity(16);
+    for metric in latency {
+        latency_map
+            .entry(metric.metric_type)
+            .or_default()
+            .push(metric);
+    }
+
+    let mut counter_map: HashMap<&str, Vec<&CounterMetric>> = HashMap::with_capacity(16);
+    for metric in counter {
+        counter_map
+            .entry(metric.metric_type)
+            .or_default()
+            .push(metric);
+    }
+
+    let mut gauge_map: HashMap<&str, Vec<&GaugeMetric>> = HashMap::with_capacity(8);
+    for metric in gauge {
+        gauge_map
+            .entry(metric.metric_type)
+            .or_default()
+            .push(metric);
+    }
+
+    latency_map.values().map(Vec::len).sum::<usize>()
+        + counter_map.values().map(Vec::len).sum::<usize>()
+        + gauge_map.values().map(Vec::len).sum::<usize>()
+}
+
+fn group_batch_contiguous(
+    latency: &[LatencyMetric],
+    counter: &[CounterMetric],
+    gauge: &[GaugeMetric],
+) -> usize {
+    fn count_grouped<T>(items: &[T], metric_type: impl Fn(&T) -> &'static str) -> usize {
+        let mut i = 0;
+        let mut rows = 0;
+        while i < items.len() {
+            let current = metric_type(&items[i]);
+            let mut j = i + 1;
+            while j < items.len() && metric_type(&items[j]) == current {
+                j += 1;
+            }
+            rows += j - i;
+            i = j;
+        }
+        rows
+    }
+
+    count_grouped(latency, |m| m.metric_type)
+        + count_grouped(counter, |m| m.metric_type)
+        + count_grouped(gauge, |m| m.metric_type)
+}
+
+fn bench_export_grouping(c: &mut Criterion) {
+    let mut group = c.benchmark_group("export_grouping");
+    for rows_per_table in [128usize, 1024usize, 4096usize] {
+        let (latency, counter, gauge) = build_export_grouping_input(rows_per_table);
+        group.throughput(Throughput::Elements((rows_per_table * 6) as u64));
+
+        group.bench_with_input(
+            BenchmarkId::new("hashmap", rows_per_table),
+            &rows_per_table,
+            |b, _| {
+                b.iter(|| {
+                    black_box(group_batch_hashmap(
+                        black_box(&latency),
+                        black_box(&counter),
+                        black_box(&gauge),
+                    ))
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("contiguous", rows_per_table),
+            &rows_per_table,
+            |b, _| {
+                b.iter(|| {
+                    black_box(group_batch_contiguous(
+                        black_box(&latency),
+                        black_box(&counter),
+                        black_box(&gauge),
+                    ))
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 fn bench_suite(c: &mut Criterion) {
     bench_parse_event(c);
     bench_buffer_ingest(c);
     bench_collect(c);
     bench_pipeline(c);
+    bench_export_grouping(c);
 }
 
 criterion_group!(benches, bench_suite);
