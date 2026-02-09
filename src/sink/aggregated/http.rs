@@ -113,7 +113,6 @@ fn is_arc_str_empty(v: &Arc<str>) -> bool {
 #[derive(Clone)]
 struct SharedBatchStrings {
     updated_date_time: Arc<str>,
-    window_start: Arc<str>,
     wallclock_slot_start_date_time: Arc<str>,
     meta_client_name: Arc<str>,
     meta_network_name: Arc<str>,
@@ -141,21 +140,20 @@ impl HttpExporter {
     }
 
     fn shared_strings(batch: &MetricBatch) -> Option<SharedBatchStrings> {
-        let (window_start, slot_start) = if let Some(m) = batch.latency.first() {
-            (m.window.start, m.slot.start_time)
+        let slot_start = if let Some(m) = batch.latency.first() {
+            m.slot.start_time
         } else if let Some(m) = batch.counter.first() {
-            (m.window.start, m.slot.start_time)
+            m.slot.start_time
         } else if let Some(m) = batch.gauge.first() {
-            (m.window.start, m.slot.start_time)
+            m.slot.start_time
         } else if let Some(m) = batch.cpu_util.first() {
-            (m.window.start, m.slot.start_time)
+            m.slot.start_time
         } else {
             return None;
         };
 
         Some(SharedBatchStrings {
             updated_date_time: Arc::from(format_datetime(batch.metadata.updated_time)),
-            window_start: Arc::from(format_datetime(window_start)),
             wallclock_slot_start_date_time: Arc::from(format_datetime(slot_start)),
             meta_client_name: Arc::clone(&batch.metadata.client_name),
             meta_network_name: Arc::clone(&batch.metadata.network_name),
@@ -167,7 +165,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -201,7 +199,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -235,7 +233,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -269,7 +267,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::clone(&shared.window_start),
+            window_start: Arc::from(format_datetime(m.window.start)),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -924,6 +922,7 @@ mod tests {
                 count: 1,
             }],
             gauge: vec![],
+            cpu_util: vec![],
         };
 
         let shared = HttpExporter::shared_strings(&batch).expect("batch should not be empty");
