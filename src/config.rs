@@ -1,9 +1,11 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+
+use crate::sink::aggregated::collector::ALL_METRIC_NAMES;
 
 /// Top-level configuration for the observoor agent.
 #[derive(Debug, Deserialize)]
@@ -117,6 +119,20 @@ pub struct ResolutionConfig {
     #[serde(default = "default_sync_state_poll_interval", with = "humantime_serde")]
     #[allow(dead_code)]
     pub sync_state_poll_interval: Duration,
+
+    /// Per-metric interval overrides for lower-priority metric families.
+    #[serde(default)]
+    pub overrides: Vec<IntervalOverride>,
+}
+
+/// Per-metric resolution override.
+#[derive(Debug, Clone, Deserialize)]
+pub struct IntervalOverride {
+    /// Metric names to assign to this interval.
+    pub metrics: Vec<String>,
+    /// Override interval duration (must be an exact multiple of base interval).
+    #[serde(with = "humantime_serde")]
+    pub interval: Duration,
 }
 
 /// Dimension inclusion configuration.
@@ -369,6 +385,7 @@ impl Default for ResolutionConfig {
             interval: default_resolution_interval(),
             slot_aligned: true,
             sync_state_poll_interval: default_sync_state_poll_interval(),
+            overrides: Vec::new(),
         }
     }
 }
@@ -471,6 +488,44 @@ impl Config {
             bail!("sinks.aggregated.enabled must be true");
         }
 
+        let base_interval = self.sinks.aggregated.resolution.interval;
+        if base_interval.is_zero() {
+            bail!("sinks.aggregated.resolution.interval must be positive");
+        }
+
+        let base_interval_ms = base_interval.as_millis();
+        let valid_metric_names: HashSet<&str> = ALL_METRIC_NAMES.iter().copied().collect();
+        let mut metrics_with_override = HashSet::new();
+
+        for interval_override in &self.sinks.aggregated.resolution.overrides {
+            if interval_override.interval <= base_interval {
+                bail!(
+                    "override interval {:?} must be greater than base interval {:?}",
+                    interval_override.interval,
+                    base_interval
+                );
+            }
+
+            let override_ms = interval_override.interval.as_millis();
+            if override_ms % base_interval_ms != 0 {
+                bail!(
+                    "override interval {:?} must be an exact multiple of base interval {:?}",
+                    interval_override.interval,
+                    base_interval
+                );
+            }
+
+            for metric_name in &interval_override.metrics {
+                if !valid_metric_names.contains(metric_name.as_str()) {
+                    bail!("unknown metric in resolution override: {metric_name}");
+                }
+
+                if !metrics_with_override.insert(metric_name.clone()) {
+                    bail!("metric appears in more than one override: {metric_name}");
+                }
+            }
+        }
+
         // Validate HTTP export config if enabled.
         if self.sinks.aggregated.http.enabled {
             if self.sinks.aggregated.http.address.is_empty() {
@@ -545,6 +600,24 @@ impl ClickHouseConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn valid_config() -> Config {
+        Config {
+            beacon: BeaconConfig {
+                endpoint: "http://localhost:5052".to_string(),
+                ..Default::default()
+            },
+            sinks: SinksConfig {
+                aggregated: AggregatedSinkConfig {
+                    enabled: true,
+                    ..Default::default()
+                },
+            },
+            meta_client_name: "test-node".to_string(),
+            meta_network_name: "testnet".to_string(),
+            ..Default::default()
+        }
+    }
 
     #[test]
     fn test_default_config_values() {
@@ -719,5 +792,87 @@ mod tests {
 
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("workers"));
+    }
+
+    #[test]
+    fn test_validation_override_interval_must_be_greater_than_base() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.interval = Duration::from_millis(100);
+        cfg.sinks.aggregated.resolution.overrides = vec![IntervalOverride {
+            metrics: vec!["syscall_futex".to_string()],
+            interval: Duration::from_millis(100),
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("must be greater than base interval"));
+    }
+
+    #[test]
+    fn test_validation_override_interval_must_be_exact_multiple() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.interval = Duration::from_millis(100);
+        cfg.sinks.aggregated.resolution.overrides = vec![IntervalOverride {
+            metrics: vec!["syscall_futex".to_string()],
+            interval: Duration::from_millis(750),
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("exact multiple"));
+    }
+
+    #[test]
+    fn test_validation_override_metric_must_exist() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.interval = Duration::from_millis(100);
+        cfg.sinks.aggregated.resolution.overrides = vec![IntervalOverride {
+            metrics: vec!["not_a_metric".to_string()],
+            interval: Duration::from_millis(500),
+        }];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown metric"));
+    }
+
+    #[test]
+    fn test_validation_override_metric_must_not_repeat() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.interval = Duration::from_millis(100);
+        cfg.sinks.aggregated.resolution.overrides = vec![
+            IntervalOverride {
+                metrics: vec!["syscall_futex".to_string()],
+                interval: Duration::from_millis(500),
+            },
+            IntervalOverride {
+                metrics: vec!["syscall_futex".to_string()],
+                interval: Duration::from_secs(1),
+            },
+        ];
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("more than one override"));
+    }
+
+    #[test]
+    fn test_validation_override_accepts_valid_configuration() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.interval = Duration::from_millis(100);
+        cfg.sinks.aggregated.resolution.overrides = vec![
+            IntervalOverride {
+                metrics: vec![
+                    "syscall_futex".to_string(),
+                    "sched_runqueue".to_string(),
+                    "mem_reclaim".to_string(),
+                ],
+                interval: Duration::from_millis(500),
+            },
+            IntervalOverride {
+                metrics: vec!["page_fault_major".to_string(), "fd_open".to_string()],
+                interval: Duration::from_secs(1),
+            },
+        ];
+
+        assert!(cfg.validate().is_ok());
     }
 }
