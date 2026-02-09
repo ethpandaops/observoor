@@ -22,7 +22,7 @@ clean:
 	cargo clean
 
 docker-build:
-	docker build -t observoor:latest .
+	docker build --build-arg GIT_COMMIT=$$(git rev-parse HEAD) -t observoor:latest .
 
 bench:
 	cargo bench $(PERF_CARGO_ARGS) --bench hot_paths

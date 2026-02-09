@@ -25,7 +25,10 @@ COPY . .
 # Touch main.rs so cargo rebuilds with real source.
 RUN touch src/main.rs
 
+ARG GIT_COMMIT=unknown
+
 # Build release binary.
+ENV GIT_COMMIT=${GIT_COMMIT}
 RUN cargo build --release
 
 # Stage 2: Minimal runtime image.
