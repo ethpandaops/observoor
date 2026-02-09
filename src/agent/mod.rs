@@ -459,7 +459,9 @@ impl Agent {
     fn set_pids_by_client_metrics(health: &HealthMetrics, client_types: &HashMap<u32, ClientType>) {
         let mut counts = [0usize; CLIENT_TYPE_CARDINALITY];
         for ct in client_types.values() {
-            counts[*ct as usize] += 1;
+            if let Some(slot) = counts.get_mut(*ct as usize) {
+                *slot += 1;
+            }
         }
 
         for ct in ClientType::all_with_unknown() {

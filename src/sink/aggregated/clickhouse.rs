@@ -65,9 +65,9 @@ impl ClickHouseExporter {
         metrics: &[&LatencyMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_disk_dimensions = table_name == "disk_latency";
@@ -83,8 +83,8 @@ impl ClickHouseExporter {
         };
 
         let updated = format_datetime(meta.updated_time);
-        let window_start = format_datetime(metrics[0].window.start);
-        let slot_start = format_datetime(metrics[0].slot.start_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
         let mut sql =
@@ -154,9 +154,9 @@ impl ClickHouseExporter {
         metrics: &[&CounterMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_network_dimensions = table_name == "net_io" || table_name == "tcp_retransmit";
@@ -177,8 +177,8 @@ impl ClickHouseExporter {
         };
 
         let updated = format_datetime(meta.updated_time);
-        let window_start = format_datetime(metrics[0].window.start);
-        let slot_start = format_datetime(metrics[0].slot.start_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
         let mut sql =
@@ -254,9 +254,9 @@ impl ClickHouseExporter {
         metrics: &[&GaugeMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_tcp_dimensions = table_name == "tcp_rtt" || table_name == "tcp_cwnd";
@@ -277,8 +277,8 @@ impl ClickHouseExporter {
         };
 
         let updated = format_datetime(meta.updated_time);
-        let window_start = format_datetime(metrics[0].window.start);
-        let slot_start = format_datetime(metrics[0].slot.start_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
         let mut sql =
