@@ -353,45 +353,48 @@ impl ClickHouseExporter {
         let mut total_rows = 0;
 
         // Export latency metrics grouped by contiguous table spans.
-        let mut i = 0;
-        while i < batch.latency.len() {
-            let table = batch.latency[i].metric_type;
-            let mut j = i + 1;
-            while j < batch.latency.len() && batch.latency[j].metric_type == table {
-                j += 1;
-            }
-            self.export_latency_table(table, &batch.latency[i..j], &batch.metadata)
+        let mut latency_remaining = batch.latency.as_slice();
+        while let Some(first) = latency_remaining.first() {
+            let table = first.metric_type;
+            let group_len = latency_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = latency_remaining.split_at(group_len);
+            self.export_latency_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += j - i;
-            i = j;
+            total_rows += group.len();
+            latency_remaining = rest;
         }
 
         // Export counter metrics grouped by contiguous table spans.
-        let mut i = 0;
-        while i < batch.counter.len() {
-            let table = batch.counter[i].metric_type;
-            let mut j = i + 1;
-            while j < batch.counter.len() && batch.counter[j].metric_type == table {
-                j += 1;
-            }
-            self.export_counter_table(table, &batch.counter[i..j], &batch.metadata)
+        let mut counter_remaining = batch.counter.as_slice();
+        while let Some(first) = counter_remaining.first() {
+            let table = first.metric_type;
+            let group_len = counter_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = counter_remaining.split_at(group_len);
+            self.export_counter_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += j - i;
-            i = j;
+            total_rows += group.len();
+            counter_remaining = rest;
         }
 
         // Export gauge metrics grouped by contiguous table spans.
-        let mut i = 0;
-        while i < batch.gauge.len() {
-            let table = batch.gauge[i].metric_type;
-            let mut j = i + 1;
-            while j < batch.gauge.len() && batch.gauge[j].metric_type == table {
-                j += 1;
-            }
-            self.export_gauge_table(table, &batch.gauge[i..j], &batch.metadata)
+        let mut gauge_remaining = batch.gauge.as_slice();
+        while let Some(first) = gauge_remaining.first() {
+            let table = first.metric_type;
+            let group_len = gauge_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = gauge_remaining.split_at(group_len);
+            self.export_gauge_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += j - i;
-            i = j;
+            total_rows += group.len();
+            gauge_remaining = rest;
         }
 
         if total_rows > 0 {
