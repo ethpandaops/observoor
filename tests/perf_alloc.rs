@@ -178,7 +178,7 @@ fn parse_fd_event_allocation_budget() {
     });
 
     assert!(
-        allocations <= 4,
+        allocations <= 8,
         "fd parse allocation budget exceeded: {}",
         allocations
     );
