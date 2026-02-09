@@ -65,6 +65,30 @@ migrate -source file://deploy/migrations/clickhouse \
 make build
 ```
 
+## Benchmarking
+
+Use the built-in performance suite to guard correctness, allocations, and CPU hot paths:
+
+```bash
+# Full blackbox + alloc + Criterion suite (cross-platform default: --no-default-features)
+make perf-suite
+
+# Criterion-only full run
+make bench
+
+# Fast Criterion smoke run
+make bench-smoke
+```
+
+If you want to run benchmarks with default features (for Linux production parity), override:
+
+```bash
+make bench PERF_CARGO_ARGS=""
+```
+
+Pull requests also run `.github/workflows/perf-gate.yaml`, which compares `hot_paths`
+against the PR base commit and fails on significant regressions in key throughput paths.
+
 ## Running
 
 ```bash

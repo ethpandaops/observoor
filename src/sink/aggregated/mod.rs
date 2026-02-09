@@ -28,7 +28,7 @@ use self::clickhouse::SyncStateRow;
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
-use self::metric::BatchMetadata;
+use self::metric::{BatchMetadata, MetricBatch};
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -316,6 +316,16 @@ impl Sink for AggregatedSink {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
             sync_state_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut reusable_batch = MetricBatch {
+                metadata: BatchMetadata {
+                    client_name: Arc::clone(&meta_client_name),
+                    network_name: Arc::clone(&meta_network_name),
+                    updated_time: SystemTime::UNIX_EPOCH,
+                },
+                latency: Vec::new(),
+                counter: Vec::new(),
+                gauge: Vec::new(),
+            };
 
             const BATCH_SIZE: usize = 256;
 
@@ -324,15 +334,11 @@ impl Sink for AggregatedSink {
                     _ = ctx.cancelled() => {
                         // Flush pending slot-rotation buffers first.
                         while let Ok(rotated_buf) = rotation_rx.try_recv() {
-                            let meta = BatchMetadata {
-                                client_name: Arc::clone(&meta_client_name),
-                                network_name: Arc::clone(&meta_network_name),
-                                updated_time: SystemTime::now(),
-                            };
-                            let batch = collector.collect(&rotated_buf, meta);
-                            if !batch.is_empty() {
+                            reusable_batch.metadata.updated_time = SystemTime::now();
+                            collector.collect_into(&rotated_buf, &mut reusable_batch);
+                            if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
-                                    if let Err(e) = exporter.export(&batch).await {
+                                    if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
                                             exporter = exporter.name(),
                                             error = %e,
@@ -345,15 +351,11 @@ impl Sink for AggregatedSink {
 
                         // Final flush.
                         if let Some(final_buf) = buffer.take() {
-                            let meta = BatchMetadata {
-                                client_name: Arc::clone(&meta_client_name),
-                                network_name: Arc::clone(&meta_network_name),
-                                updated_time: SystemTime::now(),
-                            };
-                            let batch = collector.collect(&final_buf, meta);
-                            if !batch.is_empty() {
+                            reusable_batch.metadata.updated_time = SystemTime::now();
+                            collector.collect_into(&final_buf, &mut reusable_batch);
+                            if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
-                                    if let Err(e) = exporter.export(&batch).await {
+                                    if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
                                             exporter = exporter.name(),
                                             error = %e,
@@ -362,9 +364,9 @@ impl Sink for AggregatedSink {
                                     }
                                 }
                                 info!(
-                                    latency = batch.latency.len(),
-                                    counter = batch.counter.len(),
-                                    gauge = batch.gauge.len(),
+                                    latency = reusable_batch.latency.len(),
+                                    counter = reusable_batch.counter.len(),
+                                    gauge = reusable_batch.gauge.len(),
                                     "final flush"
                                 );
                             }
@@ -404,15 +406,11 @@ impl Sink for AggregatedSink {
                     }
 
                     Some(rotated_buf) = rotation_rx.recv() => {
-                        let meta = BatchMetadata {
-                            client_name: Arc::clone(&meta_client_name),
-                            network_name: Arc::clone(&meta_network_name),
-                            updated_time: SystemTime::now(),
-                        };
-                        let batch = collector.collect(&rotated_buf, meta);
-                        if !batch.is_empty() {
+                        reusable_batch.metadata.updated_time = SystemTime::now();
+                        collector.collect_into(&rotated_buf, &mut reusable_batch);
+                        if !reusable_batch.is_empty() {
                             for exporter in &exporters {
-                                if let Err(e) = exporter.export(&batch).await {
+                                if let Err(e) = exporter.export(&reusable_batch).await {
                                     tracing::error!(
                                         exporter = exporter.name(),
                                         error = %e,
@@ -421,9 +419,9 @@ impl Sink for AggregatedSink {
                                 }
                             }
                             tracing::debug!(
-                                latency = batch.latency.len(),
-                                counter = batch.counter.len(),
-                                gauge = batch.gauge.len(),
+                                latency = reusable_batch.latency.len(),
+                                counter = reusable_batch.counter.len(),
+                                gauge = reusable_batch.gauge.len(),
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -437,15 +435,11 @@ impl Sink for AggregatedSink {
                         );
 
                         if let Some(old_buf) = buffer.swap(new_buf) {
-                            let meta = BatchMetadata {
-                                client_name: Arc::clone(&meta_client_name),
-                                network_name: Arc::clone(&meta_network_name),
-                                updated_time: SystemTime::now(),
-                            };
-                            let batch = collector.collect(&old_buf, meta);
-                            if !batch.is_empty() {
+                            reusable_batch.metadata.updated_time = SystemTime::now();
+                            collector.collect_into(&old_buf, &mut reusable_batch);
+                            if !reusable_batch.is_empty() {
                                 for exporter in &exporters {
-                                    if let Err(e) = exporter.export(&batch).await {
+                                    if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
                                             exporter = exporter.name(),
                                             error = %e,
@@ -454,9 +448,9 @@ impl Sink for AggregatedSink {
                                     }
                                 }
                                 tracing::debug!(
-                                    latency = batch.latency.len(),
-                                    counter = batch.counter.len(),
-                                    gauge = batch.gauge.len(),
+                                    latency = reusable_batch.latency.len(),
+                                    counter = reusable_batch.counter.len(),
+                                    gauge = reusable_batch.gauge.len(),
                                     "buffer flushed"
                                 );
                             }
