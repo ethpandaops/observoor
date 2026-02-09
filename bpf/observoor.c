@@ -647,11 +647,41 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
+    __u32 dev = 0;
+    __u64 sector = 0;
+    __u32 nr_sector = 0;
     __u32 bytes = 0;
     char rwbs[8] = {};
 
+    bpf_probe_read_kernel(&dev, sizeof(dev), &ctx->dev);
+    bpf_probe_read_kernel(&sector, sizeof(sector), &ctx->sector);
+    bpf_probe_read_kernel(&nr_sector, sizeof(nr_sector), &ctx->nr_sector);
     bpf_probe_read_kernel(&bytes, sizeof(bytes), &ctx->bytes);
     bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+
+    __u8 rw = (rwbs[0] == 'W') ? 1 : 0;
+
+    // Clean up the merged request's entry from req_start.
+    // When a request is merged into another, it will never receive its own
+    // block_rq_complete event. Without cleanup, the stale timestamp causes
+    // latency calculations to produce values equal to system uptime.
+    struct req_key key = {};
+    key.dev = dev;
+    key.nr_sector = nr_sector;
+    key.sector = sector;
+    key.rw = rw;
+
+    struct req_key *keyp = &key;
+    asm volatile("" : "+r"(keyp));
+
+    bpf_map_delete_elem(&req_start, keyp);
+
+    // Decrement in-flight depth since this request was absorbed.
+    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &dev);
+    if (depthp && *depthp > 0) {
+        __u32 depth = *depthp - 1;
+        bpf_map_update_elem(&dev_inflight, &dev, &depth, BPF_ANY);
+    }
 
     struct block_merge_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
@@ -659,7 +689,7 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
 
     fill_header(&e->hdr, EVENT_BLOCK_MERGE, ct);
     e->bytes = bytes;
-    e->rw = (rwbs[0] == 'W') ? 1 : 0;
+    e->rw = rw;
 
     bpf_ringbuf_submit(e, 0);
     return 0;

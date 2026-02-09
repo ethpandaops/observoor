@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use crate::tracer::event::ClientType;
@@ -6,9 +7,9 @@ use crate::tracer::event::ClientType;
 #[derive(Debug, Clone)]
 pub struct BatchMetadata {
     /// Observoor instance name.
-    pub client_name: String,
+    pub client_name: Arc<str>,
     /// Ethereum network name.
-    pub network_name: String,
+    pub network_name: Arc<str>,
     /// Time when this batch was collected.
     pub updated_time: SystemTime,
 }
@@ -35,7 +36,7 @@ pub struct SlotInfo {
 #[derive(Debug, Clone)]
 pub struct LatencyMetric {
     /// Table name (e.g., "syscall_read", "disk_latency").
-    pub metric_type: String,
+    pub metric_type: &'static str,
     pub window: WindowInfo,
     pub slot: SlotInfo,
     pub pid: u32,
@@ -43,20 +44,20 @@ pub struct LatencyMetric {
     /// Block device ID (disk metrics only).
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
-    pub rw: Option<String>,
+    pub rw: Option<&'static str>,
     pub sum: i64,
     pub count: u32,
     pub min: i64,
     pub max: i64,
     /// 10-bucket histogram counts.
-    pub histogram: Vec<u32>,
+    pub histogram: [u32; 10],
 }
 
 /// A counter metric (events, bytes, etc.).
 #[derive(Debug, Clone)]
 pub struct CounterMetric {
     /// Table name (e.g., "page_fault_major", "net_io").
-    pub metric_type: String,
+    pub metric_type: &'static str,
     pub window: WindowInfo,
     pub slot: SlotInfo,
     pub pid: u32,
@@ -64,11 +65,11 @@ pub struct CounterMetric {
     /// Block device ID (disk metrics only).
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
-    pub rw: Option<String>,
+    pub rw: Option<&'static str>,
     /// Local port (network metrics only).
     pub local_port: Option<u16>,
     /// Direction string "tx"/"rx" (network metrics only).
-    pub direction: Option<String>,
+    pub direction: Option<&'static str>,
     pub sum: i64,
     pub count: u32,
 }
@@ -77,7 +78,7 @@ pub struct CounterMetric {
 #[derive(Debug, Clone)]
 pub struct GaugeMetric {
     /// Table name (e.g., "tcp_rtt", "disk_queue_depth").
-    pub metric_type: String,
+    pub metric_type: &'static str,
     pub window: WindowInfo,
     pub slot: SlotInfo,
     pub pid: u32,
@@ -85,7 +86,7 @@ pub struct GaugeMetric {
     /// Block device ID (disk metrics only).
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
-    pub rw: Option<String>,
+    pub rw: Option<&'static str>,
     /// Local port (TCP metrics only).
     pub local_port: Option<u16>,
     pub sum: i64,

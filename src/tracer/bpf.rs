@@ -303,8 +303,21 @@ async fn read_loop(
 
                     match parse_event(data) {
                         Ok(event) => {
-                            for handler in event_handlers.iter() {
-                                handler(event.clone());
+                            match event_handlers.len() {
+                                0 => {}
+                                1 => {
+                                    if let Some(handler) = event_handlers.first() {
+                                        handler(event);
+                                    }
+                                }
+                                len => {
+                                    for handler in event_handlers.iter().take(len - 1) {
+                                        handler(event.clone());
+                                    }
+                                    if let Some(last_handler) = event_handlers.get(len - 1) {
+                                        last_handler(event);
+                                    }
+                                }
                             }
                         }
                         Err(e) => {

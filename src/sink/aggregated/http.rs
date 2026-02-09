@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::HttpExportConfig;
 
-use super::metric::{BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch};
+use super::metric::{CounterMetric, GaugeMetric, LatencyMetric, MetricBatch};
 
 /// Number of histogram buckets.
 const NUM_BUCKETS: usize = 10;
@@ -50,14 +50,14 @@ fn histogram_to_json(h: &[u32]) -> Option<HistogramJson> {
 /// JSON schema for HTTP export of aggregated metrics.
 #[derive(Debug, Clone, Serialize)]
 pub struct AggregatedMetricJson {
-    pub metric_type: String,
-    pub updated_date_time: String,
-    pub window_start: String,
+    pub metric_type: &'static str,
+    pub updated_date_time: Arc<str>,
+    pub window_start: Arc<str>,
     pub interval_ms: u16,
     pub wallclock_slot: u32,
-    pub wallclock_slot_start_date_time: String,
+    pub wallclock_slot_start_date_time: Arc<str>,
     pub pid: u32,
-    pub client_type: String,
+    pub client_type: &'static str,
     pub sum: i64,
     pub count: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -68,16 +68,16 @@ pub struct AggregatedMetricJson {
     pub histogram: Option<HistogramJson>,
     #[serde(skip_serializing_if = "is_zero_u16")]
     pub local_port: u16,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub direction: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub direction: Option<&'static str>,
     #[serde(skip_serializing_if = "is_zero_u32")]
     pub device_id: u32,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub rw: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub meta_client_name: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    pub meta_network_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rw: Option<&'static str>,
+    #[serde(skip_serializing_if = "is_arc_str_empty")]
+    pub meta_client_name: Arc<str>,
+    #[serde(skip_serializing_if = "is_arc_str_empty")]
+    pub meta_network_name: Arc<str>,
 }
 
 fn is_zero_u16(v: &u16) -> bool {
@@ -86,6 +86,19 @@ fn is_zero_u16(v: &u16) -> bool {
 
 fn is_zero_u32(v: &u32) -> bool {
     *v == 0
+}
+
+fn is_arc_str_empty(v: &Arc<str>) -> bool {
+    v.is_empty()
+}
+
+#[derive(Clone)]
+struct SharedBatchStrings {
+    updated_date_time: Arc<str>,
+    window_start: Arc<str>,
+    wallclock_slot_start_date_time: Arc<str>,
+    meta_client_name: Arc<str>,
+    meta_network_name: Arc<str>,
 }
 
 /// HTTP NDJSON exporter with worker pool and compression.
@@ -109,78 +122,98 @@ impl HttpExporter {
         }
     }
 
+    fn shared_strings(batch: &MetricBatch) -> Option<SharedBatchStrings> {
+        let (window_start, slot_start) = if let Some(m) = batch.latency.first() {
+            (m.window.start, m.slot.start_time)
+        } else if let Some(m) = batch.counter.first() {
+            (m.window.start, m.slot.start_time)
+        } else if let Some(m) = batch.gauge.first() {
+            (m.window.start, m.slot.start_time)
+        } else {
+            return None;
+        };
+
+        Some(SharedBatchStrings {
+            updated_date_time: Arc::from(format_datetime(batch.metadata.updated_time)),
+            window_start: Arc::from(format_datetime(window_start)),
+            wallclock_slot_start_date_time: Arc::from(format_datetime(slot_start)),
+            meta_client_name: Arc::clone(&batch.metadata.client_name),
+            meta_network_name: Arc::clone(&batch.metadata.network_name),
+        })
+    }
+
     /// Converts a latency metric to JSON.
-    fn latency_to_json(m: &LatencyMetric, meta: &BatchMetadata) -> AggregatedMetricJson {
+    fn latency_to_json(m: &LatencyMetric, shared: &SharedBatchStrings) -> AggregatedMetricJson {
         AggregatedMetricJson {
-            metric_type: m.metric_type.clone(),
-            updated_date_time: format_datetime(meta.updated_time),
-            window_start: format_datetime(m.window.start),
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
-            wallclock_slot_start_date_time: format_datetime(m.slot.start_time),
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
             pid: m.pid,
-            client_type: m.client_type.to_string(),
+            client_type: m.client_type.as_str(),
             sum: m.sum,
             count: m.count,
             min: Some(m.min),
             max: Some(m.max),
             histogram: histogram_to_json(&m.histogram),
             local_port: 0,
-            direction: String::new(),
+            direction: None,
             device_id: m.device_id.unwrap_or(0),
-            rw: m.rw.clone().unwrap_or_default(),
-            meta_client_name: meta.client_name.clone(),
-            meta_network_name: meta.network_name.clone(),
+            rw: m.rw,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
         }
     }
 
     /// Converts a counter metric to JSON.
-    fn counter_to_json(m: &CounterMetric, meta: &BatchMetadata) -> AggregatedMetricJson {
+    fn counter_to_json(m: &CounterMetric, shared: &SharedBatchStrings) -> AggregatedMetricJson {
         AggregatedMetricJson {
-            metric_type: m.metric_type.clone(),
-            updated_date_time: format_datetime(meta.updated_time),
-            window_start: format_datetime(m.window.start),
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
-            wallclock_slot_start_date_time: format_datetime(m.slot.start_time),
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
             pid: m.pid,
-            client_type: m.client_type.to_string(),
+            client_type: m.client_type.as_str(),
             sum: m.sum,
             count: m.count,
             min: None,
             max: None,
             histogram: None,
             local_port: m.local_port.unwrap_or(0),
-            direction: m.direction.clone().unwrap_or_default(),
+            direction: m.direction,
             device_id: m.device_id.unwrap_or(0),
-            rw: m.rw.clone().unwrap_or_default(),
-            meta_client_name: meta.client_name.clone(),
-            meta_network_name: meta.network_name.clone(),
+            rw: m.rw,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
         }
     }
 
     /// Converts a gauge metric to JSON.
-    fn gauge_to_json(m: &GaugeMetric, meta: &BatchMetadata) -> AggregatedMetricJson {
+    fn gauge_to_json(m: &GaugeMetric, shared: &SharedBatchStrings) -> AggregatedMetricJson {
         AggregatedMetricJson {
-            metric_type: m.metric_type.clone(),
-            updated_date_time: format_datetime(meta.updated_time),
-            window_start: format_datetime(m.window.start),
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
-            wallclock_slot_start_date_time: format_datetime(m.slot.start_time),
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
             pid: m.pid,
-            client_type: m.client_type.to_string(),
+            client_type: m.client_type.as_str(),
             sum: m.sum,
             count: m.count,
             min: Some(m.min),
             max: Some(m.max),
             histogram: None,
             local_port: m.local_port.unwrap_or(0),
-            direction: String::new(),
+            direction: None,
             device_id: m.device_id.unwrap_or(0),
-            rw: m.rw.clone().unwrap_or_default(),
-            meta_client_name: meta.client_name.clone(),
-            meta_network_name: meta.network_name.clone(),
+            rw: m.rw,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
         }
     }
 }
@@ -198,12 +231,15 @@ impl HttpExporter {
         if self.cfg.max_queue_size == 0 {
             bail!("http max_queue_size must be positive");
         }
+        if self.cfg.workers == 0 {
+            bail!("http workers must be positive");
+        }
 
         let (tx, mut rx) = mpsc::channel::<AggregatedMetricJson>(self.cfg.max_queue_size);
         self.tx = Some(tx);
         self.cancel = Some(ctx.clone());
 
-        let cfg = self.cfg.clone();
+        let cfg = Arc::new(self.cfg.clone());
 
         // Build reqwest client.
         let mut client_builder = reqwest::Client::builder().timeout(cfg.export_timeout);
@@ -221,6 +257,7 @@ impl HttpExporter {
             let batch_size = cfg.batch_size;
             let batch_timeout = cfg.batch_timeout;
             let mut batch = Vec::with_capacity(batch_size);
+            let mut in_flight = tokio::task::JoinSet::new();
             let mut interval = tokio::time::interval(batch_timeout);
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -230,9 +267,48 @@ impl HttpExporter {
                         // Flush remaining items.
                         if !batch.is_empty() {
                             let items = std::mem::take(&mut batch);
-                            let _ = send_batch(
-                                &client, &cfg, &semaphore, items,
-                            ).await;
+                            spawn_send_batch(
+                                &mut in_flight,
+                                client.clone(),
+                                Arc::clone(&cfg),
+                                Arc::clone(&semaphore),
+                                items,
+                            );
+                        }
+
+                        // Drain queue and flush remaining items.
+                        while let Ok(item) = rx.try_recv() {
+                            batch.push(item);
+                            if batch.len() >= batch_size {
+                                let items = std::mem::replace(
+                                    &mut batch,
+                                    Vec::with_capacity(batch_size),
+                                );
+                                spawn_send_batch(
+                                    &mut in_flight,
+                                    client.clone(),
+                                    Arc::clone(&cfg),
+                                    Arc::clone(&semaphore),
+                                    items,
+                                );
+                            }
+                        }
+
+                        if !batch.is_empty() {
+                            let items = std::mem::take(&mut batch);
+                            spawn_send_batch(
+                                &mut in_flight,
+                                client.clone(),
+                                Arc::clone(&cfg),
+                                Arc::clone(&semaphore),
+                                items,
+                            );
+                        }
+
+                        while let Some(joined) = in_flight.join_next().await {
+                            if let Err(e) = joined {
+                                tracing::debug!(error = %e, "HTTP export worker join failed");
+                            }
                         }
                         return;
                     }
@@ -255,12 +331,34 @@ impl HttpExporter {
                                         &mut batch,
                                         Vec::with_capacity(batch_size),
                                     );
-                                    let _ = send_batch(
-                                        &client, &cfg, &semaphore, items,
-                                    ).await;
+                                    spawn_send_batch(
+                                        &mut in_flight,
+                                        client.clone(),
+                                        Arc::clone(&cfg),
+                                        Arc::clone(&semaphore),
+                                        items,
+                                    );
                                 }
                             }
-                            None => return, // Channel closed.
+                            None => {
+                                if !batch.is_empty() {
+                                    let items = std::mem::take(&mut batch);
+                                    spawn_send_batch(
+                                        &mut in_flight,
+                                        client.clone(),
+                                        Arc::clone(&cfg),
+                                        Arc::clone(&semaphore),
+                                        items,
+                                    );
+                                }
+
+                                while let Some(joined) = in_flight.join_next().await {
+                                    if let Err(e) = joined {
+                                        tracing::debug!(error = %e, "HTTP export worker join failed");
+                                    }
+                                }
+                                return;
+                            }
                         }
                     }
 
@@ -270,9 +368,19 @@ impl HttpExporter {
                                 &mut batch,
                                 Vec::with_capacity(batch_size),
                             );
-                            let _ = send_batch(
-                                &client, &cfg, &semaphore, items,
-                            ).await;
+                            spawn_send_batch(
+                                &mut in_flight,
+                                client.clone(),
+                                Arc::clone(&cfg),
+                                Arc::clone(&semaphore),
+                                items,
+                            );
+                        }
+                    }
+
+                    joined = in_flight.join_next(), if !in_flight.is_empty() => {
+                        if let Some(Err(e)) = joined {
+                            tracing::debug!(error = %e, "HTTP export worker join failed");
                         }
                     }
                 }
@@ -296,27 +404,58 @@ impl HttpExporter {
             None => return Ok(()),
         };
 
+        let Some(shared) = Self::shared_strings(batch) else {
+            return Ok(());
+        };
+
+        let mut dropped = 0usize;
+
         // Convert all metrics to JSON items and enqueue.
-        for m in &batch.latency {
-            let json = Self::latency_to_json(m, &batch.metadata);
-            // Non-blocking send; drops if queue full.
+        for (i, m) in batch.latency.iter().enumerate() {
+            if tx.capacity() == 0 {
+                dropped += batch.latency.len() - i + batch.counter.len() + batch.gauge.len();
+                break;
+            }
+
+            let json = Self::latency_to_json(m, &shared);
             if tx.try_send(json).is_err() {
-                tracing::warn!("HTTP export queue full, dropping item");
+                dropped += batch.latency.len() - i + batch.counter.len() + batch.gauge.len();
+                break;
             }
         }
 
-        for m in &batch.counter {
-            let json = Self::counter_to_json(m, &batch.metadata);
-            if tx.try_send(json).is_err() {
-                tracing::warn!("HTTP export queue full, dropping item");
+        if dropped == 0 {
+            for (i, m) in batch.counter.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.counter.len() - i + batch.gauge.len();
+                    break;
+                }
+
+                let json = Self::counter_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.counter.len() - i + batch.gauge.len();
+                    break;
+                }
             }
         }
 
-        for m in &batch.gauge {
-            let json = Self::gauge_to_json(m, &batch.metadata);
-            if tx.try_send(json).is_err() {
-                tracing::warn!("HTTP export queue full, dropping item");
+        if dropped == 0 {
+            for (i, m) in batch.gauge.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.gauge.len() - i;
+                    break;
+                }
+
+                let json = Self::gauge_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.gauge.len() - i;
+                    break;
+                }
             }
+        }
+
+        if dropped > 0 {
+            tracing::warn!(dropped, "HTTP export queue full, dropping items");
         }
 
         Ok(())
@@ -335,22 +474,43 @@ impl HttpExporter {
     }
 }
 
-/// Sends a batch of items via HTTP with semaphore-limited concurrency.
+fn spawn_send_batch(
+    in_flight: &mut tokio::task::JoinSet<()>,
+    client: reqwest::Client,
+    cfg: Arc<HttpExportConfig>,
+    semaphore: Arc<Semaphore>,
+    items: Vec<AggregatedMetricJson>,
+) {
+    if items.is_empty() {
+        return;
+    }
+
+    in_flight.spawn(async move {
+        let permit = match semaphore.acquire_owned().await {
+            Ok(permit) => permit,
+            Err(e) => {
+                tracing::warn!(error = %e, "HTTP exporter semaphore closed");
+                return;
+            }
+        };
+
+        let _permit = permit;
+
+        if let Err(e) = send_batch(&client, &cfg, items).await {
+            tracing::warn!(error = %e, "HTTP export request failed");
+        }
+    });
+}
+
+/// Sends one batch of items via HTTP.
 async fn send_batch(
     client: &reqwest::Client,
     cfg: &HttpExportConfig,
-    semaphore: &Arc<Semaphore>,
     items: Vec<AggregatedMetricJson>,
 ) -> Result<()> {
     if items.is_empty() {
         return Ok(());
     }
-
-    // Acquire a worker slot.
-    let _permit = semaphore
-        .acquire()
-        .await
-        .context("acquiring semaphore permit")?;
 
     // Serialize to NDJSON.
     let mut buf = Vec::with_capacity(items.len() * 256);
@@ -558,14 +718,14 @@ mod tests {
     #[test]
     fn test_aggregated_metric_json_serialization() {
         let metric = AggregatedMetricJson {
-            metric_type: "syscall_read".to_string(),
-            updated_date_time: "2024-01-01 00:00:00.000".to_string(),
-            window_start: "2024-01-01 00:00:00.000".to_string(),
+            metric_type: "syscall_read",
+            updated_date_time: Arc::from("2024-01-01 00:00:00.000"),
+            window_start: Arc::from("2024-01-01 00:00:00.000"),
             interval_ms: 1000,
             wallclock_slot: 42,
-            wallclock_slot_start_date_time: "2024-01-01 00:00:00.000".to_string(),
+            wallclock_slot_start_date_time: Arc::from("2024-01-01 00:00:00.000"),
             pid: 123,
-            client_type: "geth".to_string(),
+            client_type: "geth",
             sum: 100,
             count: 10,
             min: Some(5),
@@ -583,11 +743,11 @@ mod tests {
                 inf: 0,
             }),
             local_port: 0,
-            direction: String::new(),
+            direction: None,
             device_id: 0,
-            rw: String::new(),
-            meta_client_name: "test-node".to_string(),
-            meta_network_name: "mainnet".to_string(),
+            rw: None,
+            meta_client_name: Arc::from("test-node"),
+            meta_network_name: Arc::from("mainnet"),
         };
 
         let json_str = serde_json::to_string(&metric).expect("serialize");

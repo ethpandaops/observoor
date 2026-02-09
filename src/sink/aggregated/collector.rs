@@ -37,11 +37,15 @@ impl Collector {
             start_time: buf.wallclock_slot_start,
         };
 
+        let latency_capacity = self.estimate_latency_capacity(buf);
+        let counter_capacity = self.estimate_counter_capacity(buf);
+        let gauge_capacity = self.estimate_gauge_capacity(buf);
+
         let mut batch = MetricBatch {
             metadata: meta,
-            latency: Vec::with_capacity(256),
-            counter: Vec::with_capacity(128),
-            gauge: Vec::with_capacity(64),
+            latency: Vec::with_capacity(latency_capacity),
+            counter: Vec::with_capacity(counter_capacity),
+            gauge: Vec::with_capacity(gauge_capacity),
         };
 
         self.collect_basic_latency(&mut batch, buf, window, slot);
@@ -53,6 +57,43 @@ impl Collector {
         self.collect_disk_gauges(&mut batch, buf, window, slot);
 
         batch
+    }
+
+    fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
+        buf.syscall_read.len()
+            + buf.syscall_write.len()
+            + buf.syscall_futex.len()
+            + buf.syscall_mmap.len()
+            + buf.syscall_epoll_wait.len()
+            + buf.syscall_fsync.len()
+            + buf.syscall_fdatasync.len()
+            + buf.syscall_pwrite.len()
+            + buf.sched_on_cpu.len()
+            + buf.sched_off_cpu.len()
+            + buf.sched_runqueue.len()
+            + buf.mem_reclaim.len()
+            + buf.mem_compaction.len()
+            + buf.disk_latency.len()
+    }
+
+    fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
+        buf.page_fault_major.len()
+            + buf.page_fault_minor.len()
+            + buf.swap_in.len()
+            + buf.swap_out.len()
+            + buf.oom_kill.len()
+            + buf.fd_open.len()
+            + buf.fd_close.len()
+            + buf.process_exit.len()
+            + buf.tcp_state_change.len()
+            + buf.net_io.len()
+            + buf.tcp_retransmit.len()
+            + buf.disk_bytes.len()
+            + buf.block_merge.len()
+    }
+
+    fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
+        buf.tcp_rtt.len() + buf.tcp_cwnd.len() + buf.disk_queue_depth.len()
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -88,7 +129,7 @@ impl Collector {
                 }
 
                 batch.latency.push(LatencyMetric {
-                    metric_type: name.to_string(),
+                    metric_type: name,
                     window,
                     slot,
                     pid: dim.pid,
@@ -99,7 +140,7 @@ impl Collector {
                     count: snap.count,
                     min: snap.min,
                     max: snap.max,
-                    histogram: snap.histogram.to_vec(),
+                    histogram: snap.histogram,
                 });
             }
         }
@@ -121,18 +162,18 @@ impl Collector {
             }
 
             batch.latency.push(LatencyMetric {
-                metric_type: "disk_latency".to_string(),
+                metric_type: "disk_latency",
                 window,
                 slot,
                 pid: dim.pid,
                 client_type: client_type_from_u8(dim.client_type),
                 device_id: Some(dim.device_id),
-                rw: Some(rw_string(dim.rw).to_string()),
+                rw: Some(rw_string(dim.rw)),
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
                 max: snap.max,
-                histogram: snap.histogram.to_vec(),
+                histogram: snap.histogram,
             });
         }
     }
@@ -166,7 +207,7 @@ impl Collector {
                 }
 
                 batch.counter.push(CounterMetric {
-                    metric_type: name.to_string(),
+                    metric_type: name,
                     window,
                     slot,
                     pid: dim.pid,
@@ -204,7 +245,7 @@ impl Collector {
                 }
 
                 batch.counter.push(CounterMetric {
-                    metric_type: name.to_string(),
+                    metric_type: name,
                     window,
                     slot,
                     pid: dim.pid,
@@ -212,7 +253,7 @@ impl Collector {
                     device_id: None,
                     rw: None,
                     local_port: Some(dim.local_port),
-                    direction: Some(direction_string(dim.direction).to_string()),
+                    direction: Some(direction_string(dim.direction)),
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -242,13 +283,13 @@ impl Collector {
                 }
 
                 batch.counter.push(CounterMetric {
-                    metric_type: name.to_string(),
+                    metric_type: name,
                     window,
                     slot,
                     pid: dim.pid,
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: Some(dim.device_id),
-                    rw: Some(rw_string(dim.rw).to_string()),
+                    rw: Some(rw_string(dim.rw)),
                     local_port: None,
                     direction: None,
                     sum: snap.sum,
@@ -278,7 +319,7 @@ impl Collector {
                 }
 
                 batch.gauge.push(GaugeMetric {
-                    metric_type: name.to_string(),
+                    metric_type: name,
                     window,
                     slot,
                     pid: dim.pid,
@@ -311,13 +352,13 @@ impl Collector {
             }
 
             batch.gauge.push(GaugeMetric {
-                metric_type: "disk_queue_depth".to_string(),
+                metric_type: "disk_queue_depth",
                 window,
                 slot,
                 pid: dim.pid,
                 client_type: client_type_from_u8(dim.client_type),
                 device_id: Some(dim.device_id),
-                rw: Some(rw_string(dim.rw).to_string()),
+                rw: Some(rw_string(dim.rw)),
                 local_port: None,
                 sum: snap.sum,
                 count: snap.count,
@@ -342,8 +383,8 @@ mod tests {
 
     fn test_meta() -> BatchMetadata {
         BatchMetadata {
-            client_name: "test".to_string(),
-            network_name: "testnet".to_string(),
+            client_name: "test".into(),
+            network_name: "testnet".into(),
             updated_time: SystemTime::now(),
         }
     }

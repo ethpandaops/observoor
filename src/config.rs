@@ -241,7 +241,7 @@ pub struct HttpExportConfig {
     #[serde(default = "default_http_export_timeout", with = "humantime_serde")]
     pub export_timeout: Duration,
 
-    /// Maximum items to queue (dropped if full). Default: 51200.
+    /// Maximum items to queue (dropped if full). Default: 8192.
     #[serde(default = "default_http_max_queue_size")]
     pub max_queue_size: usize,
 
@@ -325,7 +325,7 @@ fn default_http_export_timeout() -> Duration {
 }
 
 fn default_http_max_queue_size() -> usize {
-    51200
+    8192
 }
 
 fn default_http_workers() -> usize {
@@ -479,6 +479,12 @@ impl Config {
 
             if self.sinks.aggregated.http.max_queue_size == 0 {
                 bail!("http max_queue_size must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.batch_size == 0 {
+                bail!("http batch_size must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.workers == 0 {
+                bail!("http workers must be positive when enabled");
             }
 
             let compression = &self.sinks.aggregated.http.compression;
@@ -657,5 +663,61 @@ mod tests {
 
         cfg.sinks.aggregated.http.max_queue_size = 1;
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_validation_http_batch_size_zero() {
+        let cfg = Config {
+            beacon: BeaconConfig {
+                endpoint: "http://localhost:5052".to_string(),
+                ..Default::default()
+            },
+            sinks: SinksConfig {
+                aggregated: AggregatedSinkConfig {
+                    enabled: true,
+                    http: HttpExportConfig {
+                        enabled: true,
+                        address: "http://localhost:8686".to_string(),
+                        batch_size: 0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            meta_client_name: "test".to_string(),
+            meta_network_name: "testnet".to_string(),
+            ..Default::default()
+        };
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("batch_size"));
+    }
+
+    #[test]
+    fn test_validation_http_workers_zero() {
+        let cfg = Config {
+            beacon: BeaconConfig {
+                endpoint: "http://localhost:5052".to_string(),
+                ..Default::default()
+            },
+            sinks: SinksConfig {
+                aggregated: AggregatedSinkConfig {
+                    enabled: true,
+                    http: HttpExportConfig {
+                        enabled: true,
+                        address: "http://localhost:8686".to_string(),
+                        workers: 0,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                },
+            },
+            meta_client_name: "test".to_string(),
+            meta_network_name: "testnet".to_string(),
+            ..Default::default()
+        };
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("workers"));
     }
 }
