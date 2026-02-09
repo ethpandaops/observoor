@@ -31,9 +31,16 @@ DEFAULT_BENCHES = [
 
 
 def load_change(criterion_root: Path, bench_name: str) -> tuple[float, float, float]:
-    path = criterion_root / bench_name / "change" / "estimates.json"
-    if not path.exists():
-        raise FileNotFoundError(f"missing change estimates for '{bench_name}': {path}")
+    candidates = [
+        criterion_root / bench_name / "change" / "estimates.json",
+        criterion_root / bench_name.replace("/", "_") / "change" / "estimates.json",
+    ]
+
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
+        raise FileNotFoundError(
+            f"missing change estimates for '{bench_name}': tried {candidates}"
+        )
 
     payload = json.loads(path.read_text(encoding="utf-8"))
     mean = payload.get("mean", {})

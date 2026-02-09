@@ -54,14 +54,16 @@ jobs:
             --warm-up-time 0.1 \
             --measurement-time 0.2 \
             --sample-size 50 \
-            --save-baseline gate-base
+            --save-baseline gate-base \
+            collector/collect_medium_window
 
           git checkout --detach "${HEAD_SHA}"
           cargo bench --no-default-features --bench hot_paths -- \
             --warm-up-time 0.1 \
             --measurement-time 0.2 \
             --sample-size 50 \
-            --baseline gate-base
+            --baseline gate-base \
+            collector/collect_medium_window
 
       - name: Enforce Regression Limits
         run: ./scripts/perf_gate.py --criterion-root target/criterion
