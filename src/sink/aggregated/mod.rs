@@ -63,8 +63,8 @@ impl SharedState {
 /// aggregation with dimensional breakdown.
 pub struct AggregatedSink {
     cfg: AggregatedSinkConfig,
-    meta_client_name: String,
-    meta_network_name: String,
+    meta_client_name: Arc<str>,
+    meta_network_name: Arc<str>,
     #[allow(dead_code)]
     collector: Collector,
     exporters: Vec<Exporter>,
@@ -102,8 +102,8 @@ impl AggregatedSink {
         Self {
             collector: Collector::new(cfg.resolution.interval),
             cfg,
-            meta_client_name,
-            meta_network_name,
+            meta_client_name: Arc::from(meta_client_name),
+            meta_network_name: Arc::from(meta_network_name),
             exporters: Vec::with_capacity(2),
             event_tx,
             event_rx: Some(event_rx),
@@ -308,8 +308,8 @@ impl Sink for AggregatedSink {
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let collector = Collector::new(interval);
-        let meta_client_name = self.meta_client_name.clone();
-        let meta_network_name = self.meta_network_name.clone();
+        let meta_client_name = Arc::clone(&self.meta_client_name);
+        let meta_network_name = Arc::clone(&self.meta_network_name);
 
         let run_task = tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
@@ -325,8 +325,8 @@ impl Sink for AggregatedSink {
                         // Flush pending slot-rotation buffers first.
                         while let Ok(rotated_buf) = rotation_rx.try_recv() {
                             let meta = BatchMetadata {
-                                client_name: meta_client_name.clone(),
-                                network_name: meta_network_name.clone(),
+                                client_name: Arc::clone(&meta_client_name),
+                                network_name: Arc::clone(&meta_network_name),
                                 updated_time: SystemTime::now(),
                             };
                             let batch = collector.collect(&rotated_buf, meta);
@@ -346,8 +346,8 @@ impl Sink for AggregatedSink {
                         // Final flush.
                         if let Some(final_buf) = buffer.take() {
                             let meta = BatchMetadata {
-                                client_name: meta_client_name.clone(),
-                                network_name: meta_network_name.clone(),
+                                client_name: Arc::clone(&meta_client_name),
+                                network_name: Arc::clone(&meta_network_name),
                                 updated_time: SystemTime::now(),
                             };
                             let batch = collector.collect(&final_buf, meta);
@@ -388,27 +388,25 @@ impl Sink for AggregatedSink {
                         // Process the first event.
                         if let Some(buf) = buffer.load() {
                             AggregatedSink::process_event(&buf, &event, &dimensions);
-                        }
 
-                        // Drain up to BATCH_SIZE-1 more events without blocking.
-                        for _ in 0..BATCH_SIZE - 1 {
-                            match event_rx.try_recv() {
-                                Ok(event) => {
-                                    if let Some(buf) = buffer.load() {
+                            // Drain up to BATCH_SIZE-1 more events without blocking.
+                            for _ in 0..BATCH_SIZE - 1 {
+                                match event_rx.try_recv() {
+                                    Ok(event) => {
                                         AggregatedSink::process_event(
                                             &buf, &event, &dimensions,
                                         );
                                     }
+                                    Err(_) => break,
                                 }
-                                Err(_) => break,
                             }
                         }
                     }
 
                     Some(rotated_buf) = rotation_rx.recv() => {
                         let meta = BatchMetadata {
-                            client_name: meta_client_name.clone(),
-                            network_name: meta_network_name.clone(),
+                            client_name: Arc::clone(&meta_client_name),
+                            network_name: Arc::clone(&meta_network_name),
                             updated_time: SystemTime::now(),
                         };
                         let batch = collector.collect(&rotated_buf, meta);
@@ -440,8 +438,8 @@ impl Sink for AggregatedSink {
 
                         if let Some(old_buf) = buffer.swap(new_buf) {
                             let meta = BatchMetadata {
-                                client_name: meta_client_name.clone(),
-                                network_name: meta_network_name.clone(),
+                                client_name: Arc::clone(&meta_client_name),
+                                network_name: Arc::clone(&meta_network_name),
                                 updated_time: SystemTime::now(),
                             };
                             let batch = collector.collect(&old_buf, meta);
@@ -469,8 +467,8 @@ impl Sink for AggregatedSink {
                         let now = SystemTime::now();
                         let row = AggregatedSink::new_sync_state_row(&state, now);
                         let meta = BatchMetadata {
-                            client_name: meta_client_name.clone(),
-                            network_name: meta_network_name.clone(),
+                            client_name: Arc::clone(&meta_client_name),
+                            network_name: Arc::clone(&meta_network_name),
                             updated_time: now,
                         };
 
@@ -656,47 +654,42 @@ fn local_port(e: &NetIOEvent) -> u16 {
 
 /// Atomic buffer wrapper using `Arc<Buffer>` with lock-free swap.
 mod atomic_buffer {
-    use parking_lot::Mutex;
+    use arc_swap::ArcSwapOption;
     use std::sync::Arc;
 
     use super::Buffer;
 
     /// Thread-safe atomic buffer holder.
-    /// Uses a Mutex around `Option<Arc<Buffer>>` for swap semantics.
-    /// The Mutex is only held briefly during swap/store/load operations
-    /// (not during event processing), so contention is minimal.
+    /// Uses lock-free atomic loads/swaps for the hot event-processing path.
     pub struct AtomicBuffer {
-        inner: Mutex<Option<Arc<Buffer>>>,
+        inner: ArcSwapOption<Buffer>,
     }
 
     impl AtomicBuffer {
         pub fn new() -> Self {
             Self {
-                inner: Mutex::new(None),
+                inner: ArcSwapOption::empty(),
             }
         }
 
         /// Stores a new buffer.
         pub fn store(&self, buf: Buffer) {
-            *self.inner.lock() = Some(Arc::new(buf));
+            self.inner.store(Some(Arc::new(buf)));
         }
 
         /// Loads the current buffer, returning a clone of the Arc.
         pub fn load(&self) -> Option<Arc<Buffer>> {
-            self.inner.lock().clone()
+            self.inner.load_full()
         }
 
         /// Swaps in a new buffer, returning the old one.
         pub fn swap(&self, new_buf: Buffer) -> Option<Arc<Buffer>> {
-            let mut guard = self.inner.lock();
-            let old = guard.take();
-            *guard = Some(Arc::new(new_buf));
-            old
+            self.inner.swap(Some(Arc::new(new_buf)))
         }
 
         /// Takes the buffer out, leaving None.
         pub fn take(&self) -> Option<Arc<Buffer>> {
-            self.inner.lock().take()
+            self.inner.swap(None)
         }
     }
 }

@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
+#[cfg(feature = "bpf")]
+use prometheus::Counter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -19,7 +21,9 @@ use crate::sink::aggregated::exporter::Exporter;
 use crate::sink::aggregated::http::HttpExporter;
 use crate::sink::aggregated::AggregatedSink;
 use crate::sink::Sink;
-use crate::tracer::event::ClientType;
+use crate::tracer::event::{ClientType, CLIENT_TYPE_CARDINALITY};
+#[cfg(feature = "bpf")]
+use crate::tracer::event::{EventType, MAX_CLIENT_TYPE, MAX_EVENT_TYPE};
 use crate::tracer::stats::EventStats;
 
 #[cfg(feature = "bpf")]
@@ -38,6 +42,44 @@ pub struct Agent {
     tracer: Option<Arc<tokio::sync::Mutex<BpfTracer>>>,
     captured_stats: Arc<EventStats>,
     cancel: CancellationToken,
+}
+
+#[cfg(feature = "bpf")]
+fn build_event_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
+    let mut counters = vec![None; MAX_EVENT_TYPE + 1];
+    for raw in 1..=MAX_EVENT_TYPE {
+        if let Ok(raw_u8) = u8::try_from(raw) {
+            if let Some(event_type) = EventType::from_u8(raw_u8) {
+                if let Some(slot) = counters.get_mut(raw) {
+                    *slot = Some(
+                        health
+                            .events_by_type
+                            .with_label_values(&[event_type.as_str()]),
+                    );
+                }
+            }
+        }
+    }
+    counters
+}
+
+#[cfg(feature = "bpf")]
+fn build_client_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
+    let mut counters = vec![None; MAX_CLIENT_TYPE + 1];
+    for raw in 0..=MAX_CLIENT_TYPE {
+        if let Ok(raw_u8) = u8::try_from(raw) {
+            if let Some(client_type) = ClientType::from_u8(raw_u8) {
+                if let Some(slot) = counters.get_mut(raw) {
+                    *slot = Some(
+                        health
+                            .events_by_client
+                            .with_label_values(&[client_type.as_str()]),
+                    );
+                }
+            }
+        }
+    }
+    counters
 }
 
 impl Agent {
@@ -61,19 +103,19 @@ impl Agent {
 
     /// Start all components and begin observation.
     pub async fn start(&mut self) -> Result<()> {
-        // 0. Run migrations if enabled.
-        if self.cfg.sinks.aggregated.enabled
-            && self.cfg.sinks.aggregated.clickhouse.migrations.enabled
-        {
-            self.run_migrations().await?;
-        }
-
-        // 1. Start health metrics server.
+        // 0. Start health metrics server (before migrations so probes respond).
         self.health
             .start()
             .await
             .context("starting health metrics server")?;
         info!("health metrics server started");
+
+        // 1. Run migrations if enabled.
+        if self.cfg.sinks.aggregated.enabled
+            && self.cfg.sinks.aggregated.clickhouse.migrations.enabled
+        {
+            self.run_migrations().await?;
+        }
 
         // 2. Fetch genesis and spec from beacon node.
         let beacon = self.create_beacon_client()?;
@@ -227,18 +269,25 @@ impl Agent {
             let health_ev = Arc::clone(&self.health);
             let captured_stats = Arc::clone(&self.captured_stats);
             let sink_ev = Arc::clone(&sink);
+            let event_type_counters = build_event_type_counters(&health_ev);
+            let client_type_counters = build_client_type_counters(&health_ev);
             tracer.on_event(Box::new(move |event| {
                 health_ev.events_received.inc();
                 captured_stats.record(event.raw.event_type);
 
-                health_ev
-                    .events_by_type
-                    .with_label_values(&[&event.raw.event_type.to_string()])
-                    .inc();
-                health_ev
-                    .events_by_client
-                    .with_label_values(&[&event.raw.client_type.to_string()])
-                    .inc();
+                if let Some(counter) = event_type_counters
+                    .get(usize::from(event.raw.event_type as u8))
+                    .and_then(Option::as_ref)
+                {
+                    counter.inc();
+                }
+
+                if let Some(counter) = client_type_counters
+                    .get(usize::from(event.raw.client_type as u8))
+                    .and_then(Option::as_ref)
+                {
+                    counter.inc();
+                }
 
                 sink_ev.handle_event(event);
             }));
@@ -251,6 +300,9 @@ impl Agent {
 
             // Register ringbuf stats handler.
             let health_rb = Arc::clone(&self.health);
+            self.health
+                .ringbuf_capacity_bytes
+                .set(f64::from(ring_buf_size));
             tracer.on_ringbuf_stats(Box::new(move |stats| {
                 health_rb.ringbuf_used.set(stats.used_bytes as f64);
             }));
@@ -405,16 +457,19 @@ impl Agent {
 
     /// Set PIDs-by-client metrics from resolved client types.
     fn set_pids_by_client_metrics(health: &HealthMetrics, client_types: &HashMap<u32, ClientType>) {
-        let mut counts: HashMap<String, usize> = HashMap::new();
+        let mut counts = [0usize; CLIENT_TYPE_CARDINALITY];
         for ct in client_types.values() {
-            *counts.entry(ct.to_string()).or_default() += 1;
+            if let Some(slot) = counts.get_mut(*ct as usize) {
+                *slot += 1;
+            }
         }
 
-        for name in ClientType::all_names() {
-            let count = counts.get(&name).copied().unwrap_or(0);
+        for ct in ClientType::all_with_unknown() {
+            let name = ct.as_str();
+            let count = counts.get(*ct as usize).copied().unwrap_or(0);
             health
                 .pids_by_client
-                .with_label_values(&[&name])
+                .with_label_values(&[name])
                 .set(count as f64);
         }
     }

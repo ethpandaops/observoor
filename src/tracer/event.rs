@@ -36,6 +36,37 @@ pub enum EventType {
 pub const MAX_EVENT_TYPE: usize = 25;
 
 impl EventType {
+    /// Returns the canonical metric/log label name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyscallRead => "syscall_read",
+            Self::SyscallWrite => "syscall_write",
+            Self::SyscallFutex => "syscall_futex",
+            Self::SyscallMmap => "syscall_mmap",
+            Self::SyscallEpollWait => "syscall_epoll_wait",
+            Self::DiskIO => "disk_io",
+            Self::NetTX => "net_tx",
+            Self::NetRX => "net_rx",
+            Self::SchedSwitch => "sched_switch",
+            Self::PageFault => "page_fault",
+            Self::FDOpen => "fd_open",
+            Self::FDClose => "fd_close",
+            Self::SyscallFsync => "syscall_fsync",
+            Self::SyscallFdatasync => "syscall_fdatasync",
+            Self::SyscallPwrite => "syscall_pwrite",
+            Self::SchedRunqueue => "sched_runqueue",
+            Self::BlockMerge => "block_merge",
+            Self::TcpRetransmit => "tcp_retransmit",
+            Self::TcpState => "tcp_state",
+            Self::MemReclaim => "mem_reclaim",
+            Self::MemCompaction => "mem_compaction",
+            Self::SwapIn => "swap_in",
+            Self::SwapOut => "swap_out",
+            Self::OOMKill => "oom_kill",
+            Self::ProcessExit => "process_exit",
+        }
+    }
+
     /// Convert from a raw u8 value.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -71,34 +102,7 @@ impl EventType {
 
 impl fmt::Display for EventType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::SyscallRead => "syscall_read",
-            Self::SyscallWrite => "syscall_write",
-            Self::SyscallFutex => "syscall_futex",
-            Self::SyscallMmap => "syscall_mmap",
-            Self::SyscallEpollWait => "syscall_epoll_wait",
-            Self::DiskIO => "disk_io",
-            Self::NetTX => "net_tx",
-            Self::NetRX => "net_rx",
-            Self::SchedSwitch => "sched_switch",
-            Self::PageFault => "page_fault",
-            Self::FDOpen => "fd_open",
-            Self::FDClose => "fd_close",
-            Self::SyscallFsync => "syscall_fsync",
-            Self::SyscallFdatasync => "syscall_fdatasync",
-            Self::SyscallPwrite => "syscall_pwrite",
-            Self::SchedRunqueue => "sched_runqueue",
-            Self::BlockMerge => "block_merge",
-            Self::TcpRetransmit => "tcp_retransmit",
-            Self::TcpState => "tcp_state",
-            Self::MemReclaim => "mem_reclaim",
-            Self::MemCompaction => "mem_compaction",
-            Self::SwapIn => "swap_in",
-            Self::SwapOut => "swap_out",
-            Self::OOMKill => "oom_kill",
-            Self::ProcessExit => "process_exit",
-        };
-        f.write_str(name)
+        f.write_str(self.as_str())
     }
 }
 
@@ -124,8 +128,28 @@ pub enum ClientType {
 /// Maximum ClientType value, used for array sizing.
 #[allow(dead_code)]
 pub const MAX_CLIENT_TYPE: usize = 11;
+/// Number of ClientType variants including Unknown.
+pub const CLIENT_TYPE_CARDINALITY: usize = MAX_CLIENT_TYPE + 1;
 
 impl ClientType {
+    /// Returns the canonical metric/log label name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Geth => "geth",
+            Self::Reth => "reth",
+            Self::Besu => "besu",
+            Self::Nethermind => "nethermind",
+            Self::Erigon => "erigon",
+            Self::Prysm => "prysm",
+            Self::Lighthouse => "lighthouse",
+            Self::Teku => "teku",
+            Self::Lodestar => "lodestar",
+            Self::Nimbus => "nimbus",
+            Self::Ethrex => "ethrex",
+        }
+    }
+
     /// Convert from a raw u8 value.
     pub fn from_u8(v: u8) -> Option<Self> {
         match v {
@@ -162,31 +186,36 @@ impl ClientType {
         ]
     }
 
+    /// Return all client types including Unknown.
+    pub fn all_with_unknown() -> &'static [ClientType] {
+        &[
+            Self::Unknown,
+            Self::Geth,
+            Self::Reth,
+            Self::Besu,
+            Self::Nethermind,
+            Self::Erigon,
+            Self::Prysm,
+            Self::Lighthouse,
+            Self::Teku,
+            Self::Lodestar,
+            Self::Nimbus,
+            Self::Ethrex,
+        ]
+    }
+
     /// Return all client type names including "unknown".
     pub fn all_names() -> Vec<String> {
-        let mut names: Vec<String> = Self::all().iter().map(|c| c.to_string()).collect();
-        names.push(Self::Unknown.to_string());
-        names
+        Self::all_with_unknown()
+            .iter()
+            .map(|c| c.to_string())
+            .collect()
     }
 }
 
 impl fmt::Display for ClientType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            Self::Unknown => "unknown",
-            Self::Geth => "geth",
-            Self::Reth => "reth",
-            Self::Besu => "besu",
-            Self::Nethermind => "nethermind",
-            Self::Erigon => "erigon",
-            Self::Prysm => "prysm",
-            Self::Lighthouse => "lighthouse",
-            Self::Teku => "teku",
-            Self::Lodestar => "lodestar",
-            Self::Nimbus => "nimbus",
-            Self::Ethrex => "ethrex",
-        };
-        f.write_str(name)
+        f.write_str(self.as_str())
     }
 }
 

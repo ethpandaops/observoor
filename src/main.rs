@@ -1,17 +1,8 @@
-mod agent;
-mod beacon;
-mod clock;
-mod config;
-mod export;
-mod migrate;
-mod pid;
-mod sink;
-mod tracer;
-
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use observoor::{agent, config};
 use tracing_subscriber::{fmt, EnvFilter};
 
 /// eBPF-based Ethereum client monitoring agent.

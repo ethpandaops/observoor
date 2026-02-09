@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -34,7 +35,7 @@ impl ClickHouseExporter {
     fn group_latency_by_table(metrics: &[LatencyMetric]) -> HashMap<&str, Vec<&LatencyMetric>> {
         let mut result: HashMap<&str, Vec<&LatencyMetric>> = HashMap::with_capacity(16);
         for m in metrics {
-            result.entry(m.metric_type.as_str()).or_default().push(m);
+            result.entry(m.metric_type).or_default().push(m);
         }
         result
     }
@@ -43,7 +44,7 @@ impl ClickHouseExporter {
     fn group_counter_by_table(metrics: &[CounterMetric]) -> HashMap<&str, Vec<&CounterMetric>> {
         let mut result: HashMap<&str, Vec<&CounterMetric>> = HashMap::with_capacity(16);
         for m in metrics {
-            result.entry(m.metric_type.as_str()).or_default().push(m);
+            result.entry(m.metric_type).or_default().push(m);
         }
         result
     }
@@ -52,7 +53,7 @@ impl ClickHouseExporter {
     fn group_gauge_by_table(metrics: &[GaugeMetric]) -> HashMap<&str, Vec<&GaugeMetric>> {
         let mut result: HashMap<&str, Vec<&GaugeMetric>> = HashMap::with_capacity(4);
         for m in metrics {
-            result.entry(m.metric_type.as_str()).or_default().push(m);
+            result.entry(m.metric_type).or_default().push(m);
         }
         result
     }
@@ -64,9 +65,9 @@ impl ClickHouseExporter {
         metrics: &[&LatencyMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_disk_dimensions = table_name == "disk_latency";
@@ -81,39 +82,56 @@ impl ClickHouseExporter {
              meta_client_name, meta_network_name"
         };
 
-        let mut values = Vec::with_capacity(metrics.len());
         let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(128 + table.len() + columns.len() + metrics.len() * 256);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
 
-        for m in metrics {
-            let window_start = format_datetime(m.window.start);
-            let slot_start = format_datetime(m.slot.start_time);
-            let client_type = escape_sql(&m.client_type.to_string());
-            let hist = format_histogram(&m.histogram);
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
 
             if has_disk_dimensions {
                 let device_id = m.device_id.unwrap_or(0);
-                let rw = m.rw.as_deref().unwrap_or("read");
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
-                     {device_id}, '{rw}', {}, {}, {}, {}, {hist}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid,
-                    m.sum, m.count, m.min, m.max,
-                ));
+                let rw = m.rw.unwrap_or("read");
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                     {device_id}, '{rw}', {}, {}, {}, {}, ",
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                    m.min,
+                    m.max,
+                );
+                append_histogram(&mut sql, &m.histogram);
+                let _ = write!(sql, ", '{client_name}', '{network_name}')");
             } else {
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
-                     {}, {}, {}, {}, {hist}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count, m.min, m.max,
-                ));
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                     {}, {}, {}, {}, ",
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                    m.min,
+                    m.max,
+                );
+                append_histogram(&mut sql, &m.histogram);
+                let _ = write!(sql, ", '{client_name}', '{network_name}')");
             }
         }
-
-        let sql = format!(
-            "INSERT INTO {table} ({columns}) VALUES {}",
-            values.join(", ")
-        );
 
         let mut handle = self
             .pool
@@ -136,9 +154,9 @@ impl ClickHouseExporter {
         metrics: &[&CounterMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_network_dimensions = table_name == "net_io" || table_name == "tcp_retransmit";
@@ -158,45 +176,62 @@ impl ClickHouseExporter {
              meta_client_name, meta_network_name"
         };
 
-        let mut values = Vec::with_capacity(metrics.len());
         let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(128 + table.len() + columns.len() + metrics.len() * 192);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
 
-        for m in metrics {
-            let window_start = format_datetime(m.window.start);
-            let slot_start = format_datetime(m.slot.start_time);
-            let client_type = escape_sql(&m.client_type.to_string());
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
 
             if has_network_dimensions {
                 let local_port = m.local_port.unwrap_or(0);
-                let direction = m.direction.as_deref().unwrap_or("tx");
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let direction = m.direction.unwrap_or("tx");
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {local_port}, '{direction}', {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                );
             } else if has_disk_dimensions {
                 let device_id = m.device_id.unwrap_or(0);
-                let rw = m.rw.as_deref().unwrap_or("read");
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let rw = m.rw.unwrap_or("read");
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {device_id}, '{rw}', {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                );
             } else {
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                );
             }
         }
-
-        let sql = format!(
-            "INSERT INTO {table} ({columns}) VALUES {}",
-            values.join(", ")
-        );
 
         let mut handle = self
             .pool
@@ -219,9 +254,9 @@ impl ClickHouseExporter {
         metrics: &[&GaugeMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
-        if metrics.is_empty() {
+        let Some(first) = metrics.first() else {
             return Ok(());
-        }
+        };
 
         let table = format!("{}.{}", self.database, table_name);
         let has_tcp_dimensions = table_name == "tcp_rtt" || table_name == "tcp_cwnd";
@@ -241,44 +276,67 @@ impl ClickHouseExporter {
              meta_client_name, meta_network_name"
         };
 
-        let mut values = Vec::with_capacity(metrics.len());
         let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(128 + table.len() + columns.len() + metrics.len() * 200);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
 
-        for m in metrics {
-            let window_start = format_datetime(m.window.start);
-            let slot_start = format_datetime(m.slot.start_time);
-            let client_type = escape_sql(&m.client_type.to_string());
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
 
             if has_tcp_dimensions {
                 let local_port = m.local_port.unwrap_or(0);
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {local_port}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count, m.min, m.max,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                    m.min,
+                    m.max,
+                );
             } else if has_disk_dimensions {
                 let device_id = m.device_id.unwrap_or(0);
-                let rw = m.rw.as_deref().unwrap_or("read");
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let rw = m.rw.unwrap_or("read");
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {device_id}, '{rw}', {}, {}, {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count, m.min, m.max,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                    m.min,
+                    m.max,
+                );
             } else {
-                values.push(format!(
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{client_type}', \
+                let _ = write!(
+                    sql,
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
                      {}, {}, {}, {}, '{client_name}', '{network_name}')",
-                    m.window.interval_ms, m.slot.number, m.pid, m.sum, m.count, m.min, m.max,
-                ));
+                    m.window.interval_ms,
+                    m.slot.number,
+                    m.pid,
+                    m.client_type.as_str(),
+                    m.sum,
+                    m.count,
+                    m.min,
+                    m.max,
+                );
             }
         }
-
-        let sql = format!(
-            "INSERT INTO {table} ({columns}) VALUES {}",
-            values.join(", ")
-        );
 
         let mut handle = self
             .pool
@@ -434,10 +492,10 @@ fn escape_sql(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
 }
 
-/// Formats a histogram Vec<u32> as a ClickHouse Tuple literal.
-fn format_histogram(h: &[u32]) -> String {
+fn append_histogram(buf: &mut String, h: &[u32]) {
     let get = |i: usize| h.get(i).copied().unwrap_or(0);
-    format!(
+    let _ = write!(
+        buf,
         "({}, {}, {}, {}, {}, {}, {}, {}, {}, {})",
         get(0),
         get(1),
@@ -449,7 +507,15 @@ fn format_histogram(h: &[u32]) -> String {
         get(7),
         get(8),
         get(9),
-    )
+    );
+}
+
+/// Formats a histogram Vec<u32> as a ClickHouse Tuple literal.
+#[cfg(test)]
+fn format_histogram(h: &[u32]) -> String {
+    let mut out = String::with_capacity(64);
+    append_histogram(&mut out, h);
+    out
 }
 
 #[cfg(test)]
@@ -496,7 +562,7 @@ mod tests {
         let now = SystemTime::now();
         let metrics = vec![
             LatencyMetric {
-                metric_type: "syscall_read".to_string(),
+                metric_type: "syscall_read",
                 window: WindowInfo {
                     start: now,
                     interval_ms: 1000,
@@ -513,10 +579,10 @@ mod tests {
                 count: 10,
                 min: 5,
                 max: 20,
-                histogram: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+                histogram: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
             },
             LatencyMetric {
-                metric_type: "syscall_read".to_string(),
+                metric_type: "syscall_read",
                 window: WindowInfo {
                     start: now,
                     interval_ms: 1000,
@@ -533,10 +599,10 @@ mod tests {
                 count: 20,
                 min: 10,
                 max: 40,
-                histogram: vec![2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
+                histogram: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
             },
             LatencyMetric {
-                metric_type: "disk_latency".to_string(),
+                metric_type: "disk_latency",
                 window: WindowInfo {
                     start: now,
                     interval_ms: 1000,
@@ -548,12 +614,12 @@ mod tests {
                 pid: 1,
                 client_type: ClientType::Geth,
                 device_id: Some(259),
-                rw: Some("write".to_string()),
+                rw: Some("write"),
                 sum: 50000,
                 count: 5,
                 min: 1000,
                 max: 20000,
-                histogram: vec![0, 0, 1, 2, 1, 1, 0, 0, 0, 0],
+                histogram: [0, 0, 1, 2, 1, 1, 0, 0, 0, 0],
             },
         ];
 

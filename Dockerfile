@@ -16,6 +16,7 @@ COPY Cargo.toml Cargo.lock rust-toolchain.toml ./
 
 # Create a dummy main.rs so cargo can fetch dependencies.
 RUN mkdir -p src && echo 'fn main() {}' > src/main.rs
+RUN mkdir -p benches && echo 'fn main() {}' > benches/hot_paths.rs
 RUN cargo fetch
 
 # Copy full source.
