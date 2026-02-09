@@ -202,7 +202,7 @@ impl ClickHouseExporter {
 
         let columns = if has_network_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, local_port, direction, sum, count, \
+             pid, client_type, port_label, direction, sum, count, \
              meta_client_name, meta_network_name"
         } else if has_disk_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
@@ -229,12 +229,12 @@ impl ClickHouseExporter {
             }
 
             if has_network_dimensions {
-                let local_port = m.local_port.unwrap_or(0);
+                let port_label = m.port_label.unwrap_or("unknown");
                 let direction = m.direction.unwrap_or("tx");
                 let _ = write!(
                     sql,
                     "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
-                     {local_port}, '{direction}', {}, {}, '{client_name}', '{network_name}')",
+                     '{port_label}', '{direction}', {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
@@ -302,7 +302,7 @@ impl ClickHouseExporter {
 
         let columns = if has_tcp_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, local_port, sum, count, min, max, \
+             pid, client_type, port_label, sum, count, min, max, \
              meta_client_name, meta_network_name"
         } else if has_disk_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
@@ -329,11 +329,11 @@ impl ClickHouseExporter {
             }
 
             if has_tcp_dimensions {
-                let local_port = m.local_port.unwrap_or(0);
+                let port_label = m.port_label.unwrap_or("unknown");
                 let _ = write!(
                     sql,
                     "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
-                     {local_port}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
+                     '{port_label}', {}, {}, {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,

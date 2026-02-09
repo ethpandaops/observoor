@@ -6,8 +6,8 @@ use crate::tracer::event::ClientType;
 use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
 use super::buffer::Buffer;
 use super::dimension::{
-    direction_string, rw_string, BasicDimension, DiskDimension, NetworkDimension,
-    TCPMetricsDimension,
+    direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
+    NetworkDimension, TCPMetricsDimension,
 };
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo,
@@ -281,7 +281,7 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: None,
                     rw: None,
-                    local_port: None,
+                    port_label: None,
                     direction: None,
                     sum: snap.sum,
                     count: snap.count,
@@ -290,7 +290,7 @@ impl Collector {
         }
     }
 
-    /// Collects network counter metrics with port/direction.
+    /// Collects network counter metrics with port label/direction.
     fn collect_network_counters(
         &self,
         batch: &mut MetricBatch,
@@ -319,7 +319,7 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: None,
                     rw: None,
-                    local_port: Some(dim.local_port),
+                    port_label: Some(port_label_string(dim.port_label)),
                     direction: Some(direction_string(dim.direction)),
                     sum: snap.sum,
                     count: snap.count,
@@ -357,7 +357,7 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: Some(dim.device_id),
                     rw: Some(rw_string(dim.rw)),
-                    local_port: None,
+                    port_label: None,
                     direction: None,
                     sum: snap.sum,
                     count: snap.count,
@@ -393,7 +393,7 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: None,
                     rw: None,
-                    local_port: Some(dim.local_port),
+                    port_label: Some(port_label_string(dim.port_label)),
                     sum: snap.sum,
                     count: snap.count,
                     min: snap.min,
@@ -426,7 +426,7 @@ impl Collector {
                 client_type: client_type_from_u8(dim.client_type),
                 device_id: Some(dim.device_id),
                 rw: Some(rw_string(dim.rw)),
-                local_port: None,
+                port_label: None,
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
@@ -651,7 +651,7 @@ mod tests {
         let dim = NetworkDimension {
             pid: 123,
             client_type: 1,
-            local_port: 8545,
+            port_label: 3, // ElJsonRpc
             direction: 0,
         };
 
@@ -664,7 +664,7 @@ mod tests {
             .filter(|m| m.metric_type == "net_io")
             .collect();
         assert_eq!(net.len(), 1);
-        assert_eq!(net[0].local_port, Some(8545));
+        assert_eq!(net[0].port_label, Some("el_json_rpc"));
         assert_eq!(net[0].direction.as_deref(), Some("tx"));
         assert_eq!(net[0].sum, 1024);
     }
@@ -676,7 +676,7 @@ mod tests {
         let dim = TCPMetricsDimension {
             pid: 123,
             client_type: 1,
-            local_port: 30303,
+            port_label: 1, // ElP2PTcp
         };
 
         buf.add_tcp_metrics(dim, 100, 65535);
@@ -688,7 +688,7 @@ mod tests {
             .filter(|m| m.metric_type == "tcp_rtt")
             .collect();
         assert_eq!(rtt.len(), 1);
-        assert_eq!(rtt[0].local_port, Some(30303));
+        assert_eq!(rtt[0].port_label, Some("el_p2p_tcp"));
         assert_eq!(rtt[0].sum, 100);
 
         let cwnd: Vec<_> = batch
@@ -776,7 +776,7 @@ mod tests {
         let net = NetworkDimension {
             pid: 77,
             client_type: 1,
-            local_port: 30303,
+            port_label: 1, // ElP2PTcp
             direction: 0,
         };
 

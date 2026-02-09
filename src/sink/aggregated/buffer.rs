@@ -338,7 +338,7 @@ mod tests {
         let dim = NetworkDimension {
             pid: 1,
             client_type: 1,
-            local_port: 8545,
+            port_label: 3, // ElJsonRpc
             direction: 0,
         };
 
@@ -357,7 +357,7 @@ mod tests {
         let dim = TCPMetricsDimension {
             pid: 1,
             client_type: 1,
-            local_port: 8545,
+            port_label: 3, // ElJsonRpc
         };
 
         buf.add_tcp_metrics(dim, 100, 65535);

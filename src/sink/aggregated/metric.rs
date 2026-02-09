@@ -66,8 +66,8 @@ pub struct CounterMetric {
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
     pub rw: Option<&'static str>,
-    /// Local port (network metrics only).
-    pub local_port: Option<u16>,
+    /// Port label string (network metrics only).
+    pub port_label: Option<&'static str>,
     /// Direction string "tx"/"rx" (network metrics only).
     pub direction: Option<&'static str>,
     pub sum: i64,
@@ -87,8 +87,8 @@ pub struct GaugeMetric {
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
     pub rw: Option<&'static str>,
-    /// Local port (TCP metrics only).
-    pub local_port: Option<u16>,
+    /// Port label string (TCP metrics only).
+    pub port_label: Option<&'static str>,
     pub sum: i64,
     pub count: u32,
     pub min: i64,

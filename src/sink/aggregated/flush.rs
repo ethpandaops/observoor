@@ -24,7 +24,7 @@ struct CounterKey {
     client_type: u8,
     device_id: Option<u32>,
     rw: Option<&'static str>,
-    local_port: Option<u16>,
+    port_label: Option<&'static str>,
     direction: Option<&'static str>,
 }
 
@@ -36,7 +36,7 @@ struct GaugeKey {
     client_type: u8,
     device_id: Option<u32>,
     rw: Option<&'static str>,
-    local_port: Option<u16>,
+    port_label: Option<&'static str>,
 }
 
 #[derive(Debug)]
@@ -225,7 +225,7 @@ impl TieredFlushController {
             client_type: metric.client_type as u8,
             device_id: metric.device_id,
             rw: metric.rw,
-            local_port: metric.local_port,
+            port_label: metric.port_label,
             direction: metric.direction,
         };
 
@@ -245,7 +245,7 @@ impl TieredFlushController {
             client_type: metric.client_type as u8,
             device_id: metric.device_id,
             rw: metric.rw,
-            local_port: metric.local_port,
+            port_label: metric.port_label,
         };
 
         if let Some(existing) = tier.gauge.get_mut(&key) {
@@ -368,7 +368,7 @@ mod tests {
             client_type: ClientType::Geth,
             device_id: None,
             rw: None,
-            local_port: None,
+            port_label: None,
             direction: None,
             sum,
             count,
@@ -397,7 +397,7 @@ mod tests {
             client_type: ClientType::Geth,
             device_id: None,
             rw: None,
-            local_port: Some(30303),
+            port_label: Some("el_p2p_tcp"),
             sum,
             count,
             min,

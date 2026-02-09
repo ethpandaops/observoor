@@ -150,7 +150,7 @@ pub struct DimensionsConfig {
 /// Network metric dimension configuration.
 #[derive(Debug, Clone, Deserialize)]
 pub struct NetworkDimensionsConfig {
-    /// Include local port in network metrics. Default: true.
+    /// Include port label in network metrics. Default: true.
     #[serde(default = "default_true")]
     pub include_port: bool,
 
@@ -158,9 +158,9 @@ pub struct NetworkDimensionsConfig {
     #[serde(default = "default_true")]
     pub include_direction: bool,
 
-    /// Runtime port whitelist (not configurable via YAML).
+    /// Runtime port-to-label map (not configurable via YAML).
     #[serde(skip)]
-    pub port_whitelist: Option<std::collections::HashSet<u16>>,
+    pub port_label_map: Option<std::collections::HashMap<u16, crate::agent::ports::PortLabel>>,
 }
 
 /// Disk metric dimension configuration.
@@ -395,7 +395,7 @@ impl Default for NetworkDimensionsConfig {
         Self {
             include_port: true,
             include_direction: true,
-            port_whitelist: None,
+            port_label_map: None,
         }
     }
 }
@@ -554,23 +554,25 @@ impl Config {
 }
 
 impl NetworkDimensionsConfig {
-    /// Filter a port through the whitelist. Returns 0 if not whitelisted.
-    pub fn filter_port(&self, port: u16) -> u16 {
-        match &self.port_whitelist {
-            Some(whitelist) if !whitelist.is_empty() => {
-                if whitelist.contains(&port) {
-                    port
-                } else {
-                    0
-                }
-            }
-            _ => port,
+    /// Resolves a raw port number to a `PortLabel` discriminant (`u8`).
+    ///
+    /// Returns `PortLabel::Unknown as u8` if the port is not in the label map.
+    pub fn resolve_port_label(&self, port: u16) -> u8 {
+        match &self.port_label_map {
+            Some(map) => map
+                .get(&port)
+                .copied()
+                .unwrap_or(crate::agent::ports::PortLabel::Unknown) as u8,
+            None => crate::agent::ports::PortLabel::Unknown as u8,
         }
     }
 
-    /// Set the runtime port whitelist.
-    pub fn set_port_whitelist(&mut self, ports: std::collections::HashSet<u16>) {
-        self.port_whitelist = Some(ports);
+    /// Set the runtime port-to-label map.
+    pub fn set_port_label_map(
+        &mut self,
+        map: std::collections::HashMap<u16, crate::agent::ports::PortLabel>,
+    ) {
+        self.port_label_map = Some(map);
     }
 }
 
@@ -651,23 +653,27 @@ mod tests {
     }
 
     #[test]
-    fn test_port_filter_with_whitelist() {
-        let mut cfg = NetworkDimensionsConfig::default();
-        let mut whitelist = std::collections::HashSet::new();
-        whitelist.insert(8545);
-        whitelist.insert(30303);
-        cfg.set_port_whitelist(whitelist);
+    fn test_resolve_port_label_with_map() {
+        use crate::agent::ports::PortLabel;
 
-        assert_eq!(cfg.filter_port(8545), 8545);
-        assert_eq!(cfg.filter_port(30303), 30303);
-        assert_eq!(cfg.filter_port(9999), 0);
+        let mut cfg = NetworkDimensionsConfig::default();
+        let mut map = std::collections::HashMap::new();
+        map.insert(8545, PortLabel::ElJsonRpc);
+        map.insert(30303, PortLabel::ElP2PTcp);
+        cfg.set_port_label_map(map);
+
+        assert_eq!(cfg.resolve_port_label(8545), PortLabel::ElJsonRpc as u8);
+        assert_eq!(cfg.resolve_port_label(30303), PortLabel::ElP2PTcp as u8);
+        assert_eq!(cfg.resolve_port_label(9999), PortLabel::Unknown as u8);
     }
 
     #[test]
-    fn test_port_filter_without_whitelist() {
+    fn test_resolve_port_label_without_map() {
         let cfg = NetworkDimensionsConfig::default();
-        assert_eq!(cfg.filter_port(8545), 8545);
-        assert_eq!(cfg.filter_port(12345), 12345);
+        assert_eq!(
+            cfg.resolve_port_label(8545),
+            crate::agent::ports::PortLabel::Unknown as u8
+        );
     }
 
     #[test]

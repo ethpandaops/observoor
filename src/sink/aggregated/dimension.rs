@@ -1,3 +1,5 @@
+use crate::agent::ports::PortLabel;
+
 /// Dimension key for metrics that only need PID + client type.
 /// Used for syscalls, page faults, scheduler events, memory events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,12 +17,12 @@ pub struct CpuCoreDimension {
 }
 
 /// Dimension key for network I/O metrics.
-/// Includes local port and direction for detailed network breakdown.
+/// Includes port label and direction for detailed network breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkDimension {
     pub pid: u32,
     pub client_type: u8,
-    pub local_port: u16,
+    pub port_label: u8,
     /// 0 = TX, 1 = RX.
     pub direction: u8,
 }
@@ -31,7 +33,7 @@ pub struct NetworkDimension {
 pub struct TCPMetricsDimension {
     pub pid: u32,
     pub client_type: u8,
-    pub local_port: u16,
+    pub port_label: u8,
 }
 
 /// Dimension key for disk I/O metrics.
@@ -61,6 +63,11 @@ pub fn rw_string(rw: u8) -> &'static str {
     } else {
         "write"
     }
+}
+
+/// Returns a port label string from a u8 discriminant.
+pub fn port_label_string(v: u8) -> &'static str {
+    PortLabel::from_u8(v).unwrap_or(PortLabel::Unknown).as_str()
 }
 
 #[cfg(test)]
@@ -103,7 +110,7 @@ mod tests {
         let dim = NetworkDimension {
             pid: 100,
             client_type: 1,
-            local_port: 8545,
+            port_label: PortLabel::ElJsonRpc as u8,
             direction: 0,
         };
         map.insert(dim, 42);
@@ -128,7 +135,7 @@ mod tests {
         let dim = TCPMetricsDimension {
             pid: 100,
             client_type: 1,
-            local_port: 30303,
+            port_label: PortLabel::ElP2PTcp as u8,
         };
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
@@ -159,5 +166,13 @@ mod tests {
         assert_eq!(rw_string(0), "read");
         assert_eq!(rw_string(1), "write");
         assert_eq!(rw_string(2), "write");
+    }
+
+    #[test]
+    fn test_port_label_string() {
+        assert_eq!(port_label_string(0), "unknown");
+        assert_eq!(port_label_string(3), "el_json_rpc");
+        assert_eq!(port_label_string(9), "cl_beacon_api");
+        assert_eq!(port_label_string(255), "unknown");
     }
 }

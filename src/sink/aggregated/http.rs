@@ -66,8 +66,8 @@ pub struct AggregatedMetricJson {
     pub max: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub histogram: Option<HistogramJson>,
-    #[serde(skip_serializing_if = "is_zero_u16")]
-    pub local_port: u16,
+    #[serde(skip_serializing_if = "is_empty_str")]
+    pub port_label: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub direction: Option<&'static str>,
     #[serde(skip_serializing_if = "is_zero_u32")]
@@ -98,8 +98,8 @@ pub struct AggregatedMetricJson {
     pub meta_network_name: Arc<str>,
 }
 
-fn is_zero_u16(v: &u16) -> bool {
-    *v == 0
+fn is_empty_str(v: &&str) -> bool {
+    v.is_empty()
 }
 
 fn is_zero_u32(v: &u32) -> bool {
@@ -176,7 +176,7 @@ impl HttpExporter {
             min: Some(m.min),
             max: Some(m.max),
             histogram: histogram_to_json(&m.histogram),
-            local_port: 0,
+            port_label: "",
             direction: None,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
@@ -210,7 +210,7 @@ impl HttpExporter {
             min: None,
             max: None,
             histogram: None,
-            local_port: m.local_port.unwrap_or(0),
+            port_label: m.port_label.unwrap_or(""),
             direction: m.direction,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
@@ -244,7 +244,7 @@ impl HttpExporter {
             min: Some(m.min),
             max: Some(m.max),
             histogram: None,
-            local_port: m.local_port.unwrap_or(0),
+            port_label: m.port_label.unwrap_or(""),
             direction: None,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
@@ -278,7 +278,7 @@ impl HttpExporter {
             min: None,
             max: None,
             histogram: None,
-            local_port: 0,
+            port_label: "",
             direction: None,
             device_id: 0,
             rw: None,
@@ -846,7 +846,7 @@ mod tests {
                 le_100s: 0,
                 inf: 0,
             }),
-            local_port: 0,
+            port_label: "",
             direction: None,
             device_id: 0,
             rw: None,
@@ -866,8 +866,8 @@ mod tests {
         let json_str = serde_json::to_string(&metric).expect("serialize");
         assert!(json_str.contains("syscall_read"));
         assert!(json_str.contains("geth"));
-        // Zero-value optional fields should be skipped.
-        assert!(!json_str.contains("local_port"));
+        // Empty-value optional fields should be skipped.
+        assert!(!json_str.contains("port_label"));
         assert!(!json_str.contains("direction"));
         assert!(!json_str.contains("device_id"));
     }
@@ -916,7 +916,7 @@ mod tests {
                 client_type: ClientType::Geth,
                 device_id: None,
                 rw: None,
-                local_port: Some(30303),
+                port_label: Some("el_p2p_tcp"),
                 direction: Some("tx"),
                 sum: 1024,
                 count: 1,

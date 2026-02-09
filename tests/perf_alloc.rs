@@ -102,13 +102,13 @@ fn build_non_empty_buffer() -> (Collector, Buffer, BatchMetadata) {
         let net = NetworkDimension {
             pid,
             client_type: 1,
-            local_port: 30_303,
+            port_label: 1, // ElP2PTcp
             direction: (i % 2) as u8,
         };
         let tcp = TCPMetricsDimension {
             pid,
             client_type: 1,
-            local_port: 30_303,
+            port_label: 1, // ElP2PTcp
         };
         let disk = DiskDimension {
             pid,
