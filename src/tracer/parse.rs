@@ -1,7 +1,8 @@
 //! Event parsing for raw BPF ring buffer samples.
 //!
 //! Decodes byte slices from the ring buffer into typed [`ParsedEvent`] values.
-//! All reads use safe, panic-free helpers to satisfy `clippy::indexing_slicing`.
+//! Length checks happen once per event payload, then fixed-width reads use
+//! unchecked unaligned loads to minimize parser overhead.
 
 use thiserror::Error;
 
@@ -59,7 +60,8 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         client_type,
     };
 
-    let payload = data.get(HEADER_SIZE..).unwrap_or(&[]);
+    // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
+    let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
 
     let typed = match event_type {
         EventType::SyscallRead
@@ -111,32 +113,33 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
 // Safe byte-reading helpers (no indexing, no panics)
 // ---------------------------------------------------------------------------
 
+#[inline(always)]
 fn read_u8(data: &[u8], offset: usize) -> u8 {
-    data.get(offset).copied().unwrap_or(0)
+    debug_assert!(offset < data.len());
+    // Safety: callers verify payload lengths before reading fixed offsets.
+    unsafe { *data.as_ptr().add(offset) }
 }
 
+#[inline(always)]
 fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    let b: [u8; 2] = data
-        .get(offset..offset + 2)
-        .and_then(|s| s.try_into().ok())
-        .unwrap_or([0; 2]);
-    u16::from_le_bytes(b)
+    u16::from_le_bytes(read_fixed::<2>(data, offset))
 }
 
+#[inline(always)]
 fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let b: [u8; 4] = data
-        .get(offset..offset + 4)
-        .and_then(|s| s.try_into().ok())
-        .unwrap_or([0; 4]);
-    u32::from_le_bytes(b)
+    u32::from_le_bytes(read_fixed::<4>(data, offset))
 }
 
+#[inline(always)]
 fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    let b: [u8; 8] = data
-        .get(offset..offset + 8)
-        .and_then(|s| s.try_into().ok())
-        .unwrap_or([0; 8]);
-    u64::from_le_bytes(b)
+    u64::from_le_bytes(read_fixed::<8>(data, offset))
+}
+
+#[inline(always)]
+fn read_fixed<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
+    debug_assert!(offset + N <= data.len());
+    // Safety: callers ensure `offset + N <= data.len()` via upfront payload checks.
+    unsafe { (data.as_ptr().add(offset) as *const [u8; N]).read_unaligned() }
 }
 
 fn read_i32_le(data: &[u8], offset: usize) -> i32 {
@@ -239,13 +242,22 @@ fn parse_page_fault(event: Event, data: &[u8]) -> Result<PageFaultEvent, ParseEr
 /// File descriptor open/close event: types 11-12. Payload: 72 bytes.
 fn parse_fd(event: Event, data: &[u8]) -> Result<FDEvent, ParseError> {
     ensure_payload(data, 72, "FD event")?;
-    let filename_bytes = data.get(8..72).unwrap_or(&[]);
-    let null_pos = filename_bytes
-        .iter()
-        .position(|&b| b == 0)
-        .unwrap_or(filename_bytes.len());
-    let trimmed = filename_bytes.get(..null_pos).unwrap_or(&[]);
-    let filename = String::from_utf8_lossy(trimmed).into_owned();
+    // Safety: ensure_payload above guarantees `data[8..72]` is in-bounds.
+    let filename_bytes = unsafe { data.get_unchecked(8..72) };
+    let filename = if filename_bytes.first().copied().unwrap_or(0) == 0 {
+        String::new()
+    } else {
+        let null_pos = filename_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(filename_bytes.len());
+        let trimmed = filename_bytes.get(..null_pos).unwrap_or(&[]);
+
+        match std::str::from_utf8(trimmed) {
+            Ok(s) => s.to_owned(),
+            Err(_) => String::from_utf8_lossy(trimmed).into_owned(),
+        }
+    };
     Ok(FDEvent {
         event,
         fd: read_i32_le(data, 0),
