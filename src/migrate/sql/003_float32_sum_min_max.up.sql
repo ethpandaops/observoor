@@ -1,6 +1,6 @@
 -- Migration 003: Int64 → Float32 for sum/min/max columns
 -- Reduces compressed storage ~48% with negligible precision loss for monitoring data.
--- ALTER MODIFY COLUMN runs as a background mutation; no downtime required.
+-- ALTER MODIFY COLUMN runs as a background mutation. No downtime required.
 
 --------------------------------------------------------------------------------
 -- LATENCY TABLES (14) — modify sum, min, max

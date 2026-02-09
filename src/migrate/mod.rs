@@ -256,11 +256,15 @@ impl Migrator for ClickHouseMigrator {
 
 /// Splits SQL text into individual statements by semicolons.
 ///
-/// Handles empty lines, comments, and whitespace-only segments.
+/// Filters out empty segments and comment-only fragments (lines starting with `--`).
 fn split_statements(sql: &str) -> Vec<&str> {
     sql.split(';')
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())
+        .filter(|s| {
+            s.lines()
+                .any(|line| !line.trim().is_empty() && !line.trim().starts_with("--"))
+        })
         .collect()
 }
 
@@ -300,6 +304,14 @@ mod tests {
         let sql = "SELECT 1;;;";
         let stmts = split_statements(sql);
         assert_eq!(stmts.len(), 1);
+    }
+
+    #[test]
+    fn test_split_statements_comment_only_fragments() {
+        let sql = "-- header comment; with semicolon\nALTER TABLE foo MODIFY COLUMN x Int32;";
+        let stmts = split_statements(sql);
+        assert_eq!(stmts.len(), 1);
+        assert!(stmts[0].contains("ALTER TABLE"));
     }
 
     #[test]
