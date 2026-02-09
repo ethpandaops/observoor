@@ -5,7 +5,9 @@ use dashmap::DashMap;
 use crate::tracer::event::EventType;
 
 use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
-use super::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
+use super::dimension::{
+    BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+};
 
 /// Thread-safe aggregation buffer that collects events and aggregates
 /// them by dimension over a time window.
@@ -26,6 +28,8 @@ pub struct Buffer {
     pub el_optimistic: bool,
     /// Whether the execution layer is offline.
     pub el_offline: bool,
+    /// Number of online CPU cores on the host.
+    pub system_cores: u16,
 
     // --- Syscalls (BasicDimension -> LatencyAggregate) ---
     pub syscall_read: DashMap<BasicDimension, LatencyAggregate>,
@@ -53,6 +57,7 @@ pub struct Buffer {
 
     // --- Scheduler (BasicDimension -> LatencyAggregate) ---
     pub sched_on_cpu: DashMap<BasicDimension, LatencyAggregate>,
+    pub cpu_on_core: DashMap<CpuCoreDimension, CounterAggregate>,
     pub sched_off_cpu: DashMap<BasicDimension, LatencyAggregate>,
     pub sched_runqueue: DashMap<BasicDimension, LatencyAggregate>,
 
@@ -83,6 +88,7 @@ impl Buffer {
         cl_syncing: bool,
         el_optimistic: bool,
         el_offline: bool,
+        system_cores: u16,
     ) -> Self {
         Self {
             start_time,
@@ -91,6 +97,7 @@ impl Buffer {
             cl_syncing,
             el_optimistic,
             el_offline,
+            system_cores,
             // Syscalls.
             syscall_read: DashMap::with_capacity(16),
             syscall_write: DashMap::with_capacity(16),
@@ -113,6 +120,7 @@ impl Buffer {
             block_merge: DashMap::with_capacity(16),
             // Scheduler.
             sched_on_cpu: DashMap::with_capacity(16),
+            cpu_on_core: DashMap::with_capacity(64),
             sched_off_cpu: DashMap::with_capacity(16),
             sched_runqueue: DashMap::with_capacity(16),
             // Page faults.
@@ -192,8 +200,16 @@ impl Buffer {
     }
 
     /// Adds a scheduler switch event (on-CPU time).
-    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64) {
+    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
         self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
+        self.cpu_on_core
+            .entry(CpuCoreDimension {
+                pid: dim.pid,
+                client_type: dim.client_type,
+                cpu_id,
+            })
+            .or_default()
+            .add(on_cpu_ns as i64);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.
@@ -282,6 +298,7 @@ mod tests {
             false,
             false,
             false,
+            16,
         )
     }
 
@@ -369,6 +386,48 @@ mod tests {
         assert_eq!(bytes.snapshot().sum, 4096);
         let qd = buf.disk_queue_depth.get(&dim).expect("queue depth exists");
         assert_eq!(qd.snapshot().sum, 3);
+    }
+
+    #[test]
+    fn test_add_sched_switch_tracks_per_core() {
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 1,
+            client_type: 1,
+        };
+
+        buf.add_sched_switch(dim, 1_000, 2);
+        buf.add_sched_switch(dim, 2_000, 2);
+        buf.add_sched_switch(dim, 500, 4);
+
+        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
+        let on_cpu_snap = on_cpu.snapshot();
+        assert_eq!(on_cpu_snap.count, 3);
+        assert_eq!(on_cpu_snap.sum, 3_500);
+
+        let core2 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 1,
+                client_type: 1,
+                cpu_id: 2,
+            })
+            .expect("core 2 exists");
+        let core2_snap = core2.snapshot();
+        assert_eq!(core2_snap.count, 2);
+        assert_eq!(core2_snap.sum, 3_000);
+
+        let core4 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 1,
+                client_type: 1,
+                cpu_id: 4,
+            })
+            .expect("core 4 exists");
+        let core4_snap = core4.snapshot();
+        assert_eq!(core4_snap.count, 1);
+        assert_eq!(core4_snap.sum, 500);
     }
 
     #[test]

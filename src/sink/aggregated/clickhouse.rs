@@ -8,7 +8,9 @@ use clickhouse_rs::Pool;
 
 use crate::export::health::HealthMetrics;
 
-use super::metric::{BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch};
+use super::metric::{
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+};
 
 /// ClickHouse batch exporter for aggregated metrics.
 ///
@@ -30,6 +32,70 @@ impl ClickHouseExporter {
         }
     }
 
+    /// Inserts CPU utilization metrics into the cpu_utilization table.
+    async fn export_cpu_util_table(
+        &self,
+        metrics: &[CpuUtilMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.cpu_utilization", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, total_on_cpu_ns, event_count, active_cores, system_cores, \
+             max_core_on_cpu_ns, max_core_id, mean_core_pct, min_core_pct, max_core_pct, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 240);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let total_on_cpu_ns = m.total_on_cpu_ns as f32;
+            let max_core_on_cpu_ns = m.max_core_on_cpu_ns as f32;
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                 {total_on_cpu_ns}, {}, {}, {}, {max_core_on_cpu_ns}, {}, {}, {}, {}, \
+                 '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.event_count,
+                m.active_cores,
+                m.system_cores,
+                m.max_core_id,
+                m.mean_core_pct,
+                m.min_core_pct,
+                m.max_core_pct,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for cpu utilization insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("cpu_utilization");
+            return Err(e).context("sending cpu_utilization batch");
+        }
+
+        Ok(())
+    }
     /// Inserts latency metrics into a specific table.
     async fn export_latency_table(
         &self,
@@ -395,6 +461,13 @@ impl ClickHouseExporter {
                 .await?;
             total_rows += group.len();
             gauge_remaining = rest;
+        }
+
+        // Export CPU utilization summary metrics.
+        if !batch.cpu_util.is_empty() {
+            self.export_cpu_util_table(&batch.cpu_util, &batch.metadata)
+                .await?;
+            total_rows += batch.cpu_util.len();
         }
 
         if total_rows > 0 {

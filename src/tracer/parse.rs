@@ -216,6 +216,7 @@ fn parse_sched(event: Event, data: &[u8]) -> Result<SchedEvent, ParseError> {
         event,
         on_cpu_ns: read_u64_le(data, 0),
         voluntary: read_u8(data, 8) != 0,
+        cpu_id: read_u32_le(data, 12),
     })
 }
 
@@ -572,7 +573,8 @@ mod tests {
         let mut data = header(6_000_000, 105, 205, 9, 6); // SchedSwitch, Prysm
         data.extend_from_slice(&100_000u64.to_le_bytes());
         data.push(1); // voluntary
-        data.extend_from_slice(&[0u8; 7]);
+        data.extend_from_slice(&[0u8; 3]);
+        data.extend_from_slice(&9u32.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
@@ -580,6 +582,7 @@ mod tests {
         };
         assert_eq!(e.on_cpu_ns, 100_000);
         assert!(e.voluntary);
+        assert_eq!(e.cpu_id, 9);
     }
 
     #[test]
@@ -587,7 +590,8 @@ mod tests {
         let mut data = header(6_000_000, 105, 205, 9, 6);
         data.extend_from_slice(&200_000u64.to_le_bytes());
         data.push(0); // involuntary
-        data.extend_from_slice(&[0u8; 7]);
+        data.extend_from_slice(&[0u8; 3]);
+        data.extend_from_slice(&15u32.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
@@ -595,6 +599,7 @@ mod tests {
         };
         assert_eq!(e.on_cpu_ns, 200_000);
         assert!(!e.voluntary);
+        assert_eq!(e.cpu_id, 15);
     }
 
     #[test]

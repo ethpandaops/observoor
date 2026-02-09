@@ -25,6 +25,11 @@ static MIGRATIONS: &[Migration] = &[
         up_sql: include_str!("sql/003_float32_sum_min_max.up.sql"),
         down_sql: include_str!("sql/003_float32_sum_min_max.down.sql"),
     },
+    Migration {
+        version: 4,
+        up_sql: include_str!("sql/004_cpu_utilization.up.sql"),
+        down_sql: include_str!("sql/004_cpu_utilization.down.sql"),
+    },
 ];
 
 /// Manages ClickHouse schema migrations.

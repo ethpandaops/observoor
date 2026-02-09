@@ -990,6 +990,8 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     // prev_state > 0 means the task was preempted (involuntary),
     // prev_state == 0 means the task voluntarily yielded.
     e->voluntary = (ctx->prev_state == 0) ? 1 : 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
+    e->cpu_id = bpf_get_smp_processor_id();
 
     bpf_ringbuf_submit(e, 0);
     return 0;

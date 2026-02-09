@@ -8,7 +8,7 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::HttpExportConfig;
 
-use super::metric::{CounterMetric, GaugeMetric, LatencyMetric, MetricBatch};
+use super::metric::{CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch};
 
 /// Number of histogram buckets.
 const NUM_BUCKETS: usize = 10;
@@ -74,6 +74,24 @@ pub struct AggregatedMetricJson {
     pub device_id: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rw: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_on_cpu_ns: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_cores: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub system_cores: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_core_on_cpu_ns: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_core_id: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_core_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_core_pct: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_core_pct: Option<f32>,
     #[serde(skip_serializing_if = "is_arc_str_empty")]
     pub meta_client_name: Arc<str>,
     #[serde(skip_serializing_if = "is_arc_str_empty")]
@@ -95,6 +113,7 @@ fn is_arc_str_empty(v: &Arc<str>) -> bool {
 #[derive(Clone)]
 struct SharedBatchStrings {
     updated_date_time: Arc<str>,
+    window_start: Arc<str>,
     wallclock_slot_start_date_time: Arc<str>,
     meta_client_name: Arc<str>,
     meta_network_name: Arc<str>,
@@ -122,18 +141,21 @@ impl HttpExporter {
     }
 
     fn shared_strings(batch: &MetricBatch) -> Option<SharedBatchStrings> {
-        let slot_start = if let Some(m) = batch.latency.first() {
-            m.slot.start_time
+        let (window_start, slot_start) = if let Some(m) = batch.latency.first() {
+            (m.window.start, m.slot.start_time)
         } else if let Some(m) = batch.counter.first() {
-            m.slot.start_time
+            (m.window.start, m.slot.start_time)
         } else if let Some(m) = batch.gauge.first() {
-            m.slot.start_time
+            (m.window.start, m.slot.start_time)
+        } else if let Some(m) = batch.cpu_util.first() {
+            (m.window.start, m.slot.start_time)
         } else {
             return None;
         };
 
         Some(SharedBatchStrings {
             updated_date_time: Arc::from(format_datetime(batch.metadata.updated_time)),
+            window_start: Arc::from(format_datetime(window_start)),
             wallclock_slot_start_date_time: Arc::from(format_datetime(slot_start)),
             meta_client_name: Arc::clone(&batch.metadata.client_name),
             meta_network_name: Arc::clone(&batch.metadata.network_name),
@@ -145,7 +167,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::from(format_datetime(m.window.start)),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -160,6 +182,15 @@ impl HttpExporter {
             direction: None,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -170,7 +201,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::from(format_datetime(m.window.start)),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -185,6 +216,15 @@ impl HttpExporter {
             direction: m.direction,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -195,7 +235,7 @@ impl HttpExporter {
         AggregatedMetricJson {
             metric_type: m.metric_type,
             updated_date_time: Arc::clone(&shared.updated_date_time),
-            window_start: Arc::from(format_datetime(m.window.start)),
+            window_start: Arc::clone(&shared.window_start),
             interval_ms: m.window.interval_ms,
             wallclock_slot: m.slot.number,
             wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
@@ -210,6 +250,49 @@ impl HttpExporter {
             direction: None,
             device_id: m.device_id.unwrap_or(0),
             rw: m.rw,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
+        }
+    }
+
+    /// Converts a CPU utilization metric to JSON.
+    fn cpu_util_to_json(m: &CpuUtilMetric, shared: &SharedBatchStrings) -> AggregatedMetricJson {
+        AggregatedMetricJson {
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::clone(&shared.window_start),
+            interval_ms: m.window.interval_ms,
+            wallclock_slot: m.slot.number,
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
+            pid: m.pid,
+            client_type: m.client_type.as_str(),
+            sum: m.total_on_cpu_ns,
+            count: m.event_count,
+            min: None,
+            max: None,
+            histogram: None,
+            local_port: 0,
+            direction: None,
+            device_id: 0,
+            rw: None,
+            total_on_cpu_ns: Some(m.total_on_cpu_ns),
+            event_count: Some(m.event_count),
+            active_cores: Some(m.active_cores),
+            system_cores: Some(m.system_cores),
+            max_core_on_cpu_ns: Some(m.max_core_on_cpu_ns),
+            max_core_id: Some(m.max_core_id),
+            mean_core_pct: Some(m.mean_core_pct),
+            min_core_pct: Some(m.min_core_pct),
+            max_core_pct: Some(m.max_core_pct),
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -411,13 +494,19 @@ impl HttpExporter {
         // Convert all metrics to JSON items and enqueue.
         for (i, m) in batch.latency.iter().enumerate() {
             if tx.capacity() == 0 {
-                dropped += batch.latency.len() - i + batch.counter.len() + batch.gauge.len();
+                dropped += batch.latency.len() - i
+                    + batch.counter.len()
+                    + batch.gauge.len()
+                    + batch.cpu_util.len();
                 break;
             }
 
             let json = Self::latency_to_json(m, &shared);
             if tx.try_send(json).is_err() {
-                dropped += batch.latency.len() - i + batch.counter.len() + batch.gauge.len();
+                dropped += batch.latency.len() - i
+                    + batch.counter.len()
+                    + batch.gauge.len()
+                    + batch.cpu_util.len();
                 break;
             }
         }
@@ -425,13 +514,13 @@ impl HttpExporter {
         if dropped == 0 {
             for (i, m) in batch.counter.iter().enumerate() {
                 if tx.capacity() == 0 {
-                    dropped += batch.counter.len() - i + batch.gauge.len();
+                    dropped += batch.counter.len() - i + batch.gauge.len() + batch.cpu_util.len();
                     break;
                 }
 
                 let json = Self::counter_to_json(m, &shared);
                 if tx.try_send(json).is_err() {
-                    dropped += batch.counter.len() - i + batch.gauge.len();
+                    dropped += batch.counter.len() - i + batch.gauge.len() + batch.cpu_util.len();
                     break;
                 }
             }
@@ -440,13 +529,28 @@ impl HttpExporter {
         if dropped == 0 {
             for (i, m) in batch.gauge.iter().enumerate() {
                 if tx.capacity() == 0 {
-                    dropped += batch.gauge.len() - i;
+                    dropped += batch.gauge.len() - i + batch.cpu_util.len();
                     break;
                 }
 
                 let json = Self::gauge_to_json(m, &shared);
                 if tx.try_send(json).is_err() {
-                    dropped += batch.gauge.len() - i;
+                    dropped += batch.gauge.len() - i + batch.cpu_util.len();
+                    break;
+                }
+            }
+        }
+
+        if dropped == 0 {
+            for (i, m) in batch.cpu_util.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.cpu_util.len() - i;
+                    break;
+                }
+
+                let json = Self::cpu_util_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.cpu_util.len() - i;
                     break;
                 }
             }
@@ -748,6 +852,15 @@ mod tests {
             direction: None,
             device_id: 0,
             rw: None,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
             meta_client_name: Arc::from("test-node"),
             meta_network_name: Arc::from("mainnet"),
         };

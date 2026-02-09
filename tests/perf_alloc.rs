@@ -216,7 +216,7 @@ fn parse_mixed_batch_allocation_budget() {
 fn collect_empty_buffer_allocation_budget() {
     let collector = Collector::new(Duration::from_millis(200));
     let now = SystemTime::now();
-    let buffer = Buffer::new(now, 42, now, false, false, false);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
     let meta = BatchMetadata {
         client_name: "alloc-test".into(),
         network_name: "hoodi".into(),

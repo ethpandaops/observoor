@@ -181,7 +181,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
 fn build_collector_input(cardinality: u32, repeats: usize) -> (Collector, Buffer, BatchMetadata) {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let collector = Collector::new(Duration::from_millis(200));
-    let buffer = Buffer::new(now, 42, now, false, false, false);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     for i in 0..cardinality {
         let pid = 4_000 + i;
