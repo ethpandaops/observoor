@@ -30,6 +30,11 @@ static MIGRATIONS: &[Migration] = &[
         up_sql: include_str!("sql/004_cpu_utilization.up.sql"),
         down_sql: include_str!("sql/004_cpu_utilization.down.sql"),
     },
+    Migration {
+        version: 5,
+        up_sql: include_str!("sql/005_port_labels.up.sql"),
+        down_sql: include_str!("sql/005_port_labels.down.sql"),
+    },
 ];
 
 /// Manages ClickHouse schema migrations.

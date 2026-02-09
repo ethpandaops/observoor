@@ -188,15 +188,12 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             buf.add_disk_io(disk, e.latency_ns, e.bytes, e.queue_depth);
         }
         TypedEvent::NetIO(e) => {
-            let local_port = if e.direction == Direction::TX {
-                e.src_port
-            } else {
-                e.dst_port
-            };
+            // In production, port_label is resolved via config's port_label_map.
+            // Here we use 0 (Unknown) since we don't have a port map.
             let net = NetworkDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                local_port,
+                port_label: 0,
                 direction: e.direction as u8,
             };
             buf.add_net_io(net, i64::from(e.bytes));
@@ -204,7 +201,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
                 let tcp = TCPMetricsDimension {
                     pid: event.raw.pid,
                     client_type: event.raw.client_type as u8,
-                    local_port,
+                    port_label: 0,
                 };
                 buf.add_tcp_metrics(tcp, e.srtt_us, e.cwnd);
             }
@@ -213,7 +210,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             let net = NetworkDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                local_port: e.src_port,
+                port_label: 0,
                 direction: Direction::TX as u8,
             };
             buf.add_tcp_retransmit(net, i64::from(e.bytes));

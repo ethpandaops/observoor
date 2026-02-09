@@ -173,12 +173,15 @@ impl Agent {
         let client_types = pid::resolve_client_types(&pids);
         self.update_pids_by_client(&client_types);
 
-        // 5b. Discover well-known ports for port whitelist.
+        // 5b. Discover well-known ports and resolve port labels.
         let port_infos = ports::discover_ports(&pids, &client_types);
-        let all_ports = ports::all_tracked_ports(&port_infos);
-        if !all_ports.is_empty() {
-            let port_list: Vec<u16> = all_ports.iter().copied().collect();
-            info!(ports = ?port_list, "discovered well-known ports");
+        let port_label_map = ports::all_port_labels(&port_infos);
+        if !port_label_map.is_empty() {
+            let mappings: Vec<(u16, &str)> = port_label_map
+                .iter()
+                .map(|(&port, label)| (port, label.as_str()))
+                .collect();
+            info!(mappings = ?mappings, "discovered port label mappings");
         }
 
         // 6. Create and configure aggregated sink.
@@ -187,7 +190,7 @@ impl Agent {
             self.cfg.meta_client_name.clone(),
             self.cfg.meta_network_name.clone(),
         );
-        sink.set_port_whitelist(all_ports);
+        sink.set_port_label_map(port_label_map);
 
         // Add ClickHouse exporter if enabled.
         if self.cfg.sinks.aggregated.clickhouse.enabled {

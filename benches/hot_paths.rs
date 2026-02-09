@@ -97,15 +97,10 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             buf.add_disk_io(disk, e.latency_ns, e.bytes, e.queue_depth);
         }
         TypedEvent::NetIO(e) => {
-            let local_port = if e.direction == Direction::TX {
-                e.src_port
-            } else {
-                e.dst_port
-            };
             let net = NetworkDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                local_port,
+                port_label: 0, // Unknown in bench context
                 direction: e.direction as u8,
             };
             buf.add_net_io(net, i64::from(e.bytes));
@@ -113,7 +108,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
                 let tcp = TCPMetricsDimension {
                     pid: event.raw.pid,
                     client_type: event.raw.client_type as u8,
-                    local_port,
+                    port_label: 0,
                 };
                 buf.add_tcp_metrics(tcp, e.srtt_us, e.cwnd);
             }
@@ -122,7 +117,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             let net = NetworkDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                local_port: e.src_port,
+                port_label: 0,
                 direction: Direction::TX as u8,
             };
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
@@ -192,13 +187,13 @@ fn build_collector_input(cardinality: u32, repeats: usize) -> (Collector, Buffer
         let net = NetworkDimension {
             pid,
             client_type: 1,
-            local_port: 30_303,
+            port_label: 1, // ElP2PTcp
             direction: (i % 2) as u8,
         };
         let tcp = TCPMetricsDimension {
             pid,
             client_type: 1,
-            local_port: 30_303,
+            port_label: 1, // ElP2PTcp
         };
         let disk = DiskDimension {
             pid,
@@ -282,13 +277,13 @@ fn bench_buffer_ingest(c: &mut Criterion) {
                             let net = NetworkDimension {
                                 pid,
                                 client_type: 1,
-                                local_port: 30_303,
+                                port_label: 1, // ElP2PTcp
                                 direction: (i % 2) as u8,
                             };
                             let tcp = TCPMetricsDimension {
                                 pid,
                                 client_type: 1,
-                                local_port: 30_303,
+                                port_label: 1, // ElP2PTcp
                             };
                             let disk = DiskDimension {
                                 pid,
@@ -456,7 +451,7 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: None,
             rw: None,
-            local_port: None,
+            port_label: None,
             direction: None,
             sum: 1,
             count: 1,
@@ -471,7 +466,7 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: None,
             rw: None,
-            local_port: Some(30_303),
+            port_label: Some("el_p2p_tcp"),
             direction: Some("tx"),
             sum: 1_500,
             count: 1,
@@ -488,7 +483,7 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: None,
             rw: None,
-            local_port: Some(30_303),
+            port_label: Some("el_p2p_tcp"),
             sum: 110,
             count: 1,
             min: 110,
@@ -504,7 +499,7 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: Some(259),
             rw: Some("write"),
-            local_port: None,
+            port_label: None,
             sum: 8,
             count: 1,
             min: 8,

@@ -135,9 +135,12 @@ impl AggregatedSink {
         }
     }
 
-    /// Sets the port whitelist for network dimensions.
-    pub fn set_port_whitelist(&mut self, ports: std::collections::HashSet<u16>) {
-        self.cfg.dimensions.network.set_port_whitelist(ports);
+    /// Sets the port-to-label map for network dimensions.
+    pub fn set_port_label_map(
+        &mut self,
+        map: std::collections::HashMap<u16, crate::agent::ports::PortLabel>,
+    ) {
+        self.cfg.dimensions.network.set_port_label_map(map);
     }
 
     /// Creates a new buffer with current sync state.
@@ -620,7 +623,7 @@ fn build_network_dimension(
     let mut dim = NetworkDimension {
         pid,
         client_type,
-        local_port: 0,
+        port_label: 0,
         direction: 0,
     };
 
@@ -630,7 +633,7 @@ fn build_network_dimension(
 
     if dims.network.include_port {
         let port = local_port(e);
-        dim.local_port = dims.network.filter_port(port);
+        dim.port_label = dims.network.resolve_port_label(port);
     }
 
     dim
@@ -646,12 +649,12 @@ fn build_network_dimension_from_tcp_retransmit(
     let mut dim = NetworkDimension {
         pid,
         client_type,
-        local_port: 0,
+        port_label: 0,
         direction: 0, // Retransmits are always TX.
     };
 
     if dims.network.include_port {
-        dim.local_port = dims.network.filter_port(src_port);
+        dim.port_label = dims.network.resolve_port_label(src_port);
     }
 
     dim
@@ -667,12 +670,12 @@ fn build_tcp_metrics_dim_from_net_io(
     let mut dim = TCPMetricsDimension {
         pid,
         client_type,
-        local_port: 0,
+        port_label: 0,
     };
 
     if dims.network.include_port {
         let port = local_port(e);
-        dim.local_port = dims.network.filter_port(port);
+        dim.port_label = dims.network.resolve_port_label(port);
     }
 
     dim
@@ -1169,7 +1172,7 @@ mod tests {
         };
 
         let net_dim = build_network_dimension(1, 1, &net_event, &dims);
-        assert_eq!(net_dim.local_port, 0);
+        assert_eq!(net_dim.port_label, 0);
         assert_eq!(net_dim.direction, 0);
 
         let disk_dim = build_disk_dimension(1, 1, 259, 1, &dims);
