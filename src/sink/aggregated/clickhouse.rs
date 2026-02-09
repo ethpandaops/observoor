@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -31,38 +30,11 @@ impl ClickHouseExporter {
         }
     }
 
-    /// Groups latency metrics by table name.
-    fn group_latency_by_table(metrics: &[LatencyMetric]) -> HashMap<&str, Vec<&LatencyMetric>> {
-        let mut result: HashMap<&str, Vec<&LatencyMetric>> = HashMap::with_capacity(16);
-        for m in metrics {
-            result.entry(m.metric_type).or_default().push(m);
-        }
-        result
-    }
-
-    /// Groups counter metrics by table name.
-    fn group_counter_by_table(metrics: &[CounterMetric]) -> HashMap<&str, Vec<&CounterMetric>> {
-        let mut result: HashMap<&str, Vec<&CounterMetric>> = HashMap::with_capacity(16);
-        for m in metrics {
-            result.entry(m.metric_type).or_default().push(m);
-        }
-        result
-    }
-
-    /// Groups gauge metrics by table name.
-    fn group_gauge_by_table(metrics: &[GaugeMetric]) -> HashMap<&str, Vec<&GaugeMetric>> {
-        let mut result: HashMap<&str, Vec<&GaugeMetric>> = HashMap::with_capacity(4);
-        for m in metrics {
-            result.entry(m.metric_type).or_default().push(m);
-        }
-        result
-    }
-
     /// Inserts latency metrics into a specific table.
     async fn export_latency_table(
         &self,
         table_name: &str,
-        metrics: &[&LatencyMetric],
+        metrics: &[LatencyMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
         let Some(first) = metrics.first() else {
@@ -151,7 +123,7 @@ impl ClickHouseExporter {
     async fn export_counter_table(
         &self,
         table_name: &str,
-        metrics: &[&CounterMetric],
+        metrics: &[CounterMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
         let Some(first) = metrics.first() else {
@@ -251,7 +223,7 @@ impl ClickHouseExporter {
     async fn export_gauge_table(
         &self,
         table_name: &str,
-        metrics: &[&GaugeMetric],
+        metrics: &[GaugeMetric],
         meta: &BatchMetadata,
     ) -> Result<()> {
         let Some(first) = metrics.first() else {
@@ -380,28 +352,49 @@ impl ClickHouseExporter {
     pub async fn export(&self, batch: &MetricBatch) -> Result<()> {
         let mut total_rows = 0;
 
-        // Export latency metrics grouped by table.
-        let latency_by_table = Self::group_latency_by_table(&batch.latency);
-        for (table, metrics) in &latency_by_table {
-            self.export_latency_table(table, metrics, &batch.metadata)
+        // Export latency metrics grouped by contiguous table spans.
+        let mut latency_remaining = batch.latency.as_slice();
+        while let Some(first) = latency_remaining.first() {
+            let table = first.metric_type;
+            let group_len = latency_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = latency_remaining.split_at(group_len);
+            self.export_latency_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += metrics.len();
+            total_rows += group.len();
+            latency_remaining = rest;
         }
 
-        // Export counter metrics grouped by table.
-        let counter_by_table = Self::group_counter_by_table(&batch.counter);
-        for (table, metrics) in &counter_by_table {
-            self.export_counter_table(table, metrics, &batch.metadata)
+        // Export counter metrics grouped by contiguous table spans.
+        let mut counter_remaining = batch.counter.as_slice();
+        while let Some(first) = counter_remaining.first() {
+            let table = first.metric_type;
+            let group_len = counter_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = counter_remaining.split_at(group_len);
+            self.export_counter_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += metrics.len();
+            total_rows += group.len();
+            counter_remaining = rest;
         }
 
-        // Export gauge metrics grouped by table.
-        let gauge_by_table = Self::group_gauge_by_table(&batch.gauge);
-        for (table, metrics) in &gauge_by_table {
-            self.export_gauge_table(table, metrics, &batch.metadata)
+        // Export gauge metrics grouped by contiguous table spans.
+        let mut gauge_remaining = batch.gauge.as_slice();
+        while let Some(first) = gauge_remaining.first() {
+            let table = first.metric_type;
+            let group_len = gauge_remaining
+                .iter()
+                .take_while(|m| m.metric_type == table)
+                .count();
+            let (group, rest) = gauge_remaining.split_at(group_len);
+            self.export_gauge_table(table, group, &batch.metadata)
                 .await?;
-            total_rows += metrics.len();
+            total_rows += group.len();
+            gauge_remaining = rest;
         }
 
         if total_rows > 0 {
@@ -521,7 +514,6 @@ fn format_histogram(h: &[u32]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracer::event::ClientType;
 
     #[test]
     fn test_format_datetime() {
@@ -553,79 +545,5 @@ mod tests {
     fn test_format_histogram_empty() {
         let h: Vec<u32> = vec![];
         assert_eq!(format_histogram(&h), "(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)");
-    }
-
-    #[test]
-    fn test_group_latency_by_table() {
-        use crate::sink::aggregated::metric::{SlotInfo, WindowInfo};
-
-        let now = SystemTime::now();
-        let metrics = vec![
-            LatencyMetric {
-                metric_type: "syscall_read",
-                window: WindowInfo {
-                    start: now,
-                    interval_ms: 1000,
-                },
-                slot: SlotInfo {
-                    number: 1,
-                    start_time: now,
-                },
-                pid: 1,
-                client_type: ClientType::Geth,
-                device_id: None,
-                rw: None,
-                sum: 100,
-                count: 10,
-                min: 5,
-                max: 20,
-                histogram: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
-            },
-            LatencyMetric {
-                metric_type: "syscall_read",
-                window: WindowInfo {
-                    start: now,
-                    interval_ms: 1000,
-                },
-                slot: SlotInfo {
-                    number: 1,
-                    start_time: now,
-                },
-                pid: 2,
-                client_type: ClientType::Reth,
-                device_id: None,
-                rw: None,
-                sum: 200,
-                count: 20,
-                min: 10,
-                max: 40,
-                histogram: [2, 4, 6, 8, 10, 12, 14, 16, 18, 20],
-            },
-            LatencyMetric {
-                metric_type: "disk_latency",
-                window: WindowInfo {
-                    start: now,
-                    interval_ms: 1000,
-                },
-                slot: SlotInfo {
-                    number: 1,
-                    start_time: now,
-                },
-                pid: 1,
-                client_type: ClientType::Geth,
-                device_id: Some(259),
-                rw: Some("write"),
-                sum: 50000,
-                count: 5,
-                min: 1000,
-                max: 20000,
-                histogram: [0, 0, 1, 2, 1, 1, 0, 0, 0, 0],
-            },
-        ];
-
-        let grouped = ClickHouseExporter::group_latency_by_table(&metrics);
-        assert_eq!(grouped.len(), 2);
-        assert_eq!(grouped.get("syscall_read").map(|v| v.len()), Some(2));
-        assert_eq!(grouped.get("disk_latency").map(|v| v.len()), Some(1));
     }
 }

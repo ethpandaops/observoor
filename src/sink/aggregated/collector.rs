@@ -27,6 +27,25 @@ impl Collector {
 
     /// Iterates the buffer once and returns all metrics.
     pub fn collect(&self, buf: &Buffer, meta: BatchMetadata) -> MetricBatch {
+        let latency_capacity = self.estimate_latency_capacity(buf);
+        let counter_capacity = self.estimate_counter_capacity(buf);
+        let gauge_capacity = self.estimate_gauge_capacity(buf);
+
+        let mut batch = MetricBatch {
+            metadata: meta,
+            latency: Vec::with_capacity(latency_capacity),
+            counter: Vec::with_capacity(counter_capacity),
+            gauge: Vec::with_capacity(gauge_capacity),
+        };
+
+        self.collect_into(buf, &mut batch);
+        batch
+    }
+
+    /// Iterates the buffer and writes metrics into an existing batch.
+    ///
+    /// Reuses existing vector allocations when capacities are sufficient.
+    pub fn collect_into(&self, buf: &Buffer, batch: &mut MetricBatch) {
         let window = WindowInfo {
             start: buf.start_time,
             interval_ms: self.interval_ms,
@@ -41,22 +60,21 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
 
-        let mut batch = MetricBatch {
-            metadata: meta,
-            latency: Vec::with_capacity(latency_capacity),
-            counter: Vec::with_capacity(counter_capacity),
-            gauge: Vec::with_capacity(gauge_capacity),
-        };
+        reserve_if_needed(&mut batch.latency, latency_capacity);
+        reserve_if_needed(&mut batch.counter, counter_capacity);
+        reserve_if_needed(&mut batch.gauge, gauge_capacity);
 
-        self.collect_basic_latency(&mut batch, buf, window, slot);
-        self.collect_disk_latency(&mut batch, buf, window, slot);
-        self.collect_basic_counters(&mut batch, buf, window, slot);
-        self.collect_network_counters(&mut batch, buf, window, slot);
-        self.collect_disk_counters(&mut batch, buf, window, slot);
-        self.collect_tcp_gauges(&mut batch, buf, window, slot);
-        self.collect_disk_gauges(&mut batch, buf, window, slot);
+        batch.latency.clear();
+        batch.counter.clear();
+        batch.gauge.clear();
 
-        batch
+        self.collect_basic_latency(batch, buf, window, slot);
+        self.collect_disk_latency(batch, buf, window, slot);
+        self.collect_basic_counters(batch, buf, window, slot);
+        self.collect_network_counters(batch, buf, window, slot);
+        self.collect_disk_counters(batch, buf, window, slot);
+        self.collect_tcp_gauges(batch, buf, window, slot);
+        self.collect_disk_gauges(batch, buf, window, slot);
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
@@ -374,6 +392,13 @@ fn client_type_from_u8(v: u8) -> ClientType {
     ClientType::from_u8(v).unwrap_or(ClientType::Unknown)
 }
 
+/// Ensures the vector can hold at least `required` items without reallocating.
+fn reserve_if_needed<T>(vec: &mut Vec<T>, required: usize) {
+    if vec.capacity() < required {
+        vec.reserve(required - vec.capacity());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::SystemTime;
@@ -584,5 +609,60 @@ mod tests {
         // verify the count == 0 guard works.
         let batch = collector.collect(&buf, test_meta());
         assert!(batch.is_empty());
+    }
+
+    #[test]
+    fn test_collect_into_matches_collect() {
+        let collector = Collector::new(Duration::from_secs(1));
+        let buf = test_buffer();
+        let basic = BasicDimension {
+            pid: 77,
+            client_type: 1,
+        };
+        let net = NetworkDimension {
+            pid: 77,
+            client_type: 1,
+            local_port: 30303,
+            direction: 0,
+        };
+
+        buf.add_syscall(EventType::SyscallRead, basic, 1_000);
+        buf.add_net_io(net, 4_096);
+        buf.add_fd_open(basic);
+
+        let direct = collector.collect(&buf, test_meta());
+        let mut reused = collector.collect(&buf, test_meta());
+        reused.metadata.updated_time = SystemTime::UNIX_EPOCH;
+        collector.collect_into(&buf, &mut reused);
+
+        assert_eq!(direct.len(), reused.len());
+        assert_eq!(direct.latency.len(), reused.latency.len());
+        assert_eq!(direct.counter.len(), reused.counter.len());
+        assert_eq!(direct.gauge.len(), reused.gauge.len());
+    }
+
+    #[test]
+    fn test_collect_into_reuses_capacity() {
+        let collector = Collector::new(Duration::from_secs(1));
+        let buf = test_buffer();
+        let basic = BasicDimension {
+            pid: 88,
+            client_type: 1,
+        };
+        for _ in 0..32 {
+            buf.add_syscall(EventType::SyscallRead, basic, 2_000);
+            buf.add_fd_open(basic);
+        }
+
+        let mut batch = collector.collect(&buf, test_meta());
+        let latency_capacity = batch.latency.capacity();
+        let counter_capacity = batch.counter.capacity();
+        let gauge_capacity = batch.gauge.capacity();
+
+        collector.collect_into(&buf, &mut batch);
+
+        assert_eq!(batch.latency.capacity(), latency_capacity);
+        assert_eq!(batch.counter.capacity(), counter_capacity);
+        assert_eq!(batch.gauge.capacity(), gauge_capacity);
     }
 }
