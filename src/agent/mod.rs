@@ -61,19 +61,19 @@ impl Agent {
 
     /// Start all components and begin observation.
     pub async fn start(&mut self) -> Result<()> {
-        // 0. Run migrations if enabled.
-        if self.cfg.sinks.aggregated.enabled
-            && self.cfg.sinks.aggregated.clickhouse.migrations.enabled
-        {
-            self.run_migrations().await?;
-        }
-
-        // 1. Start health metrics server.
+        // 0. Start health metrics server (before migrations so probes respond).
         self.health
             .start()
             .await
             .context("starting health metrics server")?;
         info!("health metrics server started");
+
+        // 1. Run migrations if enabled.
+        if self.cfg.sinks.aggregated.enabled
+            && self.cfg.sinks.aggregated.clickhouse.migrations.enabled
+        {
+            self.run_migrations().await?;
+        }
 
         // 2. Fetch genesis and spec from beacon node.
         let beacon = self.create_beacon_client()?;
