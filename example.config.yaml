@@ -72,16 +72,32 @@ sinks:
       default:
         mode: none
         rate: 1.0
-      # events:
-      #   syscall_futex:
-      #     mode: nth
-      #     rate: 0.1     # keep every 10th event
-      #   net_tx:
-      #     mode: probability
-      #     rate: 0.25
-      #   net_rx:
-      #     mode: probability
-      #     rate: 0.25
+      # Baseline profile-driven overrides for high-volume event streams.
+      events:
+        syscall_futex:
+          mode: nth
+          rate: 0.1     # keep every 10th
+        sched_switch:
+          mode: nth
+          rate: 0.2     # keep every 5th
+        sched_runqueue:
+          mode: nth
+          rate: 0.2     # keep every 5th
+        page_fault:
+          mode: nth
+          rate: 0.25    # keep every 4th
+        syscall_write:
+          mode: nth
+          rate: 0.5     # keep every 2nd
+        syscall_epoll_wait:
+          mode: nth
+          rate: 0.5     # keep every 2nd
+        net_tx:
+          mode: probability
+          rate: 0.5
+        net_rx:
+          mode: probability
+          rate: 0.5
     clickhouse:
       enabled: true
       endpoint: clickhouse:9000

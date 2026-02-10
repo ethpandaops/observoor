@@ -131,15 +131,24 @@ pub struct ResolutionConfig {
 }
 
 /// Sampling configuration for eBPF event emission.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct SamplingConfig {
     /// Default sampling policy for all events.
     #[serde(default)]
     pub default: EventSamplingRule,
 
     /// Per-event sampling overrides keyed by EventType label (e.g. "net_tx").
-    #[serde(default)]
+    #[serde(default = "default_sampling_event_rules")]
     pub events: HashMap<String, EventSamplingRule>,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            default: EventSamplingRule::default(),
+            events: default_sampling_event_rules(),
+        }
+    }
 }
 
 /// Sampling policy for a single event stream.
@@ -374,6 +383,67 @@ fn default_true() -> bool {
 
 fn default_sampling_rate() -> f32 {
     1.0
+}
+
+fn default_sampling_event_rules() -> HashMap<String, EventSamplingRule> {
+    HashMap::from([
+        (
+            "syscall_futex".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.1,
+            },
+        ),
+        (
+            "sched_switch".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.2,
+            },
+        ),
+        (
+            "sched_runqueue".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.2,
+            },
+        ),
+        (
+            "page_fault".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.25,
+            },
+        ),
+        (
+            "syscall_write".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        ),
+        (
+            "syscall_epoll_wait".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        ),
+        (
+            "net_tx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        ),
+        (
+            "net_rx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        ),
+    ])
 }
 
 fn default_resolution_interval() -> Duration {
@@ -1051,15 +1121,34 @@ mod tests {
     }
 
     #[test]
-    fn test_sampling_default_is_none() {
+    fn test_sampling_default_profile_rules() {
         let cfg = valid_config();
-        let rule = cfg
+        let futex = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::SyscallFutex)
+            .expect("sampling should resolve");
+        assert_eq!(futex.mode, EventSamplingMode::Nth);
+        assert!((futex.rate - 0.1).abs() < 0.0001);
+        assert_eq!(futex.nth, 10);
+
+        let net_tx = cfg
             .sinks
             .aggregated
             .sampling
             .resolved_rule_for_event(EventType::NetTX)
             .expect("sampling should resolve");
-        assert_eq!(rule, ResolvedSamplingRule::none());
+        assert_eq!(net_tx.mode, EventSamplingMode::Probability);
+        assert!((net_tx.rate - 0.5).abs() < 0.0001);
+
+        let disk = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::DiskIO)
+            .expect("sampling should resolve");
+        assert_eq!(disk, ResolvedSamplingRule::none());
     }
 
     #[test]
