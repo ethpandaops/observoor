@@ -1,5 +1,6 @@
 use std::time::{Duration, SystemTime};
 
+use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
 use observoor::sink::aggregated::dimension::{
@@ -293,7 +294,7 @@ fn gauge_totals(batch: &MetricBatch, metric_type: &str) -> (u32, i64) {
 #[test]
 fn pipeline_blackbox_correctness_and_invariants() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    let collector = Collector::new(Duration::from_millis(200));
+    let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     let p1 = 2_001;

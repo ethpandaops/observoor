@@ -316,6 +316,10 @@ impl Agent {
                 .await
                 .context("starting BPF tracer")?;
 
+            tracer
+                .update_sampling(&self.cfg.sinks.aggregated.sampling)
+                .context("updating event sampling in BPF map")?;
+
             // Populate PID and TID maps.
             tracer
                 .update_pids(&pids, &client_types)

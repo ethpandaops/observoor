@@ -4,7 +4,7 @@ use std::time::Duration;
 use crate::config::IntervalOverride;
 
 use super::collector::ALL_METRIC_NAMES;
-use super::metric::{CounterMetric, GaugeMetric, LatencyMetric, MetricBatch};
+use super::metric::{CounterMetric, GaugeMetric, LatencyMetric, MetricBatch, SamplingMode};
 
 /// Identity key for latency accumulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -14,6 +14,8 @@ struct LatencyKey {
     client_type: u8,
     device_id: Option<u32>,
     rw: Option<&'static str>,
+    sampling_mode: SamplingMode,
+    sampling_rate_bits: u32,
 }
 
 /// Identity key for counter accumulation.
@@ -26,6 +28,8 @@ struct CounterKey {
     rw: Option<&'static str>,
     port_label: Option<&'static str>,
     direction: Option<&'static str>,
+    sampling_mode: SamplingMode,
+    sampling_rate_bits: u32,
 }
 
 /// Identity key for gauge accumulation.
@@ -37,6 +41,8 @@ struct GaugeKey {
     device_id: Option<u32>,
     rw: Option<&'static str>,
     port_label: Option<&'static str>,
+    sampling_mode: SamplingMode,
+    sampling_rate_bits: u32,
 }
 
 #[derive(Debug)]
@@ -202,6 +208,8 @@ impl TieredFlushController {
             client_type: metric.client_type as u8,
             device_id: metric.device_id,
             rw: metric.rw,
+            sampling_mode: metric.sampling_mode,
+            sampling_rate_bits: metric.sampling_rate.to_bits(),
         };
 
         if let Some(existing) = tier.latency.get_mut(&key) {
@@ -227,6 +235,8 @@ impl TieredFlushController {
             rw: metric.rw,
             port_label: metric.port_label,
             direction: metric.direction,
+            sampling_mode: metric.sampling_mode,
+            sampling_rate_bits: metric.sampling_rate.to_bits(),
         };
 
         if let Some(existing) = tier.counter.get_mut(&key) {
@@ -246,6 +256,8 @@ impl TieredFlushController {
             device_id: metric.device_id,
             rw: metric.rw,
             port_label: metric.port_label,
+            sampling_mode: metric.sampling_mode,
+            sampling_rate_bits: metric.sampling_rate.to_bits(),
         };
 
         if let Some(existing) = tier.gauge.get_mut(&key) {
