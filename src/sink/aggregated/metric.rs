@@ -3,6 +3,28 @@ use std::time::SystemTime;
 
 use crate::tracer::event::ClientType;
 
+/// Sampling mode describing how a metric stream was reduced before aggregation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SamplingMode {
+    /// No sampling was applied; all events were retained.
+    None,
+    /// Probabilistic sampling retained events at `sampling_rate`.
+    Probability,
+    /// Every Nth event was retained (`sampling_rate` is 1/N).
+    Nth,
+}
+
+impl SamplingMode {
+    /// Returns the canonical string representation for storage/export.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Probability => "probability",
+            Self::Nth => "nth",
+        }
+    }
+}
+
 /// Metadata common to all metric batches.
 #[derive(Debug, Clone)]
 pub struct BatchMetadata {
@@ -45,6 +67,8 @@ pub struct LatencyMetric {
     pub device_id: Option<u32>,
     /// Read/write direction string (disk metrics only).
     pub rw: Option<&'static str>,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
     pub sum: i64,
     pub count: u32,
     pub min: i64,
@@ -70,6 +94,8 @@ pub struct CounterMetric {
     pub port_label: Option<&'static str>,
     /// Direction string "tx"/"rx" (network metrics only).
     pub direction: Option<&'static str>,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
     pub sum: i64,
     pub count: u32,
 }
@@ -89,6 +115,8 @@ pub struct GaugeMetric {
     pub rw: Option<&'static str>,
     /// Port label string (TCP metrics only).
     pub port_label: Option<&'static str>,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
     pub sum: i64,
     pub count: u32,
     pub min: i64,
@@ -103,6 +131,8 @@ pub struct CpuUtilMetric {
     pub slot: SlotInfo,
     pub pid: u32,
     pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
     pub total_on_cpu_ns: i64,
     pub event_count: u32,
     pub active_cores: u16,

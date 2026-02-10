@@ -33,6 +33,16 @@ const struct swap_event *__unused_swap_ev __attribute__((unused));
 const struct oom_kill_event *__unused_oom_kill_ev __attribute__((unused));
 const struct process_exit_event *__unused_proc_exit_ev __attribute__((unused));
 
+// block_rq_* tracepoint field layouts vary by kernel. Derive bytes from
+// nr_sector (always 512-byte sectors) to avoid relying on ctx->bytes offsets.
+static __always_inline __u32 sectors_to_bytes(__u32 nr_sector)
+{
+    __u64 bytes = ((__u64)nr_sector) << 9;
+    if (bytes > 0xFFFFFFFFULL)
+        return 0xFFFFFFFFU;
+    return (__u32)bytes;
+}
+
 // =========================================================
 // Syscall tracers: read, write, futex, mmap, epoll_wait
 // =========================================================
@@ -593,8 +603,8 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_local *ctx)
     bpf_probe_read_kernel(&dev, sizeof(dev), &ctx->dev);
     bpf_probe_read_kernel(&sector, sizeof(sector), &ctx->sector);
     bpf_probe_read_kernel(&nr_sector, sizeof(nr_sector), &ctx->nr_sector);
-    bpf_probe_read_kernel(&bytes, sizeof(bytes), &ctx->bytes);
     bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+    bytes = sectors_to_bytes(nr_sector);
 
     __u8 rw = (rwbs[0] == 'W') ? 1 : 0;
     struct req_key key = {};
@@ -656,8 +666,8 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
     bpf_probe_read_kernel(&dev, sizeof(dev), &ctx->dev);
     bpf_probe_read_kernel(&sector, sizeof(sector), &ctx->sector);
     bpf_probe_read_kernel(&nr_sector, sizeof(nr_sector), &ctx->nr_sector);
-    bpf_probe_read_kernel(&bytes, sizeof(bytes), &ctx->bytes);
     bpf_probe_read_kernel(&rwbs, sizeof(rwbs), &ctx->rwbs);
+    bytes = sectors_to_bytes(nr_sector);
 
     __u8 rw = (rwbs[0] == 'W') ? 1 : 0;
 

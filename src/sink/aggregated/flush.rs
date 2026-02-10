@@ -301,7 +301,8 @@ mod tests {
 
     use super::*;
     use crate::sink::aggregated::metric::{
-        BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo, WindowInfo,
+        BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, MetricBatch, SamplingMode,
+        SlotInfo, WindowInfo,
     };
 
     fn test_batch() -> MetricBatch {
@@ -340,6 +341,8 @@ mod tests {
             client_type: ClientType::Geth,
             device_id: None,
             rw: None,
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum,
             count,
             min,
@@ -370,6 +373,8 @@ mod tests {
             rw: None,
             port_label: None,
             direction: None,
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum,
             count,
         }
@@ -398,6 +403,8 @@ mod tests {
             device_id: None,
             rw: None,
             port_label: Some("el_p2p_tcp"),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum,
             count,
             min,

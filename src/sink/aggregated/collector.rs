@@ -10,8 +10,8 @@ use super::dimension::{
     NetworkDimension, TCPMetricsDimension,
 };
 use super::metric::{
-    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch, SlotInfo,
-    WindowInfo,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+    SamplingMode, SlotInfo, WindowInfo,
 };
 
 /// Canonical list of all metric names emitted by this collector.
@@ -203,6 +203,8 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: None,
                     rw: None,
+                    sampling_mode: SamplingMode::None,
+                    sampling_rate: 1.0,
                     sum: snap.sum,
                     count: snap.count,
                     min: snap.min,
@@ -236,6 +238,8 @@ impl Collector {
                 client_type: client_type_from_u8(dim.client_type),
                 device_id: Some(dim.device_id),
                 rw: Some(rw_string(dim.rw)),
+                sampling_mode: SamplingMode::None,
+                sampling_rate: 1.0,
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
@@ -283,6 +287,8 @@ impl Collector {
                     rw: None,
                     port_label: None,
                     direction: None,
+                    sampling_mode: SamplingMode::None,
+                    sampling_rate: 1.0,
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -321,6 +327,8 @@ impl Collector {
                     rw: None,
                     port_label: Some(port_label_string(dim.port_label)),
                     direction: Some(direction_string(dim.direction)),
+                    sampling_mode: SamplingMode::None,
+                    sampling_rate: 1.0,
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -359,6 +367,8 @@ impl Collector {
                     rw: Some(rw_string(dim.rw)),
                     port_label: None,
                     direction: None,
+                    sampling_mode: SamplingMode::None,
+                    sampling_rate: 1.0,
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -394,6 +404,8 @@ impl Collector {
                     device_id: None,
                     rw: None,
                     port_label: Some(port_label_string(dim.port_label)),
+                    sampling_mode: SamplingMode::None,
+                    sampling_rate: 1.0,
                     sum: snap.sum,
                     count: snap.count,
                     min: snap.min,
@@ -427,6 +439,8 @@ impl Collector {
                 device_id: Some(dim.device_id),
                 rw: Some(rw_string(dim.rw)),
                 port_label: None,
+                sampling_mode: SamplingMode::None,
+                sampling_rate: 1.0,
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
@@ -517,6 +531,8 @@ impl Collector {
                 slot,
                 pid,
                 client_type: client_type_from_u8(client_type),
+                sampling_mode: SamplingMode::None,
+                sampling_rate: 1.0,
                 total_on_cpu_ns,
                 event_count,
                 active_cores,

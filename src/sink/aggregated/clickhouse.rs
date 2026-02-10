@@ -44,7 +44,7 @@ impl ClickHouseExporter {
 
         let table = format!("{}.cpu_utilization", self.database);
         let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, total_on_cpu_ns, event_count, active_cores, system_cores, \
+             pid, client_type, sampling_mode, sampling_rate, total_on_cpu_ns, event_count, active_cores, system_cores, \
              max_core_on_cpu_ns, max_core_id, mean_core_pct, min_core_pct, max_core_pct, \
              meta_client_name, meta_network_name";
 
@@ -67,12 +67,14 @@ impl ClickHouseExporter {
             let _ = write!(
                 sql,
                 "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
-                 {total_on_cpu_ns}, {}, {}, {}, {max_core_on_cpu_ns}, {}, {}, {}, {}, \
+                 '{}', {}, {total_on_cpu_ns}, {}, {}, {}, {max_core_on_cpu_ns}, {}, {}, {}, {}, \
                  '{client_name}', '{network_name}')",
                 m.window.interval_ms,
                 m.slot.number,
                 m.pid,
                 m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
                 m.event_count,
                 m.active_cores,
                 m.system_cores,
@@ -112,11 +114,11 @@ impl ClickHouseExporter {
 
         let columns = if has_disk_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, device_id, rw, sum, count, min, max, histogram, \
+             pid, client_type, sampling_mode, sampling_rate, device_id, rw, sum, count, min, max, histogram, \
              meta_client_name, meta_network_name"
         } else {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, sum, count, min, max, histogram, \
+             pid, client_type, sampling_mode, sampling_rate, sum, count, min, max, histogram, \
              meta_client_name, meta_network_name"
         };
 
@@ -139,12 +141,14 @@ impl ClickHouseExporter {
                 let rw = m.rw.unwrap_or("read");
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {device_id}, '{rw}', {}, {}, {}, {}, ",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                     m.min,
@@ -155,12 +159,14 @@ impl ClickHouseExporter {
             } else {
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {}, {}, {}, {}, ",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                     m.min,
@@ -202,15 +208,15 @@ impl ClickHouseExporter {
 
         let columns = if has_network_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, port_label, direction, sum, count, \
+             pid, client_type, sampling_mode, sampling_rate, port_label, direction, sum, count, \
              meta_client_name, meta_network_name"
         } else if has_disk_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, device_id, rw, sum, count, \
+             pid, client_type, sampling_mode, sampling_rate, device_id, rw, sum, count, \
              meta_client_name, meta_network_name"
         } else {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, sum, count, \
+             pid, client_type, sampling_mode, sampling_rate, sum, count, \
              meta_client_name, meta_network_name"
         };
 
@@ -233,12 +239,14 @@ impl ClickHouseExporter {
                 let direction = m.direction.unwrap_or("tx");
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      '{port_label}', '{direction}', {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                 );
@@ -247,24 +255,28 @@ impl ClickHouseExporter {
                 let rw = m.rw.unwrap_or("read");
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {device_id}, '{rw}', {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                 );
             } else {
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                 );
@@ -302,15 +314,15 @@ impl ClickHouseExporter {
 
         let columns = if has_tcp_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, port_label, sum, count, min, max, \
+             pid, client_type, sampling_mode, sampling_rate, port_label, sum, count, min, max, \
              meta_client_name, meta_network_name"
         } else if has_disk_dimensions {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, device_id, rw, sum, count, min, max, \
+             pid, client_type, sampling_mode, sampling_rate, device_id, rw, sum, count, min, max, \
              meta_client_name, meta_network_name"
         } else {
             "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
-             pid, client_type, sum, count, min, max, \
+             pid, client_type, sampling_mode, sampling_rate, sum, count, min, max, \
              meta_client_name, meta_network_name"
         };
 
@@ -332,12 +344,14 @@ impl ClickHouseExporter {
                 let port_label = m.port_label.unwrap_or("unknown");
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      '{port_label}', {}, {}, {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                     m.min,
@@ -348,12 +362,14 @@ impl ClickHouseExporter {
                 let rw = m.rw.unwrap_or("read");
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {device_id}, '{rw}', {}, {}, {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                     m.min,
@@ -362,12 +378,14 @@ impl ClickHouseExporter {
             } else {
                 let _ = write!(
                     sql,
-                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', \
+                    "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
                      {}, {}, {}, {}, '{client_name}', '{network_name}')",
                     m.window.interval_ms,
                     m.slot.number,
                     m.pid,
                     m.client_type.as_str(),
+                    m.sampling_mode.as_str(),
+                    m.sampling_rate,
                     m.sum,
                     m.count,
                     m.min,
