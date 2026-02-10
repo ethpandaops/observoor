@@ -727,7 +727,7 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
-    use crate::sink::aggregated::metric::{BatchMetadata, SlotInfo, WindowInfo};
+    use crate::sink::aggregated::metric::{BatchMetadata, SamplingMode, SlotInfo, WindowInfo};
     use crate::tracer::event::ClientType;
 
     #[test]
@@ -896,6 +896,8 @@ mod tests {
                 client_type: ClientType::Geth,
                 device_id: None,
                 rw: None,
+                sampling_mode: SamplingMode::None,
+                sampling_rate: 1.0,
                 sum: 10,
                 count: 1,
                 min: 10,
@@ -918,6 +920,8 @@ mod tests {
                 rw: None,
                 port_label: Some("el_p2p_tcp"),
                 direction: Some("tx"),
+                sampling_mode: SamplingMode::None,
+                sampling_rate: 1.0,
                 sum: 1024,
                 count: 1,
             }],
