@@ -10,7 +10,7 @@ use observoor::sink::aggregated::dimension::{
     BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
 use observoor::sink::aggregated::metric::{
-    BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, SlotInfo, WindowInfo,
+    BatchMetadata, CounterMetric, GaugeMetric, LatencyMetric, SamplingMode, SlotInfo, WindowInfo,
 };
 use observoor::tracer::event::{Direction, EventType, ParsedEvent, TypedEvent};
 use observoor::tracer::parse::parse_event;
@@ -417,6 +417,8 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: None,
             rw: None,
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 5_000,
             count: 1,
             min: 5_000,
@@ -433,6 +435,8 @@ fn build_export_grouping_input(
             client_type: observoor::tracer::event::ClientType::Geth,
             device_id: Some(259),
             rw: Some("read"),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 8_000,
             count: 1,
             min: 8_000,
@@ -453,6 +457,8 @@ fn build_export_grouping_input(
             rw: None,
             port_label: None,
             direction: None,
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 1,
             count: 1,
         });
@@ -468,6 +474,8 @@ fn build_export_grouping_input(
             rw: None,
             port_label: Some("el_p2p_tcp"),
             direction: Some("tx"),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 1_500,
             count: 1,
         });
@@ -484,6 +492,8 @@ fn build_export_grouping_input(
             device_id: None,
             rw: None,
             port_label: Some("el_p2p_tcp"),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 110,
             count: 1,
             min: 110,
@@ -500,6 +510,8 @@ fn build_export_grouping_input(
             device_id: Some(259),
             rw: Some("write"),
             port_label: None,
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
             sum: 8,
             count: 1,
             min: 8,
