@@ -100,7 +100,7 @@ impl EventType {
     }
 
     /// Convert from the canonical metric/log label name.
-    pub fn from_str(name: &str) -> Option<Self> {
+    pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "syscall_read" => Some(Self::SyscallRead),
             "syscall_write" => Some(Self::SyscallWrite),
@@ -522,15 +522,15 @@ mod tests {
     #[test]
     fn test_event_type_from_str() {
         assert_eq!(
-            EventType::from_str("syscall_read"),
+            EventType::from_name("syscall_read"),
             Some(EventType::SyscallRead)
         );
-        assert_eq!(EventType::from_str("net_rx"), Some(EventType::NetRX));
+        assert_eq!(EventType::from_name("net_rx"), Some(EventType::NetRX));
         assert_eq!(
-            EventType::from_str("process_exit"),
+            EventType::from_name("process_exit"),
             Some(EventType::ProcessExit)
         );
-        assert_eq!(EventType::from_str("not_an_event"), None);
+        assert_eq!(EventType::from_name("not_an_event"), None);
     }
 
     #[test]

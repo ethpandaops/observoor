@@ -603,7 +603,7 @@ impl Config {
         }
 
         for event_name in self.sinks.aggregated.sampling.events.keys() {
-            if EventType::from_str(event_name).is_none() {
+            if EventType::from_name(event_name).is_none() {
                 bail!("unknown event in sampling config: {event_name}");
             }
         }

@@ -81,10 +81,12 @@ impl Collector {
                 EventSamplingMode::Probability => SamplingMode::Probability,
                 EventSamplingMode::Nth => SamplingMode::Nth,
             };
-            sampling_by_event[usize::from(*event_type as u8)] = EventSamplingMetadata {
-                mode,
-                rate: resolved.rate,
-            };
+            if let Some(slot) = sampling_by_event.get_mut(usize::from(*event_type as u8)) {
+                *slot = EventSamplingMetadata {
+                    mode,
+                    rate: resolved.rate,
+                };
+            }
         }
 
         Self {
