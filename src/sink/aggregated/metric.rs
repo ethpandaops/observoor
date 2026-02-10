@@ -4,7 +4,7 @@ use std::time::SystemTime;
 use crate::tracer::event::ClientType;
 
 /// Sampling mode describing how a metric stream was reduced before aggregation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SamplingMode {
     /// No sampling was applied; all events were retained.
     None,

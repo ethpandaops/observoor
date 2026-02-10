@@ -2,6 +2,7 @@ use std::alloc::System;
 use std::hint::black_box;
 use std::time::{Duration, SystemTime};
 
+use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
 use observoor::sink::aggregated::dimension::{
@@ -89,7 +90,7 @@ fn measure_alloc_counts<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
 }
 
 fn build_non_empty_buffer() -> (Collector, Buffer, BatchMetadata) {
-    let collector = Collector::new(Duration::from_millis(200));
+    let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let now = SystemTime::now();
     let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
@@ -214,7 +215,7 @@ fn parse_mixed_batch_allocation_budget() {
 #[test]
 #[serial]
 fn collect_empty_buffer_allocation_budget() {
-    let collector = Collector::new(Duration::from_millis(200));
+    let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let now = SystemTime::now();
     let buffer = Buffer::new(now, 42, now, false, false, false, 16);
     let meta = BatchMetadata {

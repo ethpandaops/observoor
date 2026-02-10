@@ -98,6 +98,69 @@ impl EventType {
             _ => None,
         }
     }
+
+    /// Convert from the canonical metric/log label name.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "syscall_read" => Some(Self::SyscallRead),
+            "syscall_write" => Some(Self::SyscallWrite),
+            "syscall_futex" => Some(Self::SyscallFutex),
+            "syscall_mmap" => Some(Self::SyscallMmap),
+            "syscall_epoll_wait" => Some(Self::SyscallEpollWait),
+            "disk_io" => Some(Self::DiskIO),
+            "net_tx" => Some(Self::NetTX),
+            "net_rx" => Some(Self::NetRX),
+            "sched_switch" => Some(Self::SchedSwitch),
+            "page_fault" => Some(Self::PageFault),
+            "fd_open" => Some(Self::FDOpen),
+            "fd_close" => Some(Self::FDClose),
+            "syscall_fsync" => Some(Self::SyscallFsync),
+            "syscall_fdatasync" => Some(Self::SyscallFdatasync),
+            "syscall_pwrite" => Some(Self::SyscallPwrite),
+            "sched_runqueue" => Some(Self::SchedRunqueue),
+            "block_merge" => Some(Self::BlockMerge),
+            "tcp_retransmit" => Some(Self::TcpRetransmit),
+            "tcp_state" => Some(Self::TcpState),
+            "mem_reclaim" => Some(Self::MemReclaim),
+            "mem_compaction" => Some(Self::MemCompaction),
+            "swap_in" => Some(Self::SwapIn),
+            "swap_out" => Some(Self::SwapOut),
+            "oom_kill" => Some(Self::OOMKill),
+            "process_exit" => Some(Self::ProcessExit),
+            _ => None,
+        }
+    }
+
+    /// Return all event types in numeric order.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::SyscallRead,
+            Self::SyscallWrite,
+            Self::SyscallFutex,
+            Self::SyscallMmap,
+            Self::SyscallEpollWait,
+            Self::DiskIO,
+            Self::NetTX,
+            Self::NetRX,
+            Self::SchedSwitch,
+            Self::PageFault,
+            Self::FDOpen,
+            Self::FDClose,
+            Self::SyscallFsync,
+            Self::SyscallFdatasync,
+            Self::SyscallPwrite,
+            Self::SchedRunqueue,
+            Self::BlockMerge,
+            Self::TcpRetransmit,
+            Self::TcpState,
+            Self::MemReclaim,
+            Self::MemCompaction,
+            Self::SwapIn,
+            Self::SwapOut,
+            Self::OOMKill,
+            Self::ProcessExit,
+        ]
+    }
 }
 
 impl fmt::Display for EventType {
@@ -454,6 +517,28 @@ mod tests {
         assert_eq!(EventType::SyscallRead.to_string(), "syscall_read");
         assert_eq!(EventType::NetTX.to_string(), "net_tx");
         assert_eq!(EventType::ProcessExit.to_string(), "process_exit");
+    }
+
+    #[test]
+    fn test_event_type_from_str() {
+        assert_eq!(
+            EventType::from_name("syscall_read"),
+            Some(EventType::SyscallRead)
+        );
+        assert_eq!(EventType::from_name("net_rx"), Some(EventType::NetRX));
+        assert_eq!(
+            EventType::from_name("process_exit"),
+            Some(EventType::ProcessExit)
+        );
+        assert_eq!(EventType::from_name("not_an_event"), None);
+    }
+
+    #[test]
+    fn test_all_event_types() {
+        let all = EventType::all();
+        assert_eq!(all.len(), MAX_EVENT_TYPE);
+        assert_eq!(all.first().copied(), Some(EventType::SyscallRead));
+        assert_eq!(all.last().copied(), Some(EventType::ProcessExit));
     }
 
     #[test]

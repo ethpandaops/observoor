@@ -1,13 +1,14 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use crate::tracer::event::ClientType;
+use crate::config::{EventSamplingMode, SamplingConfig};
+use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
 use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
 use super::buffer::Buffer;
 use super::dimension::{
     direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
-    NetworkDimension, TCPMetricsDimension,
+    TCPMetricsDimension,
 };
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
@@ -54,14 +55,54 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 /// Performs single-pass collection from a Buffer into a MetricBatch.
 pub struct Collector {
     interval_ms: u16,
+    sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
+}
+
+#[derive(Clone, Copy)]
+struct EventSamplingMetadata {
+    mode: SamplingMode,
+    rate: f32,
 }
 
 impl Collector {
     /// Creates a new collector with the given aggregation interval.
-    pub fn new(interval: Duration) -> Self {
+    pub fn new(interval: Duration, sampling: &SamplingConfig) -> Self {
+        let mut sampling_by_event = [EventSamplingMetadata {
+            mode: SamplingMode::None,
+            rate: 1.0,
+        }; MAX_EVENT_TYPE + 1];
+
+        for event_type in EventType::all() {
+            let resolved = sampling
+                .resolved_rule_for_event(*event_type)
+                .unwrap_or_else(|_| crate::config::ResolvedSamplingRule::none());
+            let mode = match resolved.mode {
+                EventSamplingMode::None => SamplingMode::None,
+                EventSamplingMode::Probability => SamplingMode::Probability,
+                EventSamplingMode::Nth => SamplingMode::Nth,
+            };
+            if let Some(slot) = sampling_by_event.get_mut(usize::from(*event_type as u8)) {
+                *slot = EventSamplingMetadata {
+                    mode,
+                    rate: resolved.rate,
+                };
+            }
+        }
+
         Self {
             interval_ms: interval.as_millis() as u16,
+            sampling_by_event,
         }
+    }
+
+    fn sampling_for_event(&self, event_type: EventType) -> EventSamplingMetadata {
+        self.sampling_by_event
+            .get(usize::from(event_type as u8))
+            .copied()
+            .unwrap_or(EventSamplingMetadata {
+                mode: SamplingMode::None,
+                rate: 1.0,
+            })
     }
 
     /// Iterates the buffer once and returns all metrics.
@@ -171,23 +212,52 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(&str, &dashmap::DashMap<BasicDimension, LatencyAggregate>)] = &[
-            ("syscall_read", &buf.syscall_read),
-            ("syscall_write", &buf.syscall_write),
-            ("syscall_futex", &buf.syscall_futex),
-            ("syscall_mmap", &buf.syscall_mmap),
-            ("syscall_epoll_wait", &buf.syscall_epoll_wait),
-            ("syscall_fsync", &buf.syscall_fsync),
-            ("syscall_fdatasync", &buf.syscall_fdatasync),
-            ("syscall_pwrite", &buf.syscall_pwrite),
-            ("sched_on_cpu", &buf.sched_on_cpu),
-            ("sched_off_cpu", &buf.sched_off_cpu),
-            ("sched_runqueue", &buf.sched_runqueue),
-            ("mem_reclaim", &buf.mem_reclaim),
-            ("mem_compaction", &buf.mem_compaction),
+        let maps: &[(
+            EventType,
+            &str,
+            &dashmap::DashMap<BasicDimension, LatencyAggregate>,
+        )] = &[
+            (EventType::SyscallRead, "syscall_read", &buf.syscall_read),
+            (EventType::SyscallWrite, "syscall_write", &buf.syscall_write),
+            (EventType::SyscallFutex, "syscall_futex", &buf.syscall_futex),
+            (EventType::SyscallMmap, "syscall_mmap", &buf.syscall_mmap),
+            (
+                EventType::SyscallEpollWait,
+                "syscall_epoll_wait",
+                &buf.syscall_epoll_wait,
+            ),
+            (EventType::SyscallFsync, "syscall_fsync", &buf.syscall_fsync),
+            (
+                EventType::SyscallFdatasync,
+                "syscall_fdatasync",
+                &buf.syscall_fdatasync,
+            ),
+            (
+                EventType::SyscallPwrite,
+                "syscall_pwrite",
+                &buf.syscall_pwrite,
+            ),
+            (EventType::SchedSwitch, "sched_on_cpu", &buf.sched_on_cpu),
+            (
+                EventType::SchedRunqueue,
+                "sched_off_cpu",
+                &buf.sched_off_cpu,
+            ),
+            (
+                EventType::SchedRunqueue,
+                "sched_runqueue",
+                &buf.sched_runqueue,
+            ),
+            (EventType::MemReclaim, "mem_reclaim", &buf.mem_reclaim),
+            (
+                EventType::MemCompaction,
+                "mem_compaction",
+                &buf.mem_compaction,
+            ),
         ];
 
-        for &(name, map) in maps {
+        for &(event_type, name, map) in maps {
+            let sampling = self.sampling_for_event(event_type);
             for entry in map.iter() {
                 let dim = *entry.key();
                 let snap = entry.value().snapshot();
@@ -203,8 +273,8 @@ impl Collector {
                     client_type: client_type_from_u8(dim.client_type),
                     device_id: None,
                     rw: None,
-                    sampling_mode: SamplingMode::None,
-                    sampling_rate: 1.0,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
                     sum: snap.sum,
                     count: snap.count,
                     min: snap.min,
@@ -223,6 +293,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
+        let sampling = self.sampling_for_event(EventType::DiskIO);
         for entry in buf.disk_latency.iter() {
             let dim = *entry.key();
             let snap = entry.value().snapshot();
@@ -238,8 +309,8 @@ impl Collector {
                 client_type: client_type_from_u8(dim.client_type),
                 device_id: Some(dim.device_id),
                 rw: Some(rw_string(dim.rw)),
-                sampling_mode: SamplingMode::None,
-                sampling_rate: 1.0,
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
@@ -257,19 +328,36 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(&str, &dashmap::DashMap<BasicDimension, CounterAggregate>)] = &[
-            ("page_fault_major", &buf.page_fault_major),
-            ("page_fault_minor", &buf.page_fault_minor),
-            ("swap_in", &buf.swap_in),
-            ("swap_out", &buf.swap_out),
-            ("oom_kill", &buf.oom_kill),
-            ("fd_open", &buf.fd_open),
-            ("fd_close", &buf.fd_close),
-            ("process_exit", &buf.process_exit),
-            ("tcp_state_change", &buf.tcp_state_change),
+        let maps: &[(
+            EventType,
+            &str,
+            &dashmap::DashMap<BasicDimension, CounterAggregate>,
+        )] = &[
+            (
+                EventType::PageFault,
+                "page_fault_major",
+                &buf.page_fault_major,
+            ),
+            (
+                EventType::PageFault,
+                "page_fault_minor",
+                &buf.page_fault_minor,
+            ),
+            (EventType::SwapIn, "swap_in", &buf.swap_in),
+            (EventType::SwapOut, "swap_out", &buf.swap_out),
+            (EventType::OOMKill, "oom_kill", &buf.oom_kill),
+            (EventType::FDOpen, "fd_open", &buf.fd_open),
+            (EventType::FDClose, "fd_close", &buf.fd_close),
+            (EventType::ProcessExit, "process_exit", &buf.process_exit),
+            (
+                EventType::TcpState,
+                "tcp_state_change",
+                &buf.tcp_state_change,
+            ),
         ];
 
-        for &(name, map) in maps {
+        for &(event_type, name, map) in maps {
+            let sampling = self.sampling_for_event(event_type);
             for entry in map.iter() {
                 let dim = *entry.key();
                 let snap = entry.value().snapshot();
@@ -287,8 +375,8 @@ impl Collector {
                     rw: None,
                     port_label: None,
                     direction: None,
-                    sampling_mode: SamplingMode::None,
-                    sampling_rate: 1.0,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -304,35 +392,60 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(&str, &dashmap::DashMap<NetworkDimension, CounterAggregate>)] = &[
-            ("net_io", &buf.net_io),
-            ("tcp_retransmit", &buf.tcp_retransmit),
-        ];
-
-        for &(name, map) in maps {
-            for entry in map.iter() {
-                let dim = *entry.key();
-                let snap = entry.value().snapshot();
-                if snap.count == 0 {
-                    continue;
-                }
-
-                batch.counter.push(CounterMetric {
-                    metric_type: name,
-                    window,
-                    slot,
-                    pid: dim.pid,
-                    client_type: client_type_from_u8(dim.client_type),
-                    device_id: None,
-                    rw: None,
-                    port_label: Some(port_label_string(dim.port_label)),
-                    direction: Some(direction_string(dim.direction)),
-                    sampling_mode: SamplingMode::None,
-                    sampling_rate: 1.0,
-                    sum: snap.sum,
-                    count: snap.count,
-                });
+        for entry in buf.net_io.iter() {
+            let dim = *entry.key();
+            let snap = entry.value().snapshot();
+            if snap.count == 0 {
+                continue;
             }
+
+            let source_event = if dim.direction == 0 {
+                EventType::NetTX
+            } else {
+                EventType::NetRX
+            };
+            let sampling = self.sampling_for_event(source_event);
+
+            batch.counter.push(CounterMetric {
+                metric_type: "net_io",
+                window,
+                slot,
+                pid: dim.pid,
+                client_type: client_type_from_u8(dim.client_type),
+                device_id: None,
+                rw: None,
+                port_label: Some(port_label_string(dim.port_label)),
+                direction: Some(direction_string(dim.direction)),
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
+        }
+
+        let sampling = self.sampling_for_event(EventType::TcpRetransmit);
+        for entry in buf.tcp_retransmit.iter() {
+            let dim = *entry.key();
+            let snap = entry.value().snapshot();
+            if snap.count == 0 {
+                continue;
+            }
+
+            batch.counter.push(CounterMetric {
+                metric_type: "tcp_retransmit",
+                window,
+                slot,
+                pid: dim.pid,
+                client_type: client_type_from_u8(dim.client_type),
+                device_id: None,
+                rw: None,
+                port_label: Some(port_label_string(dim.port_label)),
+                direction: Some(direction_string(dim.direction)),
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
         }
     }
 
@@ -344,12 +457,17 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(&str, &dashmap::DashMap<DiskDimension, CounterAggregate>)] = &[
-            ("disk_bytes", &buf.disk_bytes),
-            ("block_merge", &buf.block_merge),
+        let maps: &[(
+            EventType,
+            &str,
+            &dashmap::DashMap<DiskDimension, CounterAggregate>,
+        )] = &[
+            (EventType::DiskIO, "disk_bytes", &buf.disk_bytes),
+            (EventType::BlockMerge, "block_merge", &buf.block_merge),
         ];
 
-        for &(name, map) in maps {
+        for &(event_type, name, map) in maps {
+            let sampling = self.sampling_for_event(event_type);
             for entry in map.iter() {
                 let dim = *entry.key();
                 let snap = entry.value().snapshot();
@@ -367,8 +485,8 @@ impl Collector {
                     rw: Some(rw_string(dim.rw)),
                     port_label: None,
                     direction: None,
-                    sampling_mode: SamplingMode::None,
-                    sampling_rate: 1.0,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
                     sum: snap.sum,
                     count: snap.count,
                 });
@@ -386,6 +504,7 @@ impl Collector {
     ) {
         let maps: &[(&str, &dashmap::DashMap<TCPMetricsDimension, GaugeAggregate>)] =
             &[("tcp_rtt", &buf.tcp_rtt), ("tcp_cwnd", &buf.tcp_cwnd)];
+        let sampling = self.sampling_for_event(EventType::NetTX);
 
         for &(name, map) in maps {
             for entry in map.iter() {
@@ -404,8 +523,8 @@ impl Collector {
                     device_id: None,
                     rw: None,
                     port_label: Some(port_label_string(dim.port_label)),
-                    sampling_mode: SamplingMode::None,
-                    sampling_rate: 1.0,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
                     sum: snap.sum,
                     count: snap.count,
                     min: snap.min,
@@ -423,6 +542,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
+        let sampling = self.sampling_for_event(EventType::DiskIO);
         for entry in buf.disk_queue_depth.iter() {
             let dim = *entry.key();
             let snap = entry.value().snapshot();
@@ -439,8 +559,8 @@ impl Collector {
                 device_id: Some(dim.device_id),
                 rw: Some(rw_string(dim.rw)),
                 port_label: None,
-                sampling_mode: SamplingMode::None,
-                sampling_rate: 1.0,
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
                 sum: snap.sum,
                 count: snap.count,
                 min: snap.min,
@@ -461,6 +581,7 @@ impl Collector {
         if interval_ns <= 0 {
             return;
         }
+        let sampling = self.sampling_for_event(EventType::SchedSwitch);
 
         let mut grouped: HashMap<(u32, u8), Vec<(u32, super::aggregate::CounterSnapshot)>> =
             HashMap::with_capacity(buf.cpu_on_core.len());
@@ -531,8 +652,8 @@ impl Collector {
                 slot,
                 pid,
                 client_type: client_type_from_u8(client_type),
-                sampling_mode: SamplingMode::None,
-                sampling_rate: 1.0,
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
                 total_on_cpu_ns,
                 event_count,
                 active_cores,
@@ -564,6 +685,7 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
+    use crate::sink::aggregated::dimension::NetworkDimension;
     use crate::tracer::event::EventType;
 
     fn test_meta() -> BatchMetadata {
@@ -588,7 +710,7 @@ mod tests {
 
     #[test]
     fn test_collect_empty_buffer() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let batch = collector.collect(&buf, test_meta());
 
@@ -609,7 +731,7 @@ mod tests {
 
     #[test]
     fn test_collect_syscall_latency() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = BasicDimension {
             pid: 123,
@@ -635,8 +757,68 @@ mod tests {
     }
 
     #[test]
+    fn test_collect_sampling_metadata_from_config() {
+        let mut sampling = SamplingConfig::default();
+        sampling.events.insert(
+            "syscall_read".to_string(),
+            crate::config::EventSamplingRule {
+                mode: crate::config::EventSamplingMode::Probability,
+                rate: 0.25,
+            },
+        );
+        sampling.events.insert(
+            "disk_io".to_string(),
+            crate::config::EventSamplingRule {
+                mode: crate::config::EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        );
+
+        let collector = Collector::new(Duration::from_secs(1), &sampling);
+        let buf = test_buffer();
+        let basic = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+        let disk = DiskDimension {
+            pid: 123,
+            client_type: 1,
+            device_id: 259,
+            rw: 1,
+        };
+
+        buf.add_syscall(EventType::SyscallRead, basic, 5_000);
+        buf.add_disk_io(disk, 20_000, 4096, 1);
+
+        let batch = collector.collect(&buf, test_meta());
+        let syscall = batch
+            .latency
+            .iter()
+            .find(|m| m.metric_type == "syscall_read")
+            .expect("syscall_read metric should exist");
+        assert_eq!(syscall.sampling_mode, SamplingMode::Probability);
+        assert!((syscall.sampling_rate - 0.25).abs() < 0.0001);
+
+        let disk_latency = batch
+            .latency
+            .iter()
+            .find(|m| m.metric_type == "disk_latency")
+            .expect("disk_latency metric should exist");
+        assert_eq!(disk_latency.sampling_mode, SamplingMode::Nth);
+        assert!((disk_latency.sampling_rate - 0.5).abs() < 0.0001);
+
+        let disk_bytes = batch
+            .counter
+            .iter()
+            .find(|m| m.metric_type == "disk_bytes")
+            .expect("disk_bytes metric should exist");
+        assert_eq!(disk_bytes.sampling_mode, SamplingMode::Nth);
+        assert!((disk_bytes.sampling_rate - 0.5).abs() < 0.0001);
+    }
+
+    #[test]
     fn test_collect_disk_latency() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = DiskDimension {
             pid: 123,
@@ -662,7 +844,7 @@ mod tests {
 
     #[test]
     fn test_collect_network_counters() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = NetworkDimension {
             pid: 123,
@@ -687,7 +869,7 @@ mod tests {
 
     #[test]
     fn test_collect_tcp_gauges() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = TCPMetricsDimension {
             pid: 123,
@@ -718,7 +900,7 @@ mod tests {
 
     #[test]
     fn test_collect_basic_counters() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = BasicDimension {
             pid: 123,
@@ -757,7 +939,7 @@ mod tests {
 
     #[test]
     fn test_collect_window_info() {
-        let collector = Collector::new(Duration::from_millis(500));
+        let collector = Collector::new(Duration::from_millis(500), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = BasicDimension {
             pid: 1,
@@ -771,7 +953,7 @@ mod tests {
 
     #[test]
     fn test_collect_skips_zero_count() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
 
         // Insert an entry but don't record anything - this shouldn't happen
@@ -783,7 +965,7 @@ mod tests {
 
     #[test]
     fn test_collect_into_matches_collect() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let basic = BasicDimension {
             pid: 77,
@@ -814,7 +996,7 @@ mod tests {
 
     #[test]
     fn test_collect_into_reuses_capacity() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let basic = BasicDimension {
             pid: 88,
@@ -841,7 +1023,7 @@ mod tests {
 
     #[test]
     fn test_collect_cpu_utilization() {
-        let collector = Collector::new(Duration::from_secs(1));
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let buf = test_buffer();
         let dim = BasicDimension {
             pid: 123,

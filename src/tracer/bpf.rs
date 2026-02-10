@@ -10,11 +10,15 @@ use anyhow::{Context, Result};
 use tokio::io::unix::AsyncFd;
 
 use aya::maps::hash_map::HashMap as BpfHashMap;
+use aya::maps::Array;
 use aya::maps::RingBuf;
 use aya::programs::{KProbe, TracePoint};
 use aya::{Ebpf, EbpfLoader};
 
+use crate::config::{EventSamplingMode, SamplingConfig};
+
 use super::event::ClientType;
+use super::event::EventType;
 use super::parse::{parse_event, ParseError};
 use super::{
     ErrorHandler, EventHandler, RingbufStats, RingbufStatsHandler, Tracer, TrackedTidInfo,
@@ -41,6 +45,23 @@ struct BpfTrackedTidVal {
 
 // SAFETY: BpfTrackedTidVal is a plain C struct with no padding concerns.
 unsafe impl aya::Pod for BpfTrackedTidVal {}
+
+/// BPF map value for event_sampling (matches `struct event_sampling_cfg` in maps.h).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct BpfEventSamplingVal {
+    mode: u8,
+    _pad: [u8; 3],
+    value: u32,
+}
+
+// SAFETY: BpfEventSamplingVal is a plain C struct with no padding concerns.
+unsafe impl aya::Pod for BpfEventSamplingVal {}
+
+const BPF_SAMPLING_MODE_NONE: u8 = 0;
+const BPF_SAMPLING_MODE_PROBABILITY: u8 = 1;
+const BPF_SAMPLING_MODE_NTH: u8 = 2;
+const BPF_SAMPLING_PROBABILITY_SCALE: u32 = 1_000_000;
 
 /// BPF program attachment statistics for Prometheus metrics.
 #[derive(Debug, Clone, Copy, Default)]
@@ -82,6 +103,59 @@ impl BpfTracer {
     #[allow(dead_code)]
     pub fn attachment_stats(&self) -> AttachmentStats {
         self.attach_stats
+    }
+
+    /// Update per-event sampling policy in the BPF map.
+    pub fn update_sampling(&mut self, sampling: &SamplingConfig) -> Result<()> {
+        let ebpf = self
+            .ebpf
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("BPF objects not loaded"))?;
+
+        let mut map: Array<_, BpfEventSamplingVal> = Array::try_from(
+            ebpf.map_mut("event_sampling")
+                .ok_or_else(|| anyhow::anyhow!("event_sampling map not found"))?,
+        )?;
+
+        // index 0 is unused (EventType starts at 1).
+        map.set(
+            0,
+            BpfEventSamplingVal {
+                mode: BPF_SAMPLING_MODE_NONE,
+                _pad: [0; 3],
+                value: 1,
+            },
+            0,
+        )?;
+
+        for event_type in EventType::all() {
+            let resolved = sampling
+                .resolved_rule_for_event(*event_type)
+                .with_context(|| format!("resolving sampling for {}", event_type.as_str()))?;
+
+            let (mode, value) = match resolved.mode {
+                EventSamplingMode::None => (BPF_SAMPLING_MODE_NONE, 1),
+                EventSamplingMode::Probability => (
+                    BPF_SAMPLING_MODE_PROBABILITY,
+                    ((resolved.rate * BPF_SAMPLING_PROBABILITY_SCALE as f32).round() as u32)
+                        .min(BPF_SAMPLING_PROBABILITY_SCALE),
+                ),
+                EventSamplingMode::Nth => (BPF_SAMPLING_MODE_NTH, resolved.nth),
+            };
+
+            map.set(
+                u32::from(*event_type as u8),
+                BpfEventSamplingVal {
+                    mode,
+                    _pad: [0; 3],
+                    value,
+                },
+                0,
+            )
+            .with_context(|| format!("updating event_sampling for {}", event_type.as_str()))?;
+        }
+
+        Ok(())
     }
 }
 

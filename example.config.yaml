@@ -54,7 +54,7 @@ sinks:
       #     interval: 10s
     dimensions:
       network:
-        # Include local port in network metrics
+        # Include port label in network metrics (e.g., el_p2p_tcp, cl_p2p_udp)
         include_port: true
         # Include TX/RX direction in network metrics
         include_direction: true
@@ -63,14 +63,55 @@ sinks:
         include_device: true
         # Include read/write breakdown in disk metrics
         include_rw: true
+    sampling:
+      # Kernel-side per-event sampling (drops before ring buffer export).
+      # mode: none | probability | nth
+      # - probability: rate is keep probability (0 < rate <= 1)
+      # - nth: rate must be exactly 1/N (e.g. 0.5, 0.25, 0.1)
+      # If network.include_direction is false, net_tx and net_rx rules must match.
+      default:
+        mode: none
+        rate: 1.0
+      # Baseline profile-driven overrides for high-volume event streams.
+      events:
+        syscall_futex:
+          mode: nth
+          rate: 0.1     # keep every 10th
+        sched_switch:
+          mode: nth
+          rate: 0.2     # keep every 5th
+        sched_runqueue:
+          mode: nth
+          rate: 0.2     # keep every 5th
+        page_fault:
+          mode: nth
+          rate: 0.25    # keep every 4th
+        syscall_write:
+          mode: nth
+          rate: 0.5     # keep every 2nd
+        syscall_epoll_wait:
+          mode: nth
+          rate: 0.5     # keep every 2nd
+        net_tx:
+          mode: probability
+          rate: 0.5
+        net_rx:
+          mode: probability
+          rate: 0.5
     clickhouse:
       enabled: true
       endpoint: clickhouse:9000
       database: observoor
+      # Base table prefix (default: aggregated_metrics)
+      table: aggregated_metrics
       batch_size: 10000
       flush_interval: 1s
+      # Optional ClickHouse auth
+      # username: default
+      # password: changeme
       migrations:
         enabled: true
+      # sampling_mode/sampling_rate columns reflect effective eBPF sampling config.
     # Optional HTTP export (e.g., to Vector)
     # http:
     #   enabled: true
@@ -79,7 +120,7 @@ sinks:
     #   batch_size: 512
     #   batch_timeout: 5s
     #   export_timeout: 30s
-    #   max_queue_size: 51200
+    #   max_queue_size: 8192
     #   workers: 1
     #   keep_alive: true
     #   headers:

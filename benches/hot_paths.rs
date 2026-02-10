@@ -4,6 +4,7 @@ use std::time::{Duration, SystemTime};
 use criterion::{
     black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
 };
+use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
 use observoor::sink::aggregated::dimension::{
@@ -175,7 +176,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
 
 fn build_collector_input(cardinality: u32, repeats: usize) -> (Collector, Buffer, BatchMetadata) {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    let collector = Collector::new(Duration::from_millis(200));
+    let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     for i in 0..cardinality {
@@ -350,7 +351,7 @@ fn bench_collect(c: &mut Criterion) {
 
 fn bench_pipeline(c: &mut Criterion) {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
-    let collector = Collector::new(Duration::from_millis(200));
+    let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let meta = BatchMetadata {
         client_name: "bench-node".into(),
         network_name: "hoodi".into(),

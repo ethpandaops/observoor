@@ -6,6 +6,7 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 
 use crate::sink::aggregated::collector::ALL_METRIC_NAMES;
+use crate::tracer::event::EventType;
 
 /// Top-level configuration for the observoor agent.
 #[derive(Debug, Deserialize)]
@@ -95,6 +96,10 @@ pub struct AggregatedSinkConfig {
     #[serde(default)]
     pub dimensions: DimensionsConfig,
 
+    /// Per-event sampling configuration applied in the eBPF layer.
+    #[serde(default)]
+    pub sampling: SamplingConfig,
+
     /// ClickHouse connection configuration.
     #[serde(default)]
     pub clickhouse: ClickHouseConfig,
@@ -123,6 +128,82 @@ pub struct ResolutionConfig {
     /// Per-metric interval overrides for lower-priority metric families.
     #[serde(default)]
     pub overrides: Vec<IntervalOverride>,
+}
+
+/// Sampling configuration for eBPF event emission.
+#[derive(Debug, Clone, Deserialize)]
+pub struct SamplingConfig {
+    /// Default sampling policy for all events.
+    #[serde(default)]
+    pub default: EventSamplingRule,
+
+    /// Per-event sampling overrides keyed by EventType label (e.g. "net_tx").
+    #[serde(default = "default_sampling_event_rules")]
+    pub events: HashMap<String, EventSamplingRule>,
+}
+
+impl Default for SamplingConfig {
+    fn default() -> Self {
+        Self {
+            default: EventSamplingRule::default(),
+            events: default_sampling_event_rules(),
+        }
+    }
+}
+
+/// Sampling policy for a single event stream.
+#[derive(Debug, Clone, Copy, Deserialize)]
+pub struct EventSamplingRule {
+    /// Sampling mode.
+    #[serde(default)]
+    pub mode: EventSamplingMode,
+    /// Effective retain rate in (0,1], depending on mode semantics.
+    #[serde(default = "default_sampling_rate")]
+    pub rate: f32,
+}
+
+impl Default for EventSamplingRule {
+    fn default() -> Self {
+        Self {
+            mode: EventSamplingMode::None,
+            rate: default_sampling_rate(),
+        }
+    }
+}
+
+/// Sampling modes supported by the eBPF layer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EventSamplingMode {
+    None,
+    Probability,
+    Nth,
+}
+
+impl Default for EventSamplingMode {
+    fn default() -> Self {
+        Self::None
+    }
+}
+
+/// Canonical sampling rule after validation/normalization.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedSamplingRule {
+    pub mode: EventSamplingMode,
+    /// Effective retain rate in (0,1].
+    pub rate: f32,
+    /// N value used in nth mode (1 for non-nth modes).
+    pub nth: u32,
+}
+
+impl ResolvedSamplingRule {
+    pub const fn none() -> Self {
+        Self {
+            mode: EventSamplingMode::None,
+            rate: 1.0,
+            nth: 1,
+        }
+    }
 }
 
 /// Per-metric resolution override.
@@ -298,6 +379,71 @@ fn default_beacon_timeout() -> Duration {
 
 fn default_true() -> bool {
     true
+}
+
+fn default_sampling_rate() -> f32 {
+    1.0
+}
+
+fn default_sampling_event_rules() -> HashMap<String, EventSamplingRule> {
+    HashMap::from([
+        (
+            "syscall_futex".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.1,
+            },
+        ),
+        (
+            "sched_switch".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.2,
+            },
+        ),
+        (
+            "sched_runqueue".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.2,
+            },
+        ),
+        (
+            "page_fault".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.25,
+            },
+        ),
+        (
+            "syscall_write".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        ),
+        (
+            "syscall_epoll_wait".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        ),
+        (
+            "net_tx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        ),
+        (
+            "net_rx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        ),
+    ])
 }
 
 fn default_resolution_interval() -> Duration {
@@ -526,6 +672,38 @@ impl Config {
             }
         }
 
+        for event_name in self.sinks.aggregated.sampling.events.keys() {
+            if EventType::from_name(event_name).is_none() {
+                bail!("unknown event in sampling config: {event_name}");
+            }
+        }
+
+        for event_type in EventType::all() {
+            self.sinks
+                .aggregated
+                .sampling
+                .resolved_rule_for_event(*event_type)
+                .with_context(|| format!("invalid sampling rule for {}", event_type.as_str()))?;
+        }
+
+        if !self.sinks.aggregated.dimensions.network.include_direction {
+            let tx_rule = self
+                .sinks
+                .aggregated
+                .sampling
+                .resolved_rule_for_event(EventType::NetTX)
+                .context("invalid sampling rule for net_tx")?;
+            let rx_rule = self
+                .sinks
+                .aggregated
+                .sampling
+                .resolved_rule_for_event(EventType::NetRX)
+                .context("invalid sampling rule for net_rx")?;
+            if tx_rule != rx_rule {
+                bail!("net_tx and net_rx sampling rules must match when network.include_direction=false");
+            }
+        }
+
         // Validate HTTP export config if enabled.
         if self.sinks.aggregated.http.enabled {
             if self.sinks.aggregated.http.address.is_empty() {
@@ -551,6 +729,66 @@ impl Config {
 
         Ok(())
     }
+}
+
+impl SamplingConfig {
+    /// Returns the canonical sampling rule for the given event type.
+    pub fn resolved_rule_for_event(&self, event_type: EventType) -> Result<ResolvedSamplingRule> {
+        let rule = self
+            .events
+            .get(event_type.as_str())
+            .copied()
+            .unwrap_or(self.default);
+        resolve_sampling_rule(rule)
+    }
+}
+
+fn resolve_sampling_rule(rule: EventSamplingRule) -> Result<ResolvedSamplingRule> {
+    match rule.mode {
+        EventSamplingMode::None => {
+            if !approx_eq(rule.rate, 1.0) {
+                bail!("sampling mode 'none' requires rate=1.0");
+            }
+            Ok(ResolvedSamplingRule::none())
+        }
+        EventSamplingMode::Probability => {
+            if !(rule.rate > 0.0 && rule.rate <= 1.0) {
+                bail!("sampling mode 'probability' requires 0 < rate <= 1");
+            }
+            Ok(ResolvedSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: rule.rate,
+                nth: 1,
+            })
+        }
+        EventSamplingMode::Nth => {
+            if !(rule.rate > 0.0 && rule.rate <= 1.0) {
+                bail!("sampling mode 'nth' requires 0 < rate <= 1");
+            }
+
+            let n_float = 1.0f64 / f64::from(rule.rate);
+            let n_rounded = n_float.round();
+            if (n_float - n_rounded).abs() > 1e-6 {
+                bail!("sampling mode 'nth' requires rate to be 1/N (e.g. 0.5, 0.25, 0.1)");
+            }
+
+            let n_u64 = n_rounded as u64;
+            if n_u64 == 0 || n_u64 > u64::from(u32::MAX) {
+                bail!("sampling mode 'nth' produced invalid N value");
+            }
+            let n = n_u64 as u32;
+
+            Ok(ResolvedSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 1.0 / (n as f32),
+                nth: n,
+            })
+        }
+    }
+}
+
+fn approx_eq(a: f32, b: f32) -> bool {
+    (a - b).abs() <= 1e-6
 }
 
 impl NetworkDimensionsConfig {
@@ -880,5 +1118,106 @@ mod tests {
         ];
 
         assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sampling_default_profile_rules() {
+        let cfg = valid_config();
+        let futex = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::SyscallFutex)
+            .expect("sampling should resolve");
+        assert_eq!(futex.mode, EventSamplingMode::Nth);
+        assert!((futex.rate - 0.1).abs() < 0.0001);
+        assert_eq!(futex.nth, 10);
+
+        let net_tx = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::NetTX)
+            .expect("sampling should resolve");
+        assert_eq!(net_tx.mode, EventSamplingMode::Probability);
+        assert!((net_tx.rate - 0.5).abs() < 0.0001);
+
+        let disk = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::DiskIO)
+            .expect("sampling should resolve");
+        assert_eq!(disk, ResolvedSamplingRule::none());
+    }
+
+    #[test]
+    fn test_sampling_probability_accepts_valid_rate() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.sampling.events.insert(
+            "syscall_read".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.2,
+            },
+        );
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn test_sampling_nth_requires_reciprocal_rate() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.sampling.events.insert(
+            "syscall_read".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.3,
+            },
+        );
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("invalid sampling rule for syscall_read"));
+    }
+
+    #[test]
+    fn test_sampling_unknown_event_name_rejected() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.sampling.events.insert(
+            "not_an_event".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        );
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown event in sampling config"));
+    }
+
+    #[test]
+    fn test_sampling_net_tx_rx_must_match_without_direction() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.dimensions.network.include_direction = false;
+        cfg.sinks.aggregated.sampling.events.insert(
+            "net_tx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.5,
+            },
+        );
+        cfg.sinks.aggregated.sampling.events.insert(
+            "net_rx".to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Probability,
+                rate: 0.25,
+            },
+        );
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("net_tx and net_rx sampling rules must match"));
     }
 }

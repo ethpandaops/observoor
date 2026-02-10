@@ -105,7 +105,7 @@ impl AggregatedSink {
         let (rotation_tx, rotation_rx) = mpsc::unbounded_channel();
 
         Self {
-            collector: Collector::new(cfg.resolution.interval),
+            collector: Collector::new(cfg.resolution.interval, &cfg.sampling),
             cfg,
             meta_client_name: Arc::from(meta_client_name),
             meta_network_name: Arc::from(meta_network_name),
@@ -329,7 +329,8 @@ impl Sink for AggregatedSink {
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
-        let collector = Collector::new(interval);
+        let sampling_cfg = self.cfg.sampling.clone();
+        let collector = Collector::new(interval, &sampling_cfg);
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);

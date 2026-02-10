@@ -19,6 +19,43 @@ struct {
     __uint(max_entries, 4 * 1024 * 1024); // 4MB default
 } events SEC(".maps");
 
+enum sampling_mode {
+    SAMPLING_MODE_NONE = 0,
+    SAMPLING_MODE_PROBABILITY = 1,
+    SAMPLING_MODE_NTH = 2,
+};
+
+#define SAMPLING_PROBABILITY_SCALE 1000000U
+#define EVENT_SAMPLING_MAP_ENTRIES 26U
+
+struct event_sampling_cfg {
+    __u8 mode;
+    __u8 pad[3];
+    __u32 value;
+};
+
+// event_sampling: Per-event-type sampling policy.
+//
+// key: event_type (u32, 1..25)
+// value.mode:
+//   0 => none (emit all)
+//   1 => probability (value is retain threshold in [0, 1_000_000])
+//   2 => nth (value is N, emit every Nth event)
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, EVENT_SAMPLING_MAP_ENTRIES);
+    __type(key, __u32);
+    __type(value, struct event_sampling_cfg);
+} event_sampling SEC(".maps");
+
+// event_sampling_nth: Per-CPU event counters used by nth sampling mode.
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, EVENT_SAMPLING_MAP_ENTRIES);
+    __type(key, __u32);
+    __type(value, __u32);
+} event_sampling_nth SEC(".maps");
+
 // syscall_start: Entry timestamps per thread.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -142,6 +179,47 @@ static __always_inline int is_tracked(__u32 pid, __u8 *client_type) {
     if (!ct)
         return 0;
     *client_type = *ct;
+    return 1;
+}
+
+// Helper: Decide whether to emit an event after applying sampling policy.
+static __always_inline int should_emit_event(__u8 event_type) {
+    __u32 key = (__u32)event_type;
+    struct event_sampling_cfg *cfg =
+        bpf_map_lookup_elem(&event_sampling, &key);
+    if (!cfg)
+        return 1;
+
+    if (cfg->mode == SAMPLING_MODE_NONE)
+        return 1;
+
+    if (cfg->mode == SAMPLING_MODE_PROBABILITY) {
+        __u32 threshold = cfg->value;
+        if (threshold == 0)
+            return 0;
+        if (threshold >= SAMPLING_PROBABILITY_SCALE)
+            return 1;
+        return (bpf_get_prandom_u32() % SAMPLING_PROBABILITY_SCALE) < threshold;
+    }
+
+    if (cfg->mode == SAMPLING_MODE_NTH) {
+        __u32 n = cfg->value;
+        if (n <= 1)
+            return 1;
+        __u32 *counter = bpf_map_lookup_elem(&event_sampling_nth, &key);
+        if (!counter)
+            return 1;
+
+        __u32 next = *counter + 1;
+        if (next >= n) {
+            *counter = 0;
+            return 1;
+        }
+
+        *counter = next;
+        return 0;
+    }
+
     return 1;
 }
 
