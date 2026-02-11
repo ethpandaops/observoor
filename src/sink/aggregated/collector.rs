@@ -137,11 +137,14 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
+        #[cfg(feature = "bpf")]
         let memory_usage_capacity = if self.collect_memory_usage {
             self.estimate_memory_usage_capacity(buf)
         } else {
             0
         };
+        #[cfg(not(feature = "bpf"))]
+        let memory_usage_capacity = 0;
 
         let mut batch = MetricBatch {
             metadata: meta,
@@ -174,16 +177,20 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
+        #[cfg(feature = "bpf")]
         let memory_usage_capacity = if self.collect_memory_usage {
             self.estimate_memory_usage_capacity(buf)
         } else {
             0
         };
+        #[cfg(not(feature = "bpf"))]
+        let memory_usage_capacity = 0;
 
         reserve_if_needed(&mut batch.latency, latency_capacity);
         reserve_if_needed(&mut batch.counter, counter_capacity);
         reserve_if_needed(&mut batch.gauge, gauge_capacity);
         reserve_if_needed(&mut batch.cpu_util, cpu_util_capacity);
+        #[cfg(feature = "bpf")]
         if self.collect_memory_usage {
             reserve_if_needed(&mut batch.memory_usage, memory_usage_capacity);
         }
@@ -710,6 +717,7 @@ impl Collector {
                 max_core_pct,
             });
 
+            #[cfg(feature = "bpf")]
             if self.collect_memory_usage {
                 self.collect_memory_usage_metric(batch, window, slot, pid, client_type);
             }
