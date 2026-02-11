@@ -63,6 +63,52 @@ sinks:
 
 If `overrides` is omitted, all metrics use `resolution.interval`.
 
+## Query-Layer Reconstruction for Sampled Metrics
+
+By default, Observoor retains 100% of events (`sampling.mode=none`, `sampling.rate=1.0`).
+This section applies when you explicitly enable sampling.
+
+When sampling is enabled, stored rows contain sampled aggregates, not pre-scaled estimates.
+Use `sampling_rate` at query time to reconstruct additive totals.
+
+- `estimated_sum = sum / sampling_rate`
+- `estimated_count = count / sampling_rate`
+- `estimated_mean = sum(sum / sampling_rate) / sum(count / sampling_rate)`
+
+Example: reconstruct counter totals (bytes + events) from `net_io`:
+
+```sql
+SELECT
+    toStartOfMinute(window_start) AS ts,
+    sum(`sum` / sampling_rate) AS estimated_bytes,
+    sum(count / sampling_rate) AS estimated_events
+FROM net_io
+WHERE meta_network_name = 'mainnet'
+  AND window_start >= now() - INTERVAL 1 HOUR
+GROUP BY ts
+ORDER BY ts;
+```
+
+Example: reconstruct latency mean from `syscall_futex`:
+
+```sql
+SELECT
+    toStartOfMinute(window_start) AS ts,
+    sum(`sum` / sampling_rate) / nullIf(sum(count / sampling_rate), 0) AS estimated_mean_ns
+FROM syscall_futex
+WHERE meta_network_name = 'mainnet'
+  AND window_start >= now() - INTERVAL 1 HOUR
+GROUP BY ts
+ORDER BY ts;
+```
+
+Notes and caveats:
+
+- This reconstruction is appropriate for additive stats (`sum`, `count`) and means derived from them.
+- `min`/`max` are sampled extrema and are not exactly reconstructable.
+- Exact quantiles are not reconstructable from sampled rows; weighted histogram buckets can provide approximations.
+- `sampling_mode='probability'` is generally better for unbiased estimation. `sampling_mode='nth'` can introduce workload-dependent bias in some dimensions.
+
 ## ClickHouse Migrations
 
 Migrations live in `deploy/migrations/clickhouse/` and use [golang-migrate](https://github.com/golang-migrate/migrate) format.
