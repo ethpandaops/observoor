@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-#[cfg(not(test))]
+#[cfg(all(feature = "bpf", not(test)))]
 use std::fs;
 
 use crate::config::{EventSamplingMode, SamplingConfig};
@@ -13,9 +13,11 @@ use super::dimension::{
     direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
     TCPMetricsDimension,
 };
+#[cfg(feature = "bpf")]
+use super::metric::MemoryUsageMetric;
 use super::metric::{
-    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MemoryUsageMetric,
-    MetricBatch, SamplingMode, SlotInfo, WindowInfo,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+    SamplingMode, SlotInfo, WindowInfo,
 };
 
 /// Canonical list of all metric names emitted by this collector.
@@ -59,7 +61,9 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 pub struct Collector {
     interval_ms: u16,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
+    #[cfg(feature = "bpf")]
     collect_memory_usage: bool,
+    #[cfg(feature = "bpf")]
     procfs_reader: fn(u32) -> Option<ProcMemorySnapshot>,
 }
 
@@ -69,6 +73,7 @@ struct EventSamplingMetadata {
     rate: f32,
 }
 
+#[cfg(feature = "bpf")]
 #[derive(Clone, Copy, Debug, Default)]
 struct ProcMemorySnapshot {
     vm_size_bytes: u64,
@@ -91,6 +96,9 @@ impl Collector {
         sampling: &SamplingConfig,
         collect_memory_usage: bool,
     ) -> Self {
+        #[cfg(not(feature = "bpf"))]
+        let _ = collect_memory_usage;
+
         let mut sampling_by_event = [EventSamplingMetadata {
             mode: SamplingMode::None,
             rate: 1.0,
@@ -116,7 +124,9 @@ impl Collector {
         Self {
             interval_ms: interval.as_millis() as u16,
             sampling_by_event,
+            #[cfg(feature = "bpf")]
             collect_memory_usage,
+            #[cfg(feature = "bpf")]
             procfs_reader: default_procfs_reader,
         }
     }
@@ -143,15 +153,13 @@ impl Collector {
         } else {
             0
         };
-        #[cfg(not(feature = "bpf"))]
-        let memory_usage_capacity = 0;
-
         let mut batch = MetricBatch {
             metadata: meta,
             latency: Vec::with_capacity(latency_capacity),
             counter: Vec::with_capacity(counter_capacity),
             gauge: Vec::with_capacity(gauge_capacity),
             cpu_util: Vec::with_capacity(cpu_util_capacity),
+            #[cfg(feature = "bpf")]
             memory_usage: Vec::with_capacity(memory_usage_capacity),
         };
 
@@ -183,9 +191,6 @@ impl Collector {
         } else {
             0
         };
-        #[cfg(not(feature = "bpf"))]
-        let memory_usage_capacity = 0;
-
         reserve_if_needed(&mut batch.latency, latency_capacity);
         reserve_if_needed(&mut batch.counter, counter_capacity);
         reserve_if_needed(&mut batch.gauge, gauge_capacity);
@@ -199,6 +204,7 @@ impl Collector {
         batch.counter.clear();
         batch.gauge.clear();
         batch.cpu_util.clear();
+        #[cfg(feature = "bpf")]
         batch.memory_usage.clear();
 
         self.collect_basic_latency(batch, buf, window, slot);
@@ -252,6 +258,7 @@ impl Collector {
         buf.cpu_on_core.len()
     }
 
+    #[cfg(feature = "bpf")]
     fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
         buf.cpu_on_core.len()
     }
@@ -724,6 +731,7 @@ impl Collector {
         }
     }
 
+    #[cfg(feature = "bpf")]
     fn collect_memory_usage_metric(
         &self,
         batch: &mut MetricBatch,
@@ -754,23 +762,24 @@ impl Collector {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(all(feature = "bpf", not(test)))]
 fn default_procfs_reader(pid: u32) -> Option<ProcMemorySnapshot> {
     read_proc_memory_snapshot(pid)
 }
 
-#[cfg(test)]
+#[cfg(all(feature = "bpf", test))]
 fn default_procfs_reader(_pid: u32) -> Option<ProcMemorySnapshot> {
     None
 }
 
-#[cfg(not(test))]
+#[cfg(all(feature = "bpf", not(test)))]
 fn read_proc_memory_snapshot(pid: u32) -> Option<ProcMemorySnapshot> {
     let path = format!("/proc/{pid}/status");
     let status = fs::read_to_string(path).ok()?;
     parse_proc_memory_snapshot(&status)
 }
 
+#[cfg(feature = "bpf")]
 fn parse_proc_memory_snapshot(status: &str) -> Option<ProcMemorySnapshot> {
     let snapshot = ProcMemorySnapshot {
         vm_size_bytes: parse_proc_status_kb_bytes(status, "VmSize:").unwrap_or(0),
@@ -794,6 +803,7 @@ fn parse_proc_memory_snapshot(status: &str) -> Option<ProcMemorySnapshot> {
     Some(snapshot)
 }
 
+#[cfg(feature = "bpf")]
 fn parse_proc_status_kb_bytes(status: &str, key: &str) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix(key) {
@@ -857,6 +867,7 @@ mod tests {
         assert!(batch.counter.is_empty());
         assert!(batch.gauge.is_empty());
         assert!(batch.cpu_util.is_empty());
+        #[cfg(feature = "bpf")]
         assert!(batch.memory_usage.is_empty());
     }
 
@@ -1131,6 +1142,7 @@ mod tests {
         assert_eq!(direct.counter.len(), reused.counter.len());
         assert_eq!(direct.gauge.len(), reused.gauge.len());
         assert_eq!(direct.cpu_util.len(), reused.cpu_util.len());
+        #[cfg(feature = "bpf")]
         assert_eq!(direct.memory_usage.len(), reused.memory_usage.len());
     }
 
@@ -1152,6 +1164,7 @@ mod tests {
         let counter_capacity = batch.counter.capacity();
         let gauge_capacity = batch.gauge.capacity();
         let cpu_util_capacity = batch.cpu_util.capacity();
+        #[cfg(feature = "bpf")]
         let memory_usage_capacity = batch.memory_usage.capacity();
 
         collector.collect_into(&buf, &mut batch);
@@ -1160,6 +1173,7 @@ mod tests {
         assert_eq!(batch.counter.capacity(), counter_capacity);
         assert_eq!(batch.gauge.capacity(), gauge_capacity);
         assert_eq!(batch.cpu_util.capacity(), cpu_util_capacity);
+        #[cfg(feature = "bpf")]
         assert_eq!(batch.memory_usage.capacity(), memory_usage_capacity);
     }
 
@@ -1196,6 +1210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "bpf")]
     fn test_parse_proc_memory_snapshot() {
         let status = r#"
 Name:   geth
@@ -1217,6 +1232,7 @@ VmSwap:        512 kB
     }
 
     #[test]
+    #[cfg(feature = "bpf")]
     fn test_parse_proc_memory_snapshot_missing_fields_returns_none() {
         let status = "Name:\tkthreadd\nState:\tS (sleeping)\n";
         assert!(parse_proc_memory_snapshot(status).is_none());

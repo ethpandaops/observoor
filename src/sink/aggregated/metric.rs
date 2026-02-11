@@ -145,6 +145,7 @@ pub struct CpuUtilMetric {
 }
 
 /// Process memory usage snapshot metric (per process, per window).
+#[cfg(feature = "bpf")]
 #[derive(Debug, Clone)]
 pub struct MemoryUsageMetric {
     pub metric_type: &'static str,
@@ -170,17 +171,24 @@ pub struct MetricBatch {
     pub counter: Vec<CounterMetric>,
     pub gauge: Vec<GaugeMetric>,
     pub cpu_util: Vec<CpuUtilMetric>,
+    #[cfg(feature = "bpf")]
     pub memory_usage: Vec<MemoryUsageMetric>,
 }
 
 impl MetricBatch {
     /// Total number of metrics in this batch.
     pub fn len(&self) -> usize {
-        self.latency.len()
-            + self.counter.len()
-            + self.gauge.len()
-            + self.cpu_util.len()
-            + self.memory_usage.len()
+        #[cfg(not(feature = "bpf"))]
+        let total =
+            self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len();
+        #[cfg(feature = "bpf")]
+        let mut total =
+            self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len();
+        #[cfg(feature = "bpf")]
+        {
+            total += self.memory_usage.len();
+        }
+        total
     }
 
     /// Whether the batch contains no metrics.

@@ -8,9 +8,10 @@ use clickhouse_rs::Pool;
 
 use crate::export::health::HealthMetrics;
 
+#[cfg(feature = "bpf")]
+use super::metric::MemoryUsageMetric;
 use super::metric::{
-    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MemoryUsageMetric,
-    MetricBatch,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
 };
 
 /// ClickHouse batch exporter for aggregated metrics.
@@ -101,6 +102,7 @@ impl ClickHouseExporter {
     }
 
     /// Inserts process memory usage metrics into the memory_usage table.
+    #[cfg(feature = "bpf")]
     async fn export_memory_usage_table(
         &self,
         metrics: &[MemoryUsageMetric],
@@ -552,11 +554,14 @@ impl ClickHouseExporter {
             total_rows += batch.cpu_util.len();
         }
 
-        // Export memory usage snapshot metrics.
-        if !batch.memory_usage.is_empty() {
-            self.export_memory_usage_table(&batch.memory_usage, &batch.metadata)
-                .await?;
-            total_rows += batch.memory_usage.len();
+        #[cfg(feature = "bpf")]
+        {
+            // Export memory usage snapshot metrics.
+            if !batch.memory_usage.is_empty() {
+                self.export_memory_usage_table(&batch.memory_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.memory_usage.len();
+            }
         }
 
         if total_rows > 0 {

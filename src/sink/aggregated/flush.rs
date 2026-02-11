@@ -328,6 +328,7 @@ mod tests {
             counter: Vec::new(),
             gauge: Vec::new(),
             cpu_util: Vec::new(),
+            #[cfg(feature = "bpf")]
             memory_usage: Vec::new(),
         }
     }

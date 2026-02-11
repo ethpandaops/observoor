@@ -350,6 +350,7 @@ impl Sink for AggregatedSink {
                 counter: Vec::new(),
                 gauge: Vec::new(),
                 cpu_util: Vec::new(),
+                #[cfg(feature = "bpf")]
                 memory_usage: Vec::new(),
             };
 
@@ -382,6 +383,10 @@ impl Sink for AggregatedSink {
                             collector.collect_into(&final_buf, &mut reusable_batch);
                             flush_controller.force_flush_all(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
+                                #[cfg(feature = "bpf")]
+                                let memory_usage = reusable_batch.memory_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let memory_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -396,7 +401,7 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
-                                    memory_usage = reusable_batch.memory_usage.len(),
+                                    memory_usage,
                                     "final flush"
                                 );
                             }
@@ -440,6 +445,10 @@ impl Sink for AggregatedSink {
                         collector.collect_into(&rotated_buf, &mut reusable_batch);
                         flush_controller.force_flush_all(&mut reusable_batch);
                         if !reusable_batch.is_empty() {
+                            #[cfg(feature = "bpf")]
+                            let memory_usage = reusable_batch.memory_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let memory_usage = 0usize;
                             for exporter in &exporters {
                                 if let Err(e) = exporter.export(&reusable_batch).await {
                                     tracing::error!(
@@ -454,7 +463,7 @@ impl Sink for AggregatedSink {
                                 counter = reusable_batch.counter.len(),
                                 gauge = reusable_batch.gauge.len(),
                                 cpu_util = reusable_batch.cpu_util.len(),
-                                memory_usage = reusable_batch.memory_usage.len(),
+                                memory_usage,
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -472,6 +481,10 @@ impl Sink for AggregatedSink {
                             collector.collect_into(&old_buf, &mut reusable_batch);
                             flush_controller.process_tick(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
+                                #[cfg(feature = "bpf")]
+                                let memory_usage = reusable_batch.memory_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let memory_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -486,7 +499,7 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
-                                    memory_usage = reusable_batch.memory_usage.len(),
+                                    memory_usage,
                                     "buffer flushed"
                                 );
                             }
