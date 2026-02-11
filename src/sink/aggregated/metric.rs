@@ -144,6 +144,24 @@ pub struct CpuUtilMetric {
     pub max_core_pct: f32,
 }
 
+/// Process memory usage snapshot metric (per process, per window).
+#[derive(Debug, Clone)]
+pub struct MemoryUsageMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
+    pub vm_size_bytes: u64,
+    pub vm_rss_bytes: u64,
+    pub rss_anon_bytes: u64,
+    pub rss_file_bytes: u64,
+    pub rss_shmem_bytes: u64,
+    pub vm_swap_bytes: u64,
+}
+
 /// A batch of collected metrics ready for export.
 #[derive(Debug, Clone)]
 pub struct MetricBatch {
@@ -152,12 +170,17 @@ pub struct MetricBatch {
     pub counter: Vec<CounterMetric>,
     pub gauge: Vec<GaugeMetric>,
     pub cpu_util: Vec<CpuUtilMetric>,
+    pub memory_usage: Vec<MemoryUsageMetric>,
 }
 
 impl MetricBatch {
     /// Total number of metrics in this batch.
     pub fn len(&self) -> usize {
-        self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len()
+        self.latency.len()
+            + self.counter.len()
+            + self.gauge.len()
+            + self.cpu_util.len()
+            + self.memory_usage.len()
     }
 
     /// Whether the batch contains no metrics.

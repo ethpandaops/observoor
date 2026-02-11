@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[cfg(not(test))]
+use std::fs;
+
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
@@ -11,8 +14,8 @@ use super::dimension::{
     TCPMetricsDimension,
 };
 use super::metric::{
-    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
-    SamplingMode, SlotInfo, WindowInfo,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MemoryUsageMetric,
+    MetricBatch, SamplingMode, SlotInfo, WindowInfo,
 };
 
 /// Canonical list of all metric names emitted by this collector.
@@ -56,6 +59,8 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 pub struct Collector {
     interval_ms: u16,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
+    collect_memory_usage: bool,
+    procfs_reader: fn(u32) -> Option<ProcMemorySnapshot>,
 }
 
 #[derive(Clone, Copy)]
@@ -64,9 +69,28 @@ struct EventSamplingMetadata {
     rate: f32,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ProcMemorySnapshot {
+    vm_size_bytes: u64,
+    vm_rss_bytes: u64,
+    rss_anon_bytes: u64,
+    rss_file_bytes: u64,
+    rss_shmem_bytes: u64,
+    vm_swap_bytes: u64,
+}
+
 impl Collector {
     /// Creates a new collector with the given aggregation interval.
     pub fn new(interval: Duration, sampling: &SamplingConfig) -> Self {
+        Self::new_with_memory_usage(interval, sampling, false)
+    }
+
+    /// Creates a new collector and controls whether process memory snapshots are collected.
+    pub fn new_with_memory_usage(
+        interval: Duration,
+        sampling: &SamplingConfig,
+        collect_memory_usage: bool,
+    ) -> Self {
         let mut sampling_by_event = [EventSamplingMetadata {
             mode: SamplingMode::None,
             rate: 1.0,
@@ -92,6 +116,8 @@ impl Collector {
         Self {
             interval_ms: interval.as_millis() as u16,
             sampling_by_event,
+            collect_memory_usage,
+            procfs_reader: default_procfs_reader,
         }
     }
 
@@ -111,6 +137,7 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
+        let memory_usage_capacity = self.estimate_memory_usage_capacity(buf);
 
         let mut batch = MetricBatch {
             metadata: meta,
@@ -118,6 +145,7 @@ impl Collector {
             counter: Vec::with_capacity(counter_capacity),
             gauge: Vec::with_capacity(gauge_capacity),
             cpu_util: Vec::with_capacity(cpu_util_capacity),
+            memory_usage: Vec::with_capacity(memory_usage_capacity),
         };
 
         self.collect_into(buf, &mut batch);
@@ -142,16 +170,19 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
+        let memory_usage_capacity = self.estimate_memory_usage_capacity(buf);
 
         reserve_if_needed(&mut batch.latency, latency_capacity);
         reserve_if_needed(&mut batch.counter, counter_capacity);
         reserve_if_needed(&mut batch.gauge, gauge_capacity);
         reserve_if_needed(&mut batch.cpu_util, cpu_util_capacity);
+        reserve_if_needed(&mut batch.memory_usage, memory_usage_capacity);
 
         batch.latency.clear();
         batch.counter.clear();
         batch.gauge.clear();
         batch.cpu_util.clear();
+        batch.memory_usage.clear();
 
         self.collect_basic_latency(batch, buf, window, slot);
         self.collect_disk_latency(batch, buf, window, slot);
@@ -201,6 +232,10 @@ impl Collector {
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
+    }
+
+    fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
         buf.cpu_on_core.len()
     }
 
@@ -664,8 +699,93 @@ impl Collector {
                 min_core_pct,
                 max_core_pct,
             });
+
+            if self.collect_memory_usage {
+                self.collect_memory_usage_metric(batch, window, slot, pid, client_type);
+            }
         }
     }
+
+    fn collect_memory_usage_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+    ) {
+        let Some(snapshot) = (self.procfs_reader)(pid) else {
+            return;
+        };
+
+        batch.memory_usage.push(MemoryUsageMetric {
+            metric_type: "memory_usage",
+            window,
+            slot,
+            pid,
+            client_type: client_type_from_u8(client_type),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
+            vm_size_bytes: snapshot.vm_size_bytes,
+            vm_rss_bytes: snapshot.vm_rss_bytes,
+            rss_anon_bytes: snapshot.rss_anon_bytes,
+            rss_file_bytes: snapshot.rss_file_bytes,
+            rss_shmem_bytes: snapshot.rss_shmem_bytes,
+            vm_swap_bytes: snapshot.vm_swap_bytes,
+        });
+    }
+}
+
+#[cfg(not(test))]
+fn default_procfs_reader(pid: u32) -> Option<ProcMemorySnapshot> {
+    read_proc_memory_snapshot(pid)
+}
+
+#[cfg(test)]
+fn default_procfs_reader(_pid: u32) -> Option<ProcMemorySnapshot> {
+    None
+}
+
+#[cfg(not(test))]
+fn read_proc_memory_snapshot(pid: u32) -> Option<ProcMemorySnapshot> {
+    let path = format!("/proc/{pid}/status");
+    let status = fs::read_to_string(path).ok()?;
+    parse_proc_memory_snapshot(&status)
+}
+
+fn parse_proc_memory_snapshot(status: &str) -> Option<ProcMemorySnapshot> {
+    let snapshot = ProcMemorySnapshot {
+        vm_size_bytes: parse_proc_status_kb_bytes(status, "VmSize:").unwrap_or(0),
+        vm_rss_bytes: parse_proc_status_kb_bytes(status, "VmRSS:").unwrap_or(0),
+        rss_anon_bytes: parse_proc_status_kb_bytes(status, "RssAnon:").unwrap_or(0),
+        rss_file_bytes: parse_proc_status_kb_bytes(status, "RssFile:").unwrap_or(0),
+        rss_shmem_bytes: parse_proc_status_kb_bytes(status, "RssShmem:").unwrap_or(0),
+        vm_swap_bytes: parse_proc_status_kb_bytes(status, "VmSwap:").unwrap_or(0),
+    };
+
+    if snapshot.vm_size_bytes == 0
+        && snapshot.vm_rss_bytes == 0
+        && snapshot.rss_anon_bytes == 0
+        && snapshot.rss_file_bytes == 0
+        && snapshot.rss_shmem_bytes == 0
+        && snapshot.vm_swap_bytes == 0
+    {
+        return None;
+    }
+
+    Some(snapshot)
+}
+
+fn parse_proc_status_kb_bytes(status: &str, key: &str) -> Option<u64> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.trim().split_whitespace();
+            let value = parts.next()?.parse::<u64>().ok()?;
+            return Some(value.saturating_mul(1024));
+        }
+    }
+
+    None
 }
 
 /// Converts a raw u8 client type to the enum, defaulting to Unknown.
@@ -719,6 +839,7 @@ mod tests {
         assert!(batch.counter.is_empty());
         assert!(batch.gauge.is_empty());
         assert!(batch.cpu_util.is_empty());
+        assert!(batch.memory_usage.is_empty());
     }
 
     #[test]
@@ -992,6 +1113,7 @@ mod tests {
         assert_eq!(direct.counter.len(), reused.counter.len());
         assert_eq!(direct.gauge.len(), reused.gauge.len());
         assert_eq!(direct.cpu_util.len(), reused.cpu_util.len());
+        assert_eq!(direct.memory_usage.len(), reused.memory_usage.len());
     }
 
     #[test]
@@ -1012,6 +1134,7 @@ mod tests {
         let counter_capacity = batch.counter.capacity();
         let gauge_capacity = batch.gauge.capacity();
         let cpu_util_capacity = batch.cpu_util.capacity();
+        let memory_usage_capacity = batch.memory_usage.capacity();
 
         collector.collect_into(&buf, &mut batch);
 
@@ -1019,6 +1142,7 @@ mod tests {
         assert_eq!(batch.counter.capacity(), counter_capacity);
         assert_eq!(batch.gauge.capacity(), gauge_capacity);
         assert_eq!(batch.cpu_util.capacity(), cpu_util_capacity);
+        assert_eq!(batch.memory_usage.capacity(), memory_usage_capacity);
     }
 
     #[test]
@@ -1051,5 +1175,32 @@ mod tests {
         assert!((m.mean_core_pct - 0.1).abs() < 0.0001);
         assert!((m.min_core_pct - 0.05).abs() < 0.0001);
         assert!((m.max_core_pct - 0.15).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_parse_proc_memory_snapshot() {
+        let status = r#"
+Name:   geth
+VmSize:      12345 kB
+VmRSS:        6789 kB
+RssAnon:      4000 kB
+RssFile:      2500 kB
+RssShmem:      289 kB
+VmSwap:        512 kB
+"#;
+
+        let snapshot = parse_proc_memory_snapshot(status).expect("snapshot should parse");
+        assert_eq!(snapshot.vm_size_bytes, 12_641_280);
+        assert_eq!(snapshot.vm_rss_bytes, 6_951_936);
+        assert_eq!(snapshot.rss_anon_bytes, 4_096_000);
+        assert_eq!(snapshot.rss_file_bytes, 2_560_000);
+        assert_eq!(snapshot.rss_shmem_bytes, 295_936);
+        assert_eq!(snapshot.vm_swap_bytes, 524_288);
+    }
+
+    #[test]
+    fn test_parse_proc_memory_snapshot_missing_fields_returns_none() {
+        let status = "Name:\tkthreadd\nState:\tS (sleeping)\n";
+        assert!(parse_proc_memory_snapshot(status).is_none());
     }
 }

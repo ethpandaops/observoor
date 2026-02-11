@@ -330,7 +330,7 @@ impl Sink for AggregatedSink {
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collector = Collector::new(interval, &sampling_cfg);
+        let collector = Collector::new_with_memory_usage(interval, &sampling_cfg, true);
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
@@ -350,6 +350,7 @@ impl Sink for AggregatedSink {
                 counter: Vec::new(),
                 gauge: Vec::new(),
                 cpu_util: Vec::new(),
+                memory_usage: Vec::new(),
             };
 
             const BATCH_SIZE: usize = 256;
@@ -395,6 +396,7 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
+                                    memory_usage = reusable_batch.memory_usage.len(),
                                     "final flush"
                                 );
                             }
@@ -452,6 +454,7 @@ impl Sink for AggregatedSink {
                                 counter = reusable_batch.counter.len(),
                                 gauge = reusable_batch.gauge.len(),
                                 cpu_util = reusable_batch.cpu_util.len(),
+                                memory_usage = reusable_batch.memory_usage.len(),
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -483,6 +486,7 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
+                                    memory_usage = reusable_batch.memory_usage.len(),
                                     "buffer flushed"
                                 );
                             }

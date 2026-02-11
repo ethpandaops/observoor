@@ -9,7 +9,8 @@ use clickhouse_rs::Pool;
 use crate::export::health::HealthMetrics;
 
 use super::metric::{
-    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MemoryUsageMetric,
+    MetricBatch,
 };
 
 /// ClickHouse batch exporter for aggregated metrics.
@@ -94,6 +95,69 @@ impl ClickHouseExporter {
         if let Err(e) = handle.execute(sql.as_str()).await {
             self.record_batch_error("cpu_utilization");
             return Err(e).context("sending cpu_utilization batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process memory usage metrics into the memory_usage table.
+    async fn export_memory_usage_table(
+        &self,
+        metrics: &[MemoryUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.memory_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, vm_size_bytes, vm_rss_bytes, \
+             rss_anon_bytes, rss_file_bytes, rss_shmem_bytes, vm_swap_bytes, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 220);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.vm_size_bytes,
+                m.vm_rss_bytes,
+                m.rss_anon_bytes,
+                m.rss_file_bytes,
+                m.rss_shmem_bytes,
+                m.vm_swap_bytes,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for memory usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("memory_usage");
+            return Err(e).context("sending memory_usage batch");
         }
 
         Ok(())
@@ -486,6 +550,13 @@ impl ClickHouseExporter {
             self.export_cpu_util_table(&batch.cpu_util, &batch.metadata)
                 .await?;
             total_rows += batch.cpu_util.len();
+        }
+
+        // Export memory usage snapshot metrics.
+        if !batch.memory_usage.is_empty() {
+            self.export_memory_usage_table(&batch.memory_usage, &batch.metadata)
+                .await?;
+            total_rows += batch.memory_usage.len();
         }
 
         if total_rows > 0 {

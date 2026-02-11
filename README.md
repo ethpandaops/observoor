@@ -41,6 +41,7 @@ eBPF agent that monitors Ethereum execution and consensus layer processes at the
 | `swap_out` | Swap-out event |
 | `oom_kill` | OOM kill event |
 | `process_exit` | Process exit with exit code |
+| `memory_usage` | Per-process memory snapshot (VmSize, VmRSS, RssAnon, RssFile, RssShmem, VmSwap) |
 
 ## Configuration
 
