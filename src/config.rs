@@ -386,64 +386,7 @@ fn default_sampling_rate() -> f32 {
 }
 
 fn default_sampling_event_rules() -> HashMap<String, EventSamplingRule> {
-    HashMap::from([
-        (
-            "syscall_futex".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.1,
-            },
-        ),
-        (
-            "sched_switch".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.2,
-            },
-        ),
-        (
-            "sched_runqueue".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.2,
-            },
-        ),
-        (
-            "page_fault".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.25,
-            },
-        ),
-        (
-            "syscall_write".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.5,
-            },
-        ),
-        (
-            "syscall_epoll_wait".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Nth,
-                rate: 0.5,
-            },
-        ),
-        (
-            "net_tx".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Probability,
-                rate: 0.5,
-            },
-        ),
-        (
-            "net_rx".to_string(),
-            EventSamplingRule {
-                mode: EventSamplingMode::Probability,
-                rate: 0.5,
-            },
-        ),
-    ])
+    HashMap::new()
 }
 
 fn default_resolution_interval() -> Duration {
@@ -1129,9 +1072,7 @@ mod tests {
             .sampling
             .resolved_rule_for_event(EventType::SyscallFutex)
             .expect("sampling should resolve");
-        assert_eq!(futex.mode, EventSamplingMode::Nth);
-        assert!((futex.rate - 0.1).abs() < 0.0001);
-        assert_eq!(futex.nth, 10);
+        assert_eq!(futex, ResolvedSamplingRule::none());
 
         let net_tx = cfg
             .sinks
@@ -1139,8 +1080,7 @@ mod tests {
             .sampling
             .resolved_rule_for_event(EventType::NetTX)
             .expect("sampling should resolve");
-        assert_eq!(net_tx.mode, EventSamplingMode::Probability);
-        assert!((net_tx.rate - 0.5).abs() < 0.0001);
+        assert_eq!(net_tx, ResolvedSamplingRule::none());
 
         let disk = cfg
             .sinks
