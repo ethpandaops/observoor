@@ -779,7 +779,7 @@ fn parse_proc_memory_snapshot(status: &str) -> Option<ProcMemorySnapshot> {
 fn parse_proc_status_kb_bytes(status: &str, key: &str) -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix(key) {
-            let mut parts = rest.trim().split_whitespace();
+            let mut parts = rest.split_whitespace();
             let value = parts.next()?.parse::<u64>().ok()?;
             return Some(value.saturating_mul(1024));
         }
