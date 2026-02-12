@@ -824,7 +824,12 @@ pub struct HostSpecsRow {
     pub memory_speed_mts: u32,
     pub disk_count: u16,
     pub disk_total_bytes: u64,
-    pub disk_models: String,
+    pub disk_names: Vec<String>,
+    pub disk_models: Vec<String>,
+    pub disk_vendors: Vec<String>,
+    pub disk_serials: Vec<String>,
+    pub disk_sizes_bytes: Vec<u64>,
+    pub disk_rotational: Vec<u8>,
 }
 
 impl ClickHouseExporter {
@@ -886,7 +891,12 @@ impl ClickHouseExporter {
         let cpu_model = escape_sql(&row.cpu_model);
         let cpu_vendor = escape_sql(&row.cpu_vendor);
         let memory_type = escape_sql(&row.memory_type);
-        let disk_models = escape_sql(&row.disk_models);
+        let disk_names = format_string_array(&row.disk_names);
+        let disk_models = format_string_array(&row.disk_models);
+        let disk_vendors = format_string_array(&row.disk_vendors);
+        let disk_serials = format_string_array(&row.disk_serials);
+        let disk_sizes_bytes = format_u64_array(&row.disk_sizes_bytes);
+        let disk_rotational = format_u8_array(&row.disk_rotational);
         let client_name = escape_sql(&meta.client_name);
         let network_name = escape_sql(&meta.network_name);
 
@@ -896,14 +906,15 @@ impl ClickHouseExporter {
              host_id, hostname, machine_id, kernel_release, os_name, architecture, \
              cpu_model, cpu_vendor, cpu_online_cores, cpu_logical_cores, \
              memory_total_bytes, memory_type, memory_speed_mts, \
-             disk_count, disk_total_bytes, disk_models, \
+             disk_count, disk_total_bytes, \
+             disk_names, disk_models, disk_vendors, disk_serials, disk_sizes_bytes, disk_rotational, \
              meta_client_name, meta_network_name\
              ) VALUES (\
              {updated}, {event_time}, {}, {slot_start}, \
              '{host_id}', '{hostname}', '{machine_id}', '{kernel_release}', '{os_name}', '{architecture}', \
              '{cpu_model}', '{cpu_vendor}', {}, {}, \
              {}, '{memory_type}', {}, \
-             {}, {}, '{disk_models}', \
+             {}, {}, {disk_names}, {disk_models}, {disk_vendors}, {disk_serials}, {disk_sizes_bytes}, {disk_rotational}, \
              '{client_name}', '{network_name}'\
              )",
             row.wallclock_slot,
@@ -941,6 +952,58 @@ fn format_datetime(t: SystemTime) -> String {
 /// Escapes a string value for SQL insertion (single-quote escaping).
 fn escape_sql(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn format_string_array(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 16 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let escaped = escape_sql(value);
+        let _ = write!(out, "'{escaped}'");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u64_array(values: &[u64]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 8 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u8_array(values: &[u8]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 2 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
 }
 
 fn append_histogram(buf: &mut String, h: &[u32]) {
@@ -985,6 +1048,28 @@ mod tests {
         assert_eq!(escape_sql("hello"), "hello");
         assert_eq!(escape_sql("it's"), "it\\'s");
         assert_eq!(escape_sql("back\\slash"), "back\\\\slash");
+    }
+
+    #[test]
+    fn test_format_string_array() {
+        let values = vec!["nvme0n1".to_string(), "disk's model".to_string()];
+        assert_eq!(
+            format_string_array(&values),
+            "['nvme0n1', 'disk\\'s model']"
+        );
+        assert_eq!(format_string_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u64_array() {
+        assert_eq!(format_u64_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u64_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u8_array() {
+        assert_eq!(format_u8_array(&[0, 1, 1]), "[0, 1, 1]");
+        assert_eq!(format_u8_array(&[]), "[]");
     }
 
     #[test]

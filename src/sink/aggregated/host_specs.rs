@@ -20,7 +20,12 @@ pub struct HostSpecsSnapshot {
     pub memory_speed_mts: u32,
     pub disk_count: u16,
     pub disk_total_bytes: u64,
-    pub disk_models: String,
+    pub disk_names: Vec<String>,
+    pub disk_models: Vec<String>,
+    pub disk_vendors: Vec<String>,
+    pub disk_serials: Vec<String>,
+    pub disk_sizes_bytes: Vec<u64>,
+    pub disk_rotational: Vec<u8>,
 }
 
 /// Collects host-level machine specifications from procfs/sysfs/DMI.
@@ -39,7 +44,7 @@ pub fn collect_host_specs() -> HostSpecsSnapshot {
 
     let (memory_type, memory_speed_mts) = read_memory_dmi();
 
-    let (disk_count, disk_total_bytes, disk_models) = read_disk_specs();
+    let disks = read_disk_specs();
 
     let host_id = if !machine_id.is_empty() {
         machine_id.clone()
@@ -63,9 +68,14 @@ pub fn collect_host_specs() -> HostSpecsSnapshot {
         memory_total_bytes,
         memory_type,
         memory_speed_mts,
-        disk_count,
-        disk_total_bytes,
-        disk_models,
+        disk_count: disks.count,
+        disk_total_bytes: disks.total_bytes,
+        disk_names: disks.names,
+        disk_models: disks.models,
+        disk_vendors: disks.vendors,
+        disk_serials: disks.serials,
+        disk_sizes_bytes: disks.sizes_bytes,
+        disk_rotational: disks.rotational,
     }
 }
 
@@ -256,14 +266,34 @@ fn parse_speed_mts(raw: &str) -> u32 {
         .unwrap_or(0)
 }
 
-fn read_disk_specs() -> (u16, u64, String) {
+#[derive(Debug, Default)]
+struct DiskSpecsSnapshot {
+    count: u16,
+    total_bytes: u64,
+    names: Vec<String>,
+    models: Vec<String>,
+    vendors: Vec<String>,
+    serials: Vec<String>,
+    sizes_bytes: Vec<u64>,
+    rotational: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct DiskDeviceSnapshot {
+    name: String,
+    model: String,
+    vendor: String,
+    serial: String,
+    size_bytes: u64,
+    rotational: u8,
+}
+
+fn read_disk_specs() -> DiskSpecsSnapshot {
     let Ok(entries) = fs::read_dir("/sys/block") else {
-        return (0, 0, String::new());
+        return DiskSpecsSnapshot::default();
     };
 
-    let mut models = Vec::new();
-    let mut total_bytes = 0u64;
-    let mut count = 0u32;
+    let mut devices = Vec::<DiskDeviceSnapshot>::new();
 
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -273,21 +303,34 @@ fn read_disk_specs() -> (u16, u64, String) {
         }
 
         let base = entry.path();
-        let size_bytes = read_block_size_bytes(&base).unwrap_or(0);
-        total_bytes = total_bytes.saturating_add(size_bytes);
-
-        let model = read_block_model(&base).unwrap_or_else(|| "unknown".to_string());
-        models.push(format!("{name}:{model}"));
-        count = count.saturating_add(1);
+        devices.push(DiskDeviceSnapshot {
+            name: name.to_string(),
+            model: read_block_model(&base).unwrap_or_else(|| "unknown".to_string()),
+            vendor: read_block_vendor(&base).unwrap_or_default(),
+            serial: read_block_serial(&base).unwrap_or_default(),
+            size_bytes: read_block_size_bytes(&base).unwrap_or(0),
+            rotational: read_block_rotational(&base).unwrap_or(0),
+        });
     }
 
-    models.sort();
+    devices.sort_by(|a, b| a.name.cmp(&b.name));
 
-    (
-        count.min(u32::from(u16::MAX)) as u16,
-        total_bytes,
-        models.join(","),
-    )
+    let mut snapshot = DiskSpecsSnapshot {
+        count: devices.len().min(usize::from(u16::MAX)) as u16,
+        ..Default::default()
+    };
+
+    for disk in devices {
+        snapshot.total_bytes = snapshot.total_bytes.saturating_add(disk.size_bytes);
+        snapshot.names.push(disk.name);
+        snapshot.models.push(disk.model);
+        snapshot.vendors.push(disk.vendor);
+        snapshot.serials.push(disk.serial);
+        snapshot.sizes_bytes.push(disk.size_bytes);
+        snapshot.rotational.push(disk.rotational);
+    }
+
+    snapshot
 }
 
 fn should_skip_block_device(name: &str) -> bool {
@@ -317,6 +360,32 @@ fn read_block_model(base: &Path) -> Option<String> {
     } else {
         Some(name.to_string())
     }
+}
+
+fn read_block_vendor(base: &Path) -> Option<String> {
+    let vendor = fs::read_to_string(base.join("device/vendor")).ok()?;
+    let vendor = vendor.trim();
+    if vendor.is_empty() {
+        None
+    } else {
+        Some(vendor.to_string())
+    }
+}
+
+fn read_block_serial(base: &Path) -> Option<String> {
+    let serial = fs::read_to_string(base.join("device/serial")).ok()?;
+    let serial = serial.trim();
+    if serial.is_empty() {
+        None
+    } else {
+        Some(serial.to_string())
+    }
+}
+
+fn read_block_rotational(base: &Path) -> Option<u8> {
+    let rotational = fs::read_to_string(base.join("queue/rotational")).ok()?;
+    let rotational = rotational.trim().parse::<u8>().ok()?;
+    Some(rotational.min(1))
 }
 
 #[cfg(test)]

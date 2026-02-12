@@ -199,7 +199,12 @@ impl AggregatedSink {
             memory_speed_mts: snapshot.memory_speed_mts,
             disk_count: snapshot.disk_count,
             disk_total_bytes: snapshot.disk_total_bytes,
+            disk_names: snapshot.disk_names,
             disk_models: snapshot.disk_models,
+            disk_vendors: snapshot.disk_vendors,
+            disk_serials: snapshot.disk_serials,
+            disk_sizes_bytes: snapshot.disk_sizes_bytes,
+            disk_rotational: snapshot.disk_rotational,
         }
     }
 

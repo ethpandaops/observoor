@@ -151,7 +151,12 @@ CREATE TABLE host_specs_local ON CLUSTER '{cluster}' (
     memory_speed_mts UInt32 CODEC(ZSTD(1)),
     disk_count UInt16 CODEC(ZSTD(1)),
     disk_total_bytes UInt64 CODEC(ZSTD(1)),
-    disk_models String,
+    disk_names Array(String),
+    disk_models Array(String),
+    disk_vendors Array(String),
+    disk_serials Array(String),
+    disk_sizes_bytes Array(UInt64),
+    disk_rotational Array(UInt8),
     meta_client_name LowCardinality(String),
     meta_network_name LowCardinality(String)
 ) ENGINE = ReplicatedReplacingMergeTree(
