@@ -36,6 +36,7 @@ FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
+    dmidecode \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/target/release/observoor /usr/local/bin/observoor
