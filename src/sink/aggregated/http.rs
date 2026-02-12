@@ -215,9 +215,9 @@ pub struct HostSpecsJson {
 
 #[derive(Debug, Clone)]
 enum HttpExportItem {
-    AggregatedMetric(AggregatedMetricJson),
+    AggregatedMetric(Box<AggregatedMetricJson>),
     SyncState(SyncStateJson),
-    HostSpecs(HostSpecsJson),
+    HostSpecs(Box<HostSpecsJson>),
 }
 
 fn is_empty_str(v: &&str) -> bool {
@@ -1070,7 +1070,8 @@ impl HttpExporter {
             }
 
             let json = Self::latency_to_json(m, &shared);
-            if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+            let item = HttpExportItem::AggregatedMetric(Box::new(json));
+            if tx.try_send(item).is_err() {
                 dropped += batch.latency.len() - i
                     + batch.counter.len()
                     + batch.gauge.len()
@@ -1091,7 +1092,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::counter_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.counter.len() - i
                         + batch.gauge.len()
                         + batch.cpu_util.len()
@@ -1109,7 +1111,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::gauge_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
                     break;
                 }
@@ -1124,7 +1127,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::cpu_util_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.cpu_util.len() - i + snapshot_tail_len;
                     break;
                 }
@@ -1143,7 +1147,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::memory_usage_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.memory_usage.len() - i
                         + process_io_usage_len
                         + process_fd_usage_len
@@ -1164,7 +1169,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_io_usage_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_io_usage.len() - i
                         + process_fd_usage_len
                         + process_sched_usage_len;
@@ -1182,7 +1188,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_fd_usage_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
                     break;
                 }
@@ -1198,7 +1205,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_sched_usage_to_json(m, &shared);
-                if tx.try_send(HttpExportItem::AggregatedMetric(json)).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_sched_usage.len() - i;
                     break;
                 }
@@ -1244,7 +1252,7 @@ impl HttpExporter {
             return Ok(());
         }
 
-        let item = HttpExportItem::HostSpecs(Self::host_specs_to_json(row, meta));
+        let item = HttpExportItem::HostSpecs(Box::new(Self::host_specs_to_json(row, meta)));
         if tx.try_send(item).is_err() {
             tracing::warn!("HTTP export queue full, dropping host_specs item");
         }
