@@ -1,4 +1,4 @@
--- Migration 007 rollback: remove process snapshot tables for memory, I/O, FD, and scheduler state.
+-- Migration 007 rollback: remove process snapshot and host_specs tables.
 
 DROP TABLE IF EXISTS host_specs ON CLUSTER '{cluster}';
 DROP TABLE IF EXISTS host_specs_local ON CLUSTER '{cluster}';

@@ -42,6 +42,10 @@ eBPF agent that monitors Ethereum execution and consensus layer processes at the
 | `oom_kill` | OOM kill event |
 | `process_exit` | Process exit with exit code |
 | `memory_usage` | Per-process memory snapshot (VmSize, VmRSS, RssAnon, RssFile, RssShmem, VmSwap) |
+| `process_io_usage` | Per-process I/O snapshot (`rchar`, `wchar`, syscall counts, read/write bytes) |
+| `process_fd_usage` | Per-process FD snapshot (open FDs, soft/hard FD limits) |
+| `process_sched_usage` | Per-process scheduler snapshot (threads and context-switch counters) |
+| `host_specs` | Periodic host hardware snapshot (hashed host id, CPU topology, DIMMs, disks) |
 
 ## Configuration
 
@@ -55,6 +59,7 @@ sinks:
   aggregated:
     resolution:
       interval: 100ms
+      host_specs_poll_interval: 24h
       overrides:
         - metrics: [syscall_futex, sched_runqueue, mem_reclaim, mem_compaction]
           interval: 500ms
@@ -112,15 +117,9 @@ Notes and caveats:
 
 ## ClickHouse Migrations
 
-Migrations live in `deploy/migrations/clickhouse/` and use [golang-migrate](https://github.com/golang-migrate/migrate) format.
+Migrations are embedded in the binary from `src/migrate/sql/` and use a schema compatible with [golang-migrate](https://github.com/golang-migrate/migrate).
 
-Run with:
-
-```bash
-migrate -source file://deploy/migrations/clickhouse \
-  -database 'clickhouse://localhost:9000/observoor' \
-  up
-```
+When `sinks.aggregated.clickhouse.migrations.enabled: true`, Observoor applies pending migrations automatically at startup.
 
 ## Building
 

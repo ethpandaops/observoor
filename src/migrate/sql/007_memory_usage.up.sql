@@ -1,4 +1,4 @@
--- Migration 007: add process snapshot tables for memory, I/O, FD, and scheduler state.
+-- Migration 007: add process snapshot tables and periodic host_specs snapshots.
 
 CREATE TABLE memory_usage_local ON CLUSTER '{cluster}' (
     updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
