@@ -8,10 +8,12 @@ use clickhouse_rs::Pool;
 
 use crate::export::health::HealthMetrics;
 
-#[cfg(feature = "bpf")]
-use super::metric::MemoryUsageMetric;
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+};
+#[cfg(feature = "bpf")]
+use super::metric::{
+    MemoryUsageMetric, ProcessFDUsageMetric, ProcessIOUsageMetric, ProcessSchedUsageMetric,
 };
 
 /// ClickHouse batch exporter for aggregated metrics.
@@ -164,6 +166,192 @@ impl ClickHouseExporter {
 
         Ok(())
     }
+
+    /// Inserts process I/O usage metrics into the process_io_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_io_usage_table(
+        &self,
+        metrics: &[ProcessIOUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_io_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, rchar_bytes, wchar_bytes, \
+             syscr, syscw, read_bytes, write_bytes, cancelled_write_bytes, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 240);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.rchar_bytes,
+                m.wchar_bytes,
+                m.syscr,
+                m.syscw,
+                m.read_bytes,
+                m.write_bytes,
+                m.cancelled_write_bytes,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_io_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_io_usage");
+            return Err(e).context("sending process_io_usage batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process file descriptor usage metrics into the process_fd_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_fd_usage_table(
+        &self,
+        metrics: &[ProcessFDUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_fd_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, open_fds, fd_limit_soft, fd_limit_hard, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 200);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.open_fds,
+                m.fd_limit_soft,
+                m.fd_limit_hard,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_fd_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_fd_usage");
+            return Err(e).context("sending process_fd_usage batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process scheduler snapshot metrics into the process_sched_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_sched_usage_table(
+        &self,
+        metrics: &[ProcessSchedUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_sched_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, threads, voluntary_ctxt_switches, nonvoluntary_ctxt_switches, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 210);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.threads,
+                m.voluntary_ctxt_switches,
+                m.nonvoluntary_ctxt_switches,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_sched_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_sched_usage");
+            return Err(e).context("sending process_sched_usage batch");
+        }
+
+        Ok(())
+    }
+
     /// Inserts latency metrics into a specific table.
     async fn export_latency_table(
         &self,
@@ -561,6 +749,24 @@ impl ClickHouseExporter {
                 self.export_memory_usage_table(&batch.memory_usage, &batch.metadata)
                     .await?;
                 total_rows += batch.memory_usage.len();
+            }
+
+            if !batch.process_io_usage.is_empty() {
+                self.export_process_io_usage_table(&batch.process_io_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_io_usage.len();
+            }
+
+            if !batch.process_fd_usage.is_empty() {
+                self.export_process_fd_usage_table(&batch.process_fd_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_fd_usage.len();
+            }
+
+            if !batch.process_sched_usage.is_empty() {
+                self.export_process_sched_usage_table(&batch.process_sched_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_sched_usage.len();
             }
         }
 

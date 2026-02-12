@@ -330,7 +330,7 @@ impl Sink for AggregatedSink {
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collector = Collector::new_with_memory_usage(interval, &sampling_cfg, true);
+        let collector = Collector::new_with_process_snapshots(interval, &sampling_cfg, true);
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
@@ -352,6 +352,12 @@ impl Sink for AggregatedSink {
                 cpu_util: Vec::new(),
                 #[cfg(feature = "bpf")]
                 memory_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_io_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_fd_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_sched_usage: Vec::new(),
             };
 
             const BATCH_SIZE: usize = 256;
@@ -387,6 +393,18 @@ impl Sink for AggregatedSink {
                                 let memory_usage = reusable_batch.memory_usage.len();
                                 #[cfg(not(feature = "bpf"))]
                                 let memory_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_io_usage = reusable_batch.process_io_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_io_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_fd_usage = reusable_batch.process_fd_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_fd_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_sched_usage = reusable_batch.process_sched_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_sched_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -402,6 +420,9 @@ impl Sink for AggregatedSink {
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
                                     memory_usage,
+                                    process_io_usage,
+                                    process_fd_usage,
+                                    process_sched_usage,
                                     "final flush"
                                 );
                             }
@@ -449,6 +470,18 @@ impl Sink for AggregatedSink {
                             let memory_usage = reusable_batch.memory_usage.len();
                             #[cfg(not(feature = "bpf"))]
                             let memory_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_io_usage = reusable_batch.process_io_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_io_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_fd_usage = reusable_batch.process_fd_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_fd_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_sched_usage = reusable_batch.process_sched_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_sched_usage = 0usize;
                             for exporter in &exporters {
                                 if let Err(e) = exporter.export(&reusable_batch).await {
                                     tracing::error!(
@@ -464,6 +497,9 @@ impl Sink for AggregatedSink {
                                 gauge = reusable_batch.gauge.len(),
                                 cpu_util = reusable_batch.cpu_util.len(),
                                 memory_usage,
+                                process_io_usage,
+                                process_fd_usage,
+                                process_sched_usage,
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -485,6 +521,18 @@ impl Sink for AggregatedSink {
                                 let memory_usage = reusable_batch.memory_usage.len();
                                 #[cfg(not(feature = "bpf"))]
                                 let memory_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_io_usage = reusable_batch.process_io_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_io_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_fd_usage = reusable_batch.process_fd_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_fd_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_sched_usage = reusable_batch.process_sched_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_sched_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -500,6 +548,9 @@ impl Sink for AggregatedSink {
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
                                     memory_usage,
+                                    process_io_usage,
+                                    process_fd_usage,
+                                    process_sched_usage,
                                     "buffer flushed"
                                 );
                             }

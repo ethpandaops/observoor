@@ -8,9 +8,11 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::HttpExportConfig;
 
-#[cfg(feature = "bpf")]
-use super::metric::MemoryUsageMetric;
 use super::metric::{CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch};
+#[cfg(feature = "bpf")]
+use super::metric::{
+    MemoryUsageMetric, ProcessFDUsageMetric, ProcessIOUsageMetric, ProcessSchedUsageMetric,
+};
 
 /// Number of histogram buckets.
 const NUM_BUCKETS: usize = 10;
@@ -106,6 +108,32 @@ pub struct AggregatedMetricJson {
     pub rss_shmem_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vm_swap_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rchar_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wchar_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syscr: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub syscw: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cancelled_write_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_fds: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fd_limit_soft: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fd_limit_hard: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub threads: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voluntary_ctxt_switches: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nonvoluntary_ctxt_switches: Option<u64>,
     #[serde(skip_serializing_if = "is_arc_str_empty")]
     pub meta_client_name: Arc<str>,
     #[serde(skip_serializing_if = "is_arc_str_empty")]
@@ -167,6 +195,12 @@ impl HttpExporter {
             {
                 if let Some(m) = batch.memory_usage.first() {
                     m.slot.start_time
+                } else if let Some(m) = batch.process_io_usage.first() {
+                    m.slot.start_time
+                } else if let Some(m) = batch.process_fd_usage.first() {
+                    m.slot.start_time
+                } else if let Some(m) = batch.process_sched_usage.first() {
+                    m.slot.start_time
                 } else {
                     return None;
                 }
@@ -220,6 +254,19 @@ impl HttpExporter {
             rss_file_bytes: None,
             rss_shmem_bytes: None,
             vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -260,6 +307,19 @@ impl HttpExporter {
             rss_file_bytes: None,
             rss_shmem_bytes: None,
             vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -300,6 +360,19 @@ impl HttpExporter {
             rss_file_bytes: None,
             rss_shmem_bytes: None,
             vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -340,6 +413,19 @@ impl HttpExporter {
             rss_file_bytes: None,
             rss_shmem_bytes: None,
             vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -384,6 +470,190 @@ impl HttpExporter {
             rss_file_bytes: Some(m.rss_file_bytes),
             rss_shmem_bytes: Some(m.rss_shmem_bytes),
             vm_swap_bytes: Some(m.vm_swap_bytes),
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
+        }
+    }
+
+    /// Converts a process I/O usage metric to JSON.
+    #[cfg(feature = "bpf")]
+    fn process_io_usage_to_json(
+        m: &ProcessIOUsageMetric,
+        shared: &SharedBatchStrings,
+    ) -> AggregatedMetricJson {
+        AggregatedMetricJson {
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::from(format_datetime(m.window.start)),
+            interval_ms: m.window.interval_ms,
+            wallclock_slot: m.slot.number,
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
+            pid: m.pid,
+            client_type: m.client_type.as_str(),
+            sum: m.read_bytes as i64,
+            count: 1,
+            min: None,
+            max: None,
+            histogram: None,
+            port_label: "",
+            direction: None,
+            device_id: 0,
+            rw: None,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
+            vm_size_bytes: None,
+            vm_rss_bytes: None,
+            rss_anon_bytes: None,
+            rss_file_bytes: None,
+            rss_shmem_bytes: None,
+            vm_swap_bytes: None,
+            rchar_bytes: Some(m.rchar_bytes),
+            wchar_bytes: Some(m.wchar_bytes),
+            syscr: Some(m.syscr),
+            syscw: Some(m.syscw),
+            read_bytes: Some(m.read_bytes),
+            write_bytes: Some(m.write_bytes),
+            cancelled_write_bytes: Some(m.cancelled_write_bytes),
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
+        }
+    }
+
+    /// Converts a process file descriptor usage metric to JSON.
+    #[cfg(feature = "bpf")]
+    fn process_fd_usage_to_json(
+        m: &ProcessFDUsageMetric,
+        shared: &SharedBatchStrings,
+    ) -> AggregatedMetricJson {
+        AggregatedMetricJson {
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::from(format_datetime(m.window.start)),
+            interval_ms: m.window.interval_ms,
+            wallclock_slot: m.slot.number,
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
+            pid: m.pid,
+            client_type: m.client_type.as_str(),
+            sum: i64::from(m.open_fds),
+            count: 1,
+            min: None,
+            max: None,
+            histogram: None,
+            port_label: "",
+            direction: None,
+            device_id: 0,
+            rw: None,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
+            vm_size_bytes: None,
+            vm_rss_bytes: None,
+            rss_anon_bytes: None,
+            rss_file_bytes: None,
+            rss_shmem_bytes: None,
+            vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: Some(m.open_fds),
+            fd_limit_soft: Some(m.fd_limit_soft),
+            fd_limit_hard: Some(m.fd_limit_hard),
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
+            meta_client_name: Arc::clone(&shared.meta_client_name),
+            meta_network_name: Arc::clone(&shared.meta_network_name),
+        }
+    }
+
+    /// Converts a process scheduler usage metric to JSON.
+    #[cfg(feature = "bpf")]
+    fn process_sched_usage_to_json(
+        m: &ProcessSchedUsageMetric,
+        shared: &SharedBatchStrings,
+    ) -> AggregatedMetricJson {
+        AggregatedMetricJson {
+            metric_type: m.metric_type,
+            updated_date_time: Arc::clone(&shared.updated_date_time),
+            window_start: Arc::from(format_datetime(m.window.start)),
+            interval_ms: m.window.interval_ms,
+            wallclock_slot: m.slot.number,
+            wallclock_slot_start_date_time: Arc::clone(&shared.wallclock_slot_start_date_time),
+            pid: m.pid,
+            client_type: m.client_type.as_str(),
+            sum: i64::from(m.threads),
+            count: 1,
+            min: None,
+            max: None,
+            histogram: None,
+            port_label: "",
+            direction: None,
+            device_id: 0,
+            rw: None,
+            total_on_cpu_ns: None,
+            event_count: None,
+            active_cores: None,
+            system_cores: None,
+            max_core_on_cpu_ns: None,
+            max_core_id: None,
+            mean_core_pct: None,
+            min_core_pct: None,
+            max_core_pct: None,
+            vm_size_bytes: None,
+            vm_rss_bytes: None,
+            rss_anon_bytes: None,
+            rss_file_bytes: None,
+            rss_shmem_bytes: None,
+            vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: Some(m.threads),
+            voluntary_ctxt_switches: Some(m.voluntary_ctxt_switches),
+            nonvoluntary_ctxt_switches: Some(m.nonvoluntary_ctxt_switches),
             meta_client_name: Arc::clone(&shared.meta_client_name),
             meta_network_name: Arc::clone(&shared.meta_network_name),
         }
@@ -394,6 +664,42 @@ impl HttpExporter {
         #[cfg(feature = "bpf")]
         {
             _batch.memory_usage.len()
+        }
+        #[cfg(not(feature = "bpf"))]
+        {
+            0
+        }
+    }
+
+    #[inline]
+    fn process_io_usage_len(_batch: &MetricBatch) -> usize {
+        #[cfg(feature = "bpf")]
+        {
+            _batch.process_io_usage.len()
+        }
+        #[cfg(not(feature = "bpf"))]
+        {
+            0
+        }
+    }
+
+    #[inline]
+    fn process_fd_usage_len(_batch: &MetricBatch) -> usize {
+        #[cfg(feature = "bpf")]
+        {
+            _batch.process_fd_usage.len()
+        }
+        #[cfg(not(feature = "bpf"))]
+        {
+            0
+        }
+    }
+
+    #[inline]
+    fn process_sched_usage_len(_batch: &MetricBatch) -> usize {
+        #[cfg(feature = "bpf")]
+        {
+            _batch.process_sched_usage.len()
         }
         #[cfg(not(feature = "bpf"))]
         {
@@ -594,6 +900,13 @@ impl HttpExporter {
 
         let mut dropped = 0usize;
         let memory_usage_len = Self::memory_usage_len(batch);
+        let process_io_usage_len = Self::process_io_usage_len(batch);
+        let process_fd_usage_len = Self::process_fd_usage_len(batch);
+        let process_sched_usage_len = Self::process_sched_usage_len(batch);
+        let snapshot_tail_len = memory_usage_len
+            + process_io_usage_len
+            + process_fd_usage_len
+            + process_sched_usage_len;
 
         // Convert all metrics to JSON items and enqueue.
         for (i, m) in batch.latency.iter().enumerate() {
@@ -602,7 +915,7 @@ impl HttpExporter {
                     + batch.counter.len()
                     + batch.gauge.len()
                     + batch.cpu_util.len()
-                    + memory_usage_len;
+                    + snapshot_tail_len;
                 break;
             }
 
@@ -612,7 +925,7 @@ impl HttpExporter {
                     + batch.counter.len()
                     + batch.gauge.len()
                     + batch.cpu_util.len()
-                    + memory_usage_len;
+                    + snapshot_tail_len;
                 break;
             }
         }
@@ -623,7 +936,7 @@ impl HttpExporter {
                     dropped += batch.counter.len() - i
                         + batch.gauge.len()
                         + batch.cpu_util.len()
-                        + memory_usage_len;
+                        + snapshot_tail_len;
                     break;
                 }
 
@@ -632,7 +945,7 @@ impl HttpExporter {
                     dropped += batch.counter.len() - i
                         + batch.gauge.len()
                         + batch.cpu_util.len()
-                        + memory_usage_len;
+                        + snapshot_tail_len;
                     break;
                 }
             }
@@ -641,13 +954,13 @@ impl HttpExporter {
         if dropped == 0 {
             for (i, m) in batch.gauge.iter().enumerate() {
                 if tx.capacity() == 0 {
-                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + memory_usage_len;
+                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
                     break;
                 }
 
                 let json = Self::gauge_to_json(m, &shared);
                 if tx.try_send(json).is_err() {
-                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + memory_usage_len;
+                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
                     break;
                 }
             }
@@ -656,13 +969,13 @@ impl HttpExporter {
         if dropped == 0 {
             for (i, m) in batch.cpu_util.iter().enumerate() {
                 if tx.capacity() == 0 {
-                    dropped += batch.cpu_util.len() - i + memory_usage_len;
+                    dropped += batch.cpu_util.len() - i + snapshot_tail_len;
                     break;
                 }
 
                 let json = Self::cpu_util_to_json(m, &shared);
                 if tx.try_send(json).is_err() {
-                    dropped += batch.cpu_util.len() - i + memory_usage_len;
+                    dropped += batch.cpu_util.len() - i + snapshot_tail_len;
                     break;
                 }
             }
@@ -672,13 +985,71 @@ impl HttpExporter {
         if dropped == 0 {
             for (i, m) in batch.memory_usage.iter().enumerate() {
                 if tx.capacity() == 0 {
-                    dropped += batch.memory_usage.len() - i;
+                    dropped += batch.memory_usage.len() - i
+                        + process_io_usage_len
+                        + process_fd_usage_len
+                        + process_sched_usage_len;
                     break;
                 }
 
                 let json = Self::memory_usage_to_json(m, &shared);
                 if tx.try_send(json).is_err() {
-                    dropped += batch.memory_usage.len() - i;
+                    dropped += batch.memory_usage.len() - i
+                        + process_io_usage_len
+                        + process_fd_usage_len
+                        + process_sched_usage_len;
+                    break;
+                }
+            }
+        }
+
+        #[cfg(feature = "bpf")]
+        if dropped == 0 {
+            for (i, m) in batch.process_io_usage.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.process_io_usage.len() - i
+                        + process_fd_usage_len
+                        + process_sched_usage_len;
+                    break;
+                }
+
+                let json = Self::process_io_usage_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.process_io_usage.len() - i
+                        + process_fd_usage_len
+                        + process_sched_usage_len;
+                    break;
+                }
+            }
+        }
+
+        #[cfg(feature = "bpf")]
+        if dropped == 0 {
+            for (i, m) in batch.process_fd_usage.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
+                    break;
+                }
+
+                let json = Self::process_fd_usage_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
+                    break;
+                }
+            }
+        }
+
+        #[cfg(feature = "bpf")]
+        if dropped == 0 {
+            for (i, m) in batch.process_sched_usage.iter().enumerate() {
+                if tx.capacity() == 0 {
+                    dropped += batch.process_sched_usage.len() - i;
+                    break;
+                }
+
+                let json = Self::process_sched_usage_to_json(m, &shared);
+                if tx.try_send(json).is_err() {
+                    dropped += batch.process_sched_usage.len() - i;
                     break;
                 }
             }
@@ -995,6 +1366,19 @@ mod tests {
             rss_file_bytes: None,
             rss_shmem_bytes: None,
             vm_swap_bytes: None,
+            rchar_bytes: None,
+            wchar_bytes: None,
+            syscr: None,
+            syscw: None,
+            read_bytes: None,
+            write_bytes: None,
+            cancelled_write_bytes: None,
+            open_fds: None,
+            fd_limit_soft: None,
+            fd_limit_hard: None,
+            threads: None,
+            voluntary_ctxt_switches: None,
+            nonvoluntary_ctxt_switches: None,
             meta_client_name: Arc::from("test-node"),
             meta_network_name: Arc::from("mainnet"),
         };
@@ -1065,6 +1449,12 @@ mod tests {
             cpu_util: vec![],
             #[cfg(feature = "bpf")]
             memory_usage: vec![],
+            #[cfg(feature = "bpf")]
+            process_io_usage: vec![],
+            #[cfg(feature = "bpf")]
+            process_fd_usage: vec![],
+            #[cfg(feature = "bpf")]
+            process_sched_usage: vec![],
         };
 
         let shared = HttpExporter::shared_strings(&batch).expect("batch should not be empty");

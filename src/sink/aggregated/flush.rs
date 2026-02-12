@@ -330,6 +330,12 @@ mod tests {
             cpu_util: Vec::new(),
             #[cfg(feature = "bpf")]
             memory_usage: Vec::new(),
+            #[cfg(feature = "bpf")]
+            process_io_usage: Vec::new(),
+            #[cfg(feature = "bpf")]
+            process_fd_usage: Vec::new(),
+            #[cfg(feature = "bpf")]
+            process_sched_usage: Vec::new(),
         }
     }
 
