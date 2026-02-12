@@ -43,6 +43,8 @@ sinks:
       slot_aligned: true
       # How often to write sync state (default: 12s)
       sync_state_poll_interval: 12s
+      # How often to write host hardware specs (default: 24h)
+      host_specs_poll_interval: 24h
       # Optional per-metric slower intervals.
       # - Each override interval must be greater than `interval`.
       # - Each override interval must be an exact multiple of `interval`.

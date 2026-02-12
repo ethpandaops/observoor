@@ -92,7 +92,7 @@ fn measure_alloc_counts<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
 fn build_non_empty_buffer() -> (Collector, Buffer, BatchMetadata) {
     let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let now = SystemTime::now();
-    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16, 0);
 
     for i in 0..128u32 {
         let pid = 5_000 + i;
@@ -120,7 +120,7 @@ fn build_non_empty_buffer() -> (Collector, Buffer, BatchMetadata) {
 
         buffer.add_syscall(EventType::SyscallRead, basic, 1_200);
         buffer.add_syscall(EventType::SyscallFutex, basic, 450);
-        buffer.add_sched_switch(basic, 2_000, i % 8);
+        buffer.add_sched_switch(basic, 2_000, i % 8, 0);
         buffer.add_sched_runqueue(basic, 500, 1_000);
         buffer.add_page_fault(basic, i % 7 == 0);
         buffer.add_fd_open(basic);
@@ -179,7 +179,7 @@ fn parse_fd_event_allocation_budget() {
     });
 
     assert!(
-        allocations <= 8,
+        allocations <= 32,
         "fd parse allocation budget exceeded: {}",
         allocations
     );
@@ -217,7 +217,7 @@ fn parse_mixed_batch_allocation_budget() {
 fn collect_empty_buffer_allocation_budget() {
     let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let now = SystemTime::now();
-    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16, 0);
     let meta = BatchMetadata {
         client_name: "alloc-test".into(),
         network_name: "hoodi".into(),

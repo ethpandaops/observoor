@@ -11,6 +11,10 @@ use crate::export::health::HealthMetrics;
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
 };
+#[cfg(feature = "bpf")]
+use super::metric::{
+    MemoryUsageMetric, ProcessFDUsageMetric, ProcessIOUsageMetric, ProcessSchedUsageMetric,
+};
 
 /// ClickHouse batch exporter for aggregated metrics.
 ///
@@ -98,6 +102,256 @@ impl ClickHouseExporter {
 
         Ok(())
     }
+
+    /// Inserts process memory usage metrics into the memory_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_memory_usage_table(
+        &self,
+        metrics: &[MemoryUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.memory_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, vm_size_bytes, vm_rss_bytes, \
+             rss_anon_bytes, rss_file_bytes, rss_shmem_bytes, vm_swap_bytes, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 220);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.vm_size_bytes,
+                m.vm_rss_bytes,
+                m.rss_anon_bytes,
+                m.rss_file_bytes,
+                m.rss_shmem_bytes,
+                m.vm_swap_bytes,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for memory usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("memory_usage");
+            return Err(e).context("sending memory_usage batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process I/O usage metrics into the process_io_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_io_usage_table(
+        &self,
+        metrics: &[ProcessIOUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_io_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, rchar_bytes, wchar_bytes, \
+             syscr, syscw, read_bytes, write_bytes, cancelled_write_bytes, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 240);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, {}, {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.rchar_bytes,
+                m.wchar_bytes,
+                m.syscr,
+                m.syscw,
+                m.read_bytes,
+                m.write_bytes,
+                m.cancelled_write_bytes,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_io_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_io_usage");
+            return Err(e).context("sending process_io_usage batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process file descriptor usage metrics into the process_fd_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_fd_usage_table(
+        &self,
+        metrics: &[ProcessFDUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_fd_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, open_fds, fd_limit_soft, fd_limit_hard, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 200);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.open_fds,
+                m.fd_limit_soft,
+                m.fd_limit_hard,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_fd_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_fd_usage");
+            return Err(e).context("sending process_fd_usage batch");
+        }
+
+        Ok(())
+    }
+
+    /// Inserts process scheduler snapshot metrics into the process_sched_usage table.
+    #[cfg(feature = "bpf")]
+    async fn export_process_sched_usage_table(
+        &self,
+        metrics: &[ProcessSchedUsageMetric],
+        meta: &BatchMetadata,
+    ) -> Result<()> {
+        let Some(first) = metrics.first() else {
+            return Ok(());
+        };
+
+        let table = format!("{}.process_sched_usage", self.database);
+        let columns = "updated_date_time, window_start, interval_ms, wallclock_slot, wallclock_slot_start_date_time, \
+             pid, client_type, sampling_mode, sampling_rate, threads, voluntary_ctxt_switches, nonvoluntary_ctxt_switches, \
+             meta_client_name, meta_network_name";
+
+        let updated = format_datetime(meta.updated_time);
+        let window_start = format_datetime(first.window.start);
+        let slot_start = format_datetime(first.slot.start_time);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+        let mut sql =
+            String::with_capacity(160 + table.len() + columns.len() + metrics.len() * 210);
+        let _ = write!(sql, "INSERT INTO {table} ({columns}) VALUES ");
+
+        for (idx, m) in metrics.iter().enumerate() {
+            if idx > 0 {
+                sql.push_str(", ");
+            }
+
+            let _ = write!(
+                sql,
+                "({updated}, {window_start}, {}, {}, {slot_start}, {}, '{}', '{}', {}, \
+                 {}, {}, {}, '{client_name}', '{network_name}')",
+                m.window.interval_ms,
+                m.slot.number,
+                m.pid,
+                m.client_type.as_str(),
+                m.sampling_mode.as_str(),
+                m.sampling_rate,
+                m.threads,
+                m.voluntary_ctxt_switches,
+                m.nonvoluntary_ctxt_switches,
+            );
+        }
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for process_sched_usage insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("process_sched_usage");
+            return Err(e).context("sending process_sched_usage batch");
+        }
+
+        Ok(())
+    }
+
     /// Inserts latency metrics into a specific table.
     async fn export_latency_table(
         &self,
@@ -488,6 +742,34 @@ impl ClickHouseExporter {
             total_rows += batch.cpu_util.len();
         }
 
+        #[cfg(feature = "bpf")]
+        {
+            // Export memory usage snapshot metrics.
+            if !batch.memory_usage.is_empty() {
+                self.export_memory_usage_table(&batch.memory_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.memory_usage.len();
+            }
+
+            if !batch.process_io_usage.is_empty() {
+                self.export_process_io_usage_table(&batch.process_io_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_io_usage.len();
+            }
+
+            if !batch.process_fd_usage.is_empty() {
+                self.export_process_fd_usage_table(&batch.process_fd_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_fd_usage.len();
+            }
+
+            if !batch.process_sched_usage.is_empty() {
+                self.export_process_sched_usage_table(&batch.process_sched_usage, &batch.metadata)
+                    .await?;
+                total_rows += batch.process_sched_usage.len();
+            }
+        }
+
         if total_rows > 0 {
             if let Some(health) = &self.health {
                 health
@@ -518,6 +800,58 @@ pub struct SyncStateRow {
     pub cl_syncing: bool,
     pub el_optimistic: bool,
     pub el_offline: bool,
+}
+
+/// Host specs row for the host_specs table.
+#[allow(dead_code)]
+pub struct HostSpecsRow {
+    pub updated_date_time: SystemTime,
+    pub event_time: SystemTime,
+    pub wallclock_slot: u32,
+    pub wallclock_slot_start_date_time: SystemTime,
+    pub host_id: String,
+    pub kernel_release: String,
+    pub os_name: String,
+    pub architecture: String,
+    pub cpu_model: String,
+    pub cpu_vendor: String,
+    pub cpu_online_cores: u16,
+    pub cpu_logical_cores: u16,
+    pub cpu_physical_cores: u16,
+    pub cpu_performance_cores: u16,
+    pub cpu_efficiency_cores: u16,
+    pub cpu_unknown_type_cores: u16,
+    pub cpu_logical_ids: Vec<u16>,
+    pub cpu_core_ids: Vec<i32>,
+    pub cpu_package_ids: Vec<i32>,
+    pub cpu_die_ids: Vec<i32>,
+    pub cpu_cluster_ids: Vec<i32>,
+    pub cpu_core_types: Vec<u8>,
+    pub cpu_core_type_labels: Vec<String>,
+    pub cpu_online_flags: Vec<u8>,
+    pub cpu_max_freq_khz: Vec<u64>,
+    pub cpu_base_freq_khz: Vec<u64>,
+    pub memory_total_bytes: u64,
+    pub memory_type: String,
+    pub memory_speed_mts: u32,
+    pub memory_dimm_count: u16,
+    pub memory_dimm_sizes_bytes: Vec<u64>,
+    pub memory_dimm_types: Vec<String>,
+    pub memory_dimm_speeds_mts: Vec<u32>,
+    pub memory_dimm_configured_speeds_mts: Vec<u32>,
+    pub memory_dimm_locators: Vec<String>,
+    pub memory_dimm_bank_locators: Vec<String>,
+    pub memory_dimm_manufacturers: Vec<String>,
+    pub memory_dimm_part_numbers: Vec<String>,
+    pub memory_dimm_serials: Vec<String>,
+    pub disk_count: u16,
+    pub disk_total_bytes: u64,
+    pub disk_names: Vec<String>,
+    pub disk_models: Vec<String>,
+    pub disk_vendors: Vec<String>,
+    pub disk_serials: Vec<String>,
+    pub disk_sizes_bytes: Vec<u64>,
+    pub disk_rotational: Vec<u8>,
 }
 
 impl ClickHouseExporter {
@@ -561,6 +895,106 @@ impl ClickHouseExporter {
 
         Ok(())
     }
+
+    /// Writes a host specs row to the host_specs table.
+    #[allow(dead_code)]
+    pub async fn export_host_specs(&self, row: &HostSpecsRow, meta: &BatchMetadata) -> Result<()> {
+        let table = format!("{}.host_specs", self.database);
+
+        let updated = format_datetime(row.updated_date_time);
+        let event_time = format_datetime(row.event_time);
+        let slot_start = format_datetime(row.wallclock_slot_start_date_time);
+        let host_id = escape_sql(&row.host_id);
+        let kernel_release = escape_sql(&row.kernel_release);
+        let os_name = escape_sql(&row.os_name);
+        let architecture = escape_sql(&row.architecture);
+        let cpu_model = escape_sql(&row.cpu_model);
+        let cpu_vendor = escape_sql(&row.cpu_vendor);
+        let cpu_logical_ids = format_u16_array(&row.cpu_logical_ids);
+        let cpu_core_ids = format_i32_array(&row.cpu_core_ids);
+        let cpu_package_ids = format_i32_array(&row.cpu_package_ids);
+        let cpu_die_ids = format_i32_array(&row.cpu_die_ids);
+        let cpu_cluster_ids = format_i32_array(&row.cpu_cluster_ids);
+        let cpu_core_types = format_u8_array(&row.cpu_core_types);
+        let cpu_core_type_labels = format_string_array(&row.cpu_core_type_labels);
+        let cpu_online_flags = format_u8_array(&row.cpu_online_flags);
+        let cpu_max_freq_khz = format_u64_array(&row.cpu_max_freq_khz);
+        let cpu_base_freq_khz = format_u64_array(&row.cpu_base_freq_khz);
+        let memory_type = escape_sql(&row.memory_type);
+        let memory_dimm_sizes_bytes = format_u64_array(&row.memory_dimm_sizes_bytes);
+        let memory_dimm_types = format_string_array(&row.memory_dimm_types);
+        let memory_dimm_speeds_mts = format_u32_array(&row.memory_dimm_speeds_mts);
+        let memory_dimm_configured_speeds_mts =
+            format_u32_array(&row.memory_dimm_configured_speeds_mts);
+        let memory_dimm_locators = format_string_array(&row.memory_dimm_locators);
+        let memory_dimm_bank_locators = format_string_array(&row.memory_dimm_bank_locators);
+        let memory_dimm_manufacturers = format_string_array(&row.memory_dimm_manufacturers);
+        let memory_dimm_part_numbers = format_string_array(&row.memory_dimm_part_numbers);
+        let memory_dimm_serials = format_string_array(&row.memory_dimm_serials);
+        let disk_names = format_string_array(&row.disk_names);
+        let disk_models = format_string_array(&row.disk_models);
+        let disk_vendors = format_string_array(&row.disk_vendors);
+        let disk_serials = format_string_array(&row.disk_serials);
+        let disk_sizes_bytes = format_u64_array(&row.disk_sizes_bytes);
+        let disk_rotational = format_u8_array(&row.disk_rotational);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+
+        let sql = format!(
+            "INSERT INTO {table} (\
+             updated_date_time, event_time, wallclock_slot, wallclock_slot_start_date_time, \
+             host_id, kernel_release, os_name, architecture, \
+             cpu_model, cpu_vendor, cpu_online_cores, cpu_logical_cores, \
+             cpu_physical_cores, cpu_performance_cores, cpu_efficiency_cores, cpu_unknown_type_cores, \
+             cpu_logical_ids, cpu_core_ids, cpu_package_ids, cpu_die_ids, cpu_cluster_ids, \
+             cpu_core_types, cpu_core_type_labels, cpu_online_flags, cpu_max_freq_khz, cpu_base_freq_khz, \
+             memory_total_bytes, memory_type, memory_speed_mts, memory_dimm_count, \
+             memory_dimm_sizes_bytes, memory_dimm_types, memory_dimm_speeds_mts, \
+             memory_dimm_configured_speeds_mts, memory_dimm_locators, memory_dimm_bank_locators, \
+             memory_dimm_manufacturers, memory_dimm_part_numbers, memory_dimm_serials, \
+             disk_count, disk_total_bytes, \
+             disk_names, disk_models, disk_vendors, disk_serials, disk_sizes_bytes, disk_rotational, \
+             meta_client_name, meta_network_name\
+             ) VALUES (\
+             {updated}, {event_time}, {}, {slot_start}, \
+             '{host_id}', '{kernel_release}', '{os_name}', '{architecture}', \
+             '{cpu_model}', '{cpu_vendor}', {}, {}, {}, {}, {}, {}, \
+             {cpu_logical_ids}, {cpu_core_ids}, {cpu_package_ids}, {cpu_die_ids}, {cpu_cluster_ids}, \
+             {cpu_core_types}, {cpu_core_type_labels}, {cpu_online_flags}, {cpu_max_freq_khz}, {cpu_base_freq_khz}, \
+             {}, '{memory_type}', {}, {}, \
+             {memory_dimm_sizes_bytes}, {memory_dimm_types}, {memory_dimm_speeds_mts}, \
+             {memory_dimm_configured_speeds_mts}, {memory_dimm_locators}, {memory_dimm_bank_locators}, \
+             {memory_dimm_manufacturers}, {memory_dimm_part_numbers}, {memory_dimm_serials}, \
+             {}, {}, {disk_names}, {disk_models}, {disk_vendors}, {disk_serials}, {disk_sizes_bytes}, {disk_rotational}, \
+             '{client_name}', '{network_name}'\
+             )",
+            row.wallclock_slot,
+            row.cpu_online_cores,
+            row.cpu_logical_cores,
+            row.cpu_physical_cores,
+            row.cpu_performance_cores,
+            row.cpu_efficiency_cores,
+            row.cpu_unknown_type_cores,
+            row.memory_total_bytes,
+            row.memory_speed_mts,
+            row.memory_dimm_count,
+            row.disk_count,
+            row.disk_total_bytes,
+        );
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for host_specs insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("host_specs");
+            return Err(e).context("sending host_specs batch");
+        }
+
+        Ok(())
+    }
 }
 
 // --- SQL formatting helpers ---
@@ -574,6 +1008,109 @@ fn format_datetime(t: SystemTime) -> String {
 /// Escapes a string value for SQL insertion (single-quote escaping).
 fn escape_sql(s: &str) -> String {
     s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+fn format_string_array(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 16 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let escaped = escape_sql(value);
+        let _ = write!(out, "'{escaped}'");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u64_array(values: &[u64]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 8 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u32_array(values: &[u32]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 6 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u16_array(values: &[u16]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 4 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_i32_array(values: &[i32]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 6 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u8_array(values: &[u8]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 2 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
 }
 
 fn append_histogram(buf: &mut String, h: &[u32]) {
@@ -618,6 +1155,46 @@ mod tests {
         assert_eq!(escape_sql("hello"), "hello");
         assert_eq!(escape_sql("it's"), "it\\'s");
         assert_eq!(escape_sql("back\\slash"), "back\\\\slash");
+    }
+
+    #[test]
+    fn test_format_string_array() {
+        let values = vec!["nvme0n1".to_string(), "disk's model".to_string()];
+        assert_eq!(
+            format_string_array(&values),
+            "['nvme0n1', 'disk\\'s model']"
+        );
+        assert_eq!(format_string_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u64_array() {
+        assert_eq!(format_u64_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u64_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u32_array() {
+        assert_eq!(format_u32_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u32_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u16_array() {
+        assert_eq!(format_u16_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u16_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_i32_array() {
+        assert_eq!(format_i32_array(&[-1, 0, 42]), "[-1, 0, 42]");
+        assert_eq!(format_i32_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u8_array() {
+        assert_eq!(format_u8_array(&[0, 1, 1]), "[0, 1, 1]");
+        assert_eq!(format_u8_array(&[]), "[]");
     }
 
     #[test]

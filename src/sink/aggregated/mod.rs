@@ -6,6 +6,7 @@ pub mod dimension;
 pub mod exporter;
 pub mod flush;
 pub mod histogram;
+pub mod host_specs;
 pub mod metric;
 
 pub mod clickhouse;
@@ -25,11 +26,12 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, EventType, NetIOEvent, ParsedEvent, TypedEvent};
 
 use self::buffer::Buffer;
-use self::clickhouse::SyncStateRow;
+use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
+use self::host_specs::collect_host_specs;
 use self::metric::{BatchMetadata, MetricBatch};
 
 /// Shared atomic state that can be safely sent to a spawned task.
@@ -155,6 +157,7 @@ impl AggregatedSink {
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
             system_cores,
+            buffer::monotonic_ns(),
         )
     }
 
@@ -169,6 +172,62 @@ impl AggregatedSink {
             cl_syncing: state.cl_syncing.load(Ordering::Relaxed) == 1,
             el_optimistic: state.el_optimistic.load(Ordering::Relaxed) == 1,
             el_offline: state.el_offline.load(Ordering::Relaxed) == 1,
+        }
+    }
+
+    /// Builds a host-specs row from current shared state and machine snapshot.
+    fn new_host_specs_row(state: &SharedState, now: SystemTime) -> HostSpecsRow {
+        let snapshot = collect_host_specs();
+
+        HostSpecsRow {
+            updated_date_time: now,
+            event_time: now,
+            wallclock_slot: u32::try_from(state.current_slot.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            wallclock_slot_start_date_time: state.slot_start_time(),
+            host_id: snapshot.host_id,
+            kernel_release: snapshot.kernel_release,
+            os_name: snapshot.os_name,
+            architecture: snapshot.architecture,
+            cpu_model: snapshot.cpu_model,
+            cpu_vendor: snapshot.cpu_vendor,
+            cpu_online_cores: snapshot.cpu_online_cores,
+            cpu_logical_cores: snapshot.cpu_logical_cores,
+            cpu_physical_cores: snapshot.cpu_physical_cores,
+            cpu_performance_cores: snapshot.cpu_performance_cores,
+            cpu_efficiency_cores: snapshot.cpu_efficiency_cores,
+            cpu_unknown_type_cores: snapshot.cpu_unknown_type_cores,
+            cpu_logical_ids: snapshot.cpu_logical_ids,
+            cpu_core_ids: snapshot.cpu_core_ids,
+            cpu_package_ids: snapshot.cpu_package_ids,
+            cpu_die_ids: snapshot.cpu_die_ids,
+            cpu_cluster_ids: snapshot.cpu_cluster_ids,
+            cpu_core_types: snapshot.cpu_core_types,
+            cpu_core_type_labels: snapshot.cpu_core_type_labels,
+            cpu_online_flags: snapshot.cpu_online_flags,
+            cpu_max_freq_khz: snapshot.cpu_max_freq_khz,
+            cpu_base_freq_khz: snapshot.cpu_base_freq_khz,
+            memory_total_bytes: snapshot.memory_total_bytes,
+            memory_type: snapshot.memory_type,
+            memory_speed_mts: snapshot.memory_speed_mts,
+            memory_dimm_count: snapshot.memory_dimm_count,
+            memory_dimm_sizes_bytes: snapshot.memory_dimm_sizes_bytes,
+            memory_dimm_types: snapshot.memory_dimm_types,
+            memory_dimm_speeds_mts: snapshot.memory_dimm_speeds_mts,
+            memory_dimm_configured_speeds_mts: snapshot.memory_dimm_configured_speeds_mts,
+            memory_dimm_locators: snapshot.memory_dimm_locators,
+            memory_dimm_bank_locators: snapshot.memory_dimm_bank_locators,
+            memory_dimm_manufacturers: snapshot.memory_dimm_manufacturers,
+            memory_dimm_part_numbers: snapshot.memory_dimm_part_numbers,
+            memory_dimm_serials: snapshot.memory_dimm_serials,
+            disk_count: snapshot.disk_count,
+            disk_total_bytes: snapshot.disk_total_bytes,
+            disk_names: snapshot.disk_names,
+            disk_models: snapshot.disk_models,
+            disk_vendors: snapshot.disk_vendors,
+            disk_serials: snapshot.disk_serials,
+            disk_sizes_bytes: snapshot.disk_sizes_bytes,
+            disk_rotational: snapshot.disk_rotational,
         }
     }
 
@@ -242,7 +301,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id, event.raw.timestamp_ns);
             }
 
             TypedEvent::SchedRunqueue(e) => {
@@ -328,9 +387,10 @@ impl Sink for AggregatedSink {
         let dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
+        let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collector = Collector::new(interval, &sampling_cfg);
+        let collector = Collector::new_with_process_snapshots(interval, &sampling_cfg, true);
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
@@ -340,6 +400,8 @@ impl Sink for AggregatedSink {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
             sync_state_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut host_specs_ticker = tokio::time::interval(host_specs_interval);
+            host_specs_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut reusable_batch = MetricBatch {
                 metadata: BatchMetadata {
                     client_name: Arc::clone(&meta_client_name),
@@ -350,9 +412,40 @@ impl Sink for AggregatedSink {
                 counter: Vec::new(),
                 gauge: Vec::new(),
                 cpu_util: Vec::new(),
+                #[cfg(feature = "bpf")]
+                memory_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_io_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_fd_usage: Vec::new(),
+                #[cfg(feature = "bpf")]
+                process_sched_usage: Vec::new(),
             };
 
             const BATCH_SIZE: usize = 256;
+
+            // Emit host specs once on startup, then on the configured ticker.
+            {
+                let now = SystemTime::now();
+                let row = AggregatedSink::new_host_specs_row(&state, now);
+                let meta = BatchMetadata {
+                    client_name: Arc::clone(&meta_client_name),
+                    network_name: Arc::clone(&meta_network_name),
+                    updated_time: now,
+                };
+
+                for exporter in &exporters {
+                    if let Err(e) = exporter.export_host_specs(&row, &meta).await {
+                        tracing::error!(
+                            exporter = exporter.name(),
+                            error = %e,
+                            "startup host specs export failed",
+                        );
+                    }
+                }
+            }
+            // Consume the immediate first tick after startup export.
+            host_specs_ticker.tick().await;
 
             loop {
                 tokio::select! {
@@ -381,6 +474,22 @@ impl Sink for AggregatedSink {
                             collector.collect_into(&final_buf, &mut reusable_batch);
                             flush_controller.force_flush_all(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
+                                #[cfg(feature = "bpf")]
+                                let memory_usage = reusable_batch.memory_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let memory_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_io_usage = reusable_batch.process_io_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_io_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_fd_usage = reusable_batch.process_fd_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_fd_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_sched_usage = reusable_batch.process_sched_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_sched_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -395,6 +504,10 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
+                                    memory_usage,
+                                    process_io_usage,
+                                    process_fd_usage,
+                                    process_sched_usage,
                                     "final flush"
                                 );
                             }
@@ -438,6 +551,22 @@ impl Sink for AggregatedSink {
                         collector.collect_into(&rotated_buf, &mut reusable_batch);
                         flush_controller.force_flush_all(&mut reusable_batch);
                         if !reusable_batch.is_empty() {
+                            #[cfg(feature = "bpf")]
+                            let memory_usage = reusable_batch.memory_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let memory_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_io_usage = reusable_batch.process_io_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_io_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_fd_usage = reusable_batch.process_fd_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_fd_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_sched_usage = reusable_batch.process_sched_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_sched_usage = 0usize;
                             for exporter in &exporters {
                                 if let Err(e) = exporter.export(&reusable_batch).await {
                                     tracing::error!(
@@ -452,6 +581,10 @@ impl Sink for AggregatedSink {
                                 counter = reusable_batch.counter.len(),
                                 gauge = reusable_batch.gauge.len(),
                                 cpu_util = reusable_batch.cpu_util.len(),
+                                memory_usage,
+                                process_io_usage,
+                                process_fd_usage,
+                                process_sched_usage,
                                 "slot-aligned buffer flushed"
                             );
                         }
@@ -469,6 +602,22 @@ impl Sink for AggregatedSink {
                             collector.collect_into(&old_buf, &mut reusable_batch);
                             flush_controller.process_tick(&mut reusable_batch);
                             if !reusable_batch.is_empty() {
+                                #[cfg(feature = "bpf")]
+                                let memory_usage = reusable_batch.memory_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let memory_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_io_usage = reusable_batch.process_io_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_io_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_fd_usage = reusable_batch.process_fd_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_fd_usage = 0usize;
+                                #[cfg(feature = "bpf")]
+                                let process_sched_usage = reusable_batch.process_sched_usage.len();
+                                #[cfg(not(feature = "bpf"))]
+                                let process_sched_usage = 0usize;
                                 for exporter in &exporters {
                                     if let Err(e) = exporter.export(&reusable_batch).await {
                                         tracing::error!(
@@ -483,6 +632,10 @@ impl Sink for AggregatedSink {
                                     counter = reusable_batch.counter.len(),
                                     gauge = reusable_batch.gauge.len(),
                                     cpu_util = reusable_batch.cpu_util.len(),
+                                    memory_usage,
+                                    process_io_usage,
+                                    process_fd_usage,
+                                    process_sched_usage,
                                     "buffer flushed"
                                 );
                             }
@@ -508,6 +661,26 @@ impl Sink for AggregatedSink {
                             }
                         }
                     }
+
+                    _ = host_specs_ticker.tick() => {
+                        let now = SystemTime::now();
+                        let row = AggregatedSink::new_host_specs_row(&state, now);
+                        let meta = BatchMetadata {
+                            client_name: Arc::clone(&meta_client_name),
+                            network_name: Arc::clone(&meta_network_name),
+                            updated_time: now,
+                        };
+
+                        for exporter in &exporters {
+                            if let Err(e) = exporter.export_host_specs(&row, &meta).await {
+                                tracing::error!(
+                                    exporter = exporter.name(),
+                                    error = %e,
+                                    "host specs export failed",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -515,6 +688,7 @@ impl Sink for AggregatedSink {
 
         info!(
             interval = ?self.cfg.resolution.interval,
+            host_specs_interval = ?self.cfg.resolution.host_specs_poll_interval,
             slot_aligned = self.cfg.resolution.slot_aligned,
             tier_overrides = self.cfg.resolution.overrides.len(),
             "aggregated sink started"
@@ -788,6 +962,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -828,6 +1003,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -871,6 +1047,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -909,6 +1086,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -959,6 +1137,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 

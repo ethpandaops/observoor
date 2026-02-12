@@ -1,7 +1,7 @@
 use anyhow::Result;
 use tokio_util::sync::CancellationToken;
 
-use super::clickhouse::{ClickHouseExporter, SyncStateRow};
+use super::clickhouse::{ClickHouseExporter, HostSpecsRow, SyncStateRow};
 use super::http::HttpExporter;
 use super::metric::{BatchMetadata, MetricBatch};
 
@@ -43,6 +43,14 @@ impl Exporter {
     pub async fn export_sync_state(&self, row: &SyncStateRow, meta: &BatchMetadata) -> Result<()> {
         match self {
             Self::ClickHouse(e) => e.export_sync_state(row, meta).await,
+            Self::Http(_) => Ok(()),
+        }
+    }
+
+    /// Export a host-specs row (ClickHouse only).
+    pub async fn export_host_specs(&self, row: &HostSpecsRow, meta: &BatchMetadata) -> Result<()> {
+        match self {
+            Self::ClickHouse(e) => e.export_host_specs(row, meta).await,
             Self::Http(_) => Ok(()),
         }
     }

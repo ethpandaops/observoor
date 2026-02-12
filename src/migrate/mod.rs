@@ -40,6 +40,11 @@ static MIGRATIONS: &[Migration] = &[
         up_sql: include_str!("sql/006_sampling_metadata.up.sql"),
         down_sql: include_str!("sql/006_sampling_metadata.down.sql"),
     },
+    Migration {
+        version: 7,
+        up_sql: include_str!("sql/007_memory_usage.up.sql"),
+        down_sql: include_str!("sql/007_memory_usage.down.sql"),
+    },
 ];
 
 /// Manages ClickHouse schema migrations.

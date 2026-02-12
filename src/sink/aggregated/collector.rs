@@ -1,6 +1,9 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+#[cfg(all(feature = "bpf", not(test)))]
+use std::fs;
+
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
@@ -13,6 +16,10 @@ use super::dimension::{
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
     SamplingMode, SlotInfo, WindowInfo,
+};
+#[cfg(feature = "bpf")]
+use super::metric::{
+    MemoryUsageMetric, ProcessFDUsageMetric, ProcessIOUsageMetric, ProcessSchedUsageMetric,
 };
 
 /// Canonical list of all metric names emitted by this collector.
@@ -56,6 +63,16 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 pub struct Collector {
     interval_ms: u16,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
+    #[cfg(feature = "bpf")]
+    collect_process_snapshots: bool,
+    #[cfg(feature = "bpf")]
+    proc_status_reader: fn(u32) -> Option<ProcStatusSnapshot>,
+    #[cfg(feature = "bpf")]
+    proc_io_reader: fn(u32) -> Option<ProcIOSnapshot>,
+    #[cfg(feature = "bpf")]
+    proc_limits_reader: fn(u32) -> Option<ProcLimitsSnapshot>,
+    #[cfg(feature = "bpf")]
+    proc_fd_count_reader: fn(u32) -> Option<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -64,9 +81,69 @@ struct EventSamplingMetadata {
     rate: f32,
 }
 
+#[cfg(feature = "bpf")]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProcMemorySnapshot {
+    vm_size_bytes: u64,
+    vm_rss_bytes: u64,
+    rss_anon_bytes: u64,
+    rss_file_bytes: u64,
+    rss_shmem_bytes: u64,
+    vm_swap_bytes: u64,
+}
+
+#[cfg(feature = "bpf")]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProcStatusSnapshot {
+    memory: Option<ProcMemorySnapshot>,
+    threads: u32,
+    voluntary_ctxt_switches: u64,
+    nonvoluntary_ctxt_switches: u64,
+}
+
+#[cfg(feature = "bpf")]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProcIOSnapshot {
+    rchar_bytes: u64,
+    wchar_bytes: u64,
+    syscr: u64,
+    syscw: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    cancelled_write_bytes: i64,
+}
+
+#[cfg(feature = "bpf")]
+#[derive(Clone, Copy, Debug, Default)]
+struct ProcLimitsSnapshot {
+    fd_limit_soft: u64,
+    fd_limit_hard: u64,
+}
+
 impl Collector {
     /// Creates a new collector with the given aggregation interval.
     pub fn new(interval: Duration, sampling: &SamplingConfig) -> Self {
+        Self::new_with_process_snapshots(interval, sampling, false)
+    }
+
+    /// Backward-compatible constructor for process snapshot collection.
+    pub fn new_with_memory_usage(
+        interval: Duration,
+        sampling: &SamplingConfig,
+        collect_process_snapshots: bool,
+    ) -> Self {
+        Self::new_with_process_snapshots(interval, sampling, collect_process_snapshots)
+    }
+
+    /// Creates a new collector and controls whether process-level snapshots are collected.
+    pub fn new_with_process_snapshots(
+        interval: Duration,
+        sampling: &SamplingConfig,
+        collect_process_snapshots: bool,
+    ) -> Self {
+        #[cfg(not(feature = "bpf"))]
+        let _ = collect_process_snapshots;
+
         let mut sampling_by_event = [EventSamplingMetadata {
             mode: SamplingMode::None,
             rate: 1.0,
@@ -92,6 +169,16 @@ impl Collector {
         Self {
             interval_ms: interval.as_millis() as u16,
             sampling_by_event,
+            #[cfg(feature = "bpf")]
+            collect_process_snapshots,
+            #[cfg(feature = "bpf")]
+            proc_status_reader: default_proc_status_reader,
+            #[cfg(feature = "bpf")]
+            proc_io_reader: default_proc_io_reader,
+            #[cfg(feature = "bpf")]
+            proc_limits_reader: default_proc_limits_reader,
+            #[cfg(feature = "bpf")]
+            proc_fd_count_reader: default_proc_fd_count_reader,
         }
     }
 
@@ -111,13 +198,44 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
-
+        #[cfg(feature = "bpf")]
+        let memory_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_memory_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_io_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_io_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_fd_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_fd_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_sched_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_sched_usage_capacity(buf)
+        } else {
+            0
+        };
         let mut batch = MetricBatch {
             metadata: meta,
             latency: Vec::with_capacity(latency_capacity),
             counter: Vec::with_capacity(counter_capacity),
             gauge: Vec::with_capacity(gauge_capacity),
             cpu_util: Vec::with_capacity(cpu_util_capacity),
+            #[cfg(feature = "bpf")]
+            memory_usage: Vec::with_capacity(memory_usage_capacity),
+            #[cfg(feature = "bpf")]
+            process_io_usage: Vec::with_capacity(process_io_usage_capacity),
+            #[cfg(feature = "bpf")]
+            process_fd_usage: Vec::with_capacity(process_fd_usage_capacity),
+            #[cfg(feature = "bpf")]
+            process_sched_usage: Vec::with_capacity(process_sched_usage_capacity),
         };
 
         self.collect_into(buf, &mut batch);
@@ -142,16 +260,53 @@ impl Collector {
         let counter_capacity = self.estimate_counter_capacity(buf);
         let gauge_capacity = self.estimate_gauge_capacity(buf);
         let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
-
+        #[cfg(feature = "bpf")]
+        let memory_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_memory_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_io_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_io_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_fd_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_fd_usage_capacity(buf)
+        } else {
+            0
+        };
+        #[cfg(feature = "bpf")]
+        let process_sched_usage_capacity = if self.collect_process_snapshots {
+            self.estimate_process_sched_usage_capacity(buf)
+        } else {
+            0
+        };
         reserve_if_needed(&mut batch.latency, latency_capacity);
         reserve_if_needed(&mut batch.counter, counter_capacity);
         reserve_if_needed(&mut batch.gauge, gauge_capacity);
         reserve_if_needed(&mut batch.cpu_util, cpu_util_capacity);
+        #[cfg(feature = "bpf")]
+        if self.collect_process_snapshots {
+            reserve_if_needed(&mut batch.memory_usage, memory_usage_capacity);
+            reserve_if_needed(&mut batch.process_io_usage, process_io_usage_capacity);
+            reserve_if_needed(&mut batch.process_fd_usage, process_fd_usage_capacity);
+            reserve_if_needed(&mut batch.process_sched_usage, process_sched_usage_capacity);
+        }
 
         batch.latency.clear();
         batch.counter.clear();
         batch.gauge.clear();
         batch.cpu_util.clear();
+        #[cfg(feature = "bpf")]
+        {
+            batch.memory_usage.clear();
+            batch.process_io_usage.clear();
+            batch.process_fd_usage.clear();
+            batch.process_sched_usage.clear();
+        }
 
         self.collect_basic_latency(batch, buf, window, slot);
         self.collect_disk_latency(batch, buf, window, slot);
@@ -201,6 +356,26 @@ impl Collector {
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
+    }
+
+    #[cfg(feature = "bpf")]
+    fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
+    }
+
+    #[cfg(feature = "bpf")]
+    fn estimate_process_io_usage_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
+    }
+
+    #[cfg(feature = "bpf")]
+    fn estimate_process_fd_usage_capacity(&self, buf: &Buffer) -> usize {
+        buf.cpu_on_core.len()
+    }
+
+    #[cfg(feature = "bpf")]
+    fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
         buf.cpu_on_core.len()
     }
 
@@ -664,8 +839,377 @@ impl Collector {
                 min_core_pct,
                 max_core_pct,
             });
+
+            #[cfg(feature = "bpf")]
+            if self.collect_process_snapshots {
+                self.collect_process_snapshot_metrics(batch, window, slot, pid, client_type);
+            }
         }
     }
+
+    #[cfg(feature = "bpf")]
+    fn collect_process_snapshot_metrics(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+    ) {
+        if let Some(status) = (self.proc_status_reader)(pid) {
+            if let Some(memory) = status.memory {
+                self.emit_memory_usage_metric(batch, window, slot, pid, client_type, memory);
+            }
+            self.emit_process_sched_usage_metric(batch, window, slot, pid, client_type, status);
+        }
+
+        if let Some(io) = (self.proc_io_reader)(pid) {
+            self.emit_process_io_usage_metric(batch, window, slot, pid, client_type, io);
+        }
+
+        let open_fds = (self.proc_fd_count_reader)(pid);
+        let limits = (self.proc_limits_reader)(pid);
+        if open_fds.is_none() && limits.is_none() {
+            return;
+        }
+
+        self.emit_process_fd_usage_metric(batch, window, slot, pid, client_type, open_fds, limits);
+    }
+
+    #[cfg(feature = "bpf")]
+    fn emit_memory_usage_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+        snapshot: ProcMemorySnapshot,
+    ) {
+        batch.memory_usage.push(MemoryUsageMetric {
+            metric_type: "memory_usage",
+            window,
+            slot,
+            pid,
+            client_type: client_type_from_u8(client_type),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
+            vm_size_bytes: snapshot.vm_size_bytes,
+            vm_rss_bytes: snapshot.vm_rss_bytes,
+            rss_anon_bytes: snapshot.rss_anon_bytes,
+            rss_file_bytes: snapshot.rss_file_bytes,
+            rss_shmem_bytes: snapshot.rss_shmem_bytes,
+            vm_swap_bytes: snapshot.vm_swap_bytes,
+        });
+    }
+
+    #[cfg(feature = "bpf")]
+    fn emit_process_io_usage_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+        snapshot: ProcIOSnapshot,
+    ) {
+        batch.process_io_usage.push(ProcessIOUsageMetric {
+            metric_type: "process_io_usage",
+            window,
+            slot,
+            pid,
+            client_type: client_type_from_u8(client_type),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
+            rchar_bytes: snapshot.rchar_bytes,
+            wchar_bytes: snapshot.wchar_bytes,
+            syscr: snapshot.syscr,
+            syscw: snapshot.syscw,
+            read_bytes: snapshot.read_bytes,
+            write_bytes: snapshot.write_bytes,
+            cancelled_write_bytes: snapshot.cancelled_write_bytes,
+        });
+    }
+
+    #[cfg(feature = "bpf")]
+    fn emit_process_fd_usage_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+        open_fds: Option<u32>,
+        limits: Option<ProcLimitsSnapshot>,
+    ) {
+        let (fd_limit_soft, fd_limit_hard) = limits
+            .map(|v| (v.fd_limit_soft, v.fd_limit_hard))
+            .unwrap_or((0, 0));
+
+        batch.process_fd_usage.push(ProcessFDUsageMetric {
+            metric_type: "process_fd_usage",
+            window,
+            slot,
+            pid,
+            client_type: client_type_from_u8(client_type),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
+            open_fds: open_fds.unwrap_or(0),
+            fd_limit_soft,
+            fd_limit_hard,
+        });
+    }
+
+    #[cfg(feature = "bpf")]
+    fn emit_process_sched_usage_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: u8,
+        snapshot: ProcStatusSnapshot,
+    ) {
+        if snapshot.threads == 0
+            && snapshot.voluntary_ctxt_switches == 0
+            && snapshot.nonvoluntary_ctxt_switches == 0
+        {
+            return;
+        }
+
+        batch.process_sched_usage.push(ProcessSchedUsageMetric {
+            metric_type: "process_sched_usage",
+            window,
+            slot,
+            pid,
+            client_type: client_type_from_u8(client_type),
+            sampling_mode: SamplingMode::None,
+            sampling_rate: 1.0,
+            threads: snapshot.threads,
+            voluntary_ctxt_switches: snapshot.voluntary_ctxt_switches,
+            nonvoluntary_ctxt_switches: snapshot.nonvoluntary_ctxt_switches,
+        });
+    }
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn default_proc_status_reader(pid: u32) -> Option<ProcStatusSnapshot> {
+    read_proc_status_snapshot(pid)
+}
+
+#[cfg(all(feature = "bpf", test))]
+fn default_proc_status_reader(_pid: u32) -> Option<ProcStatusSnapshot> {
+    None
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn default_proc_io_reader(pid: u32) -> Option<ProcIOSnapshot> {
+    read_proc_io_snapshot(pid)
+}
+
+#[cfg(all(feature = "bpf", test))]
+fn default_proc_io_reader(_pid: u32) -> Option<ProcIOSnapshot> {
+    None
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn default_proc_limits_reader(pid: u32) -> Option<ProcLimitsSnapshot> {
+    read_proc_limits_snapshot(pid)
+}
+
+#[cfg(all(feature = "bpf", test))]
+fn default_proc_limits_reader(_pid: u32) -> Option<ProcLimitsSnapshot> {
+    None
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn default_proc_fd_count_reader(pid: u32) -> Option<u32> {
+    read_proc_fd_count(pid)
+}
+
+#[cfg(all(feature = "bpf", test))]
+fn default_proc_fd_count_reader(_pid: u32) -> Option<u32> {
+    None
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn read_proc_status_snapshot(pid: u32) -> Option<ProcStatusSnapshot> {
+    let path = format!("/proc/{pid}/status");
+    let status = fs::read_to_string(path).ok()?;
+    parse_proc_status_snapshot(&status)
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_status_snapshot(status: &str) -> Option<ProcStatusSnapshot> {
+    let memory = parse_proc_memory_snapshot(status);
+    let threads = parse_proc_status_u64(status, "Threads:")
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0);
+    let voluntary_ctxt_switches =
+        parse_proc_status_u64(status, "voluntary_ctxt_switches:").unwrap_or(0);
+    let nonvoluntary_ctxt_switches =
+        parse_proc_status_u64(status, "nonvoluntary_ctxt_switches:").unwrap_or(0);
+
+    if memory.is_none()
+        && threads == 0
+        && voluntary_ctxt_switches == 0
+        && nonvoluntary_ctxt_switches == 0
+    {
+        return None;
+    }
+
+    Some(ProcStatusSnapshot {
+        memory,
+        threads,
+        voluntary_ctxt_switches,
+        nonvoluntary_ctxt_switches,
+    })
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_memory_snapshot(status: &str) -> Option<ProcMemorySnapshot> {
+    let snapshot = ProcMemorySnapshot {
+        vm_size_bytes: parse_proc_status_kb_bytes(status, "VmSize:").unwrap_or(0),
+        vm_rss_bytes: parse_proc_status_kb_bytes(status, "VmRSS:").unwrap_or(0),
+        rss_anon_bytes: parse_proc_status_kb_bytes(status, "RssAnon:").unwrap_or(0),
+        rss_file_bytes: parse_proc_status_kb_bytes(status, "RssFile:").unwrap_or(0),
+        rss_shmem_bytes: parse_proc_status_kb_bytes(status, "RssShmem:").unwrap_or(0),
+        vm_swap_bytes: parse_proc_status_kb_bytes(status, "VmSwap:").unwrap_or(0),
+    };
+
+    if snapshot.vm_size_bytes == 0
+        && snapshot.vm_rss_bytes == 0
+        && snapshot.rss_anon_bytes == 0
+        && snapshot.rss_file_bytes == 0
+        && snapshot.rss_shmem_bytes == 0
+        && snapshot.vm_swap_bytes == 0
+    {
+        return None;
+    }
+
+    Some(snapshot)
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn read_proc_io_snapshot(pid: u32) -> Option<ProcIOSnapshot> {
+    let path = format!("/proc/{pid}/io");
+    let io = fs::read_to_string(path).ok()?;
+    parse_proc_io_snapshot(&io)
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_io_snapshot(io: &str) -> Option<ProcIOSnapshot> {
+    let snapshot = ProcIOSnapshot {
+        rchar_bytes: parse_proc_io_u64(io, "rchar:").unwrap_or(0),
+        wchar_bytes: parse_proc_io_u64(io, "wchar:").unwrap_or(0),
+        syscr: parse_proc_io_u64(io, "syscr:").unwrap_or(0),
+        syscw: parse_proc_io_u64(io, "syscw:").unwrap_or(0),
+        read_bytes: parse_proc_io_u64(io, "read_bytes:").unwrap_or(0),
+        write_bytes: parse_proc_io_u64(io, "write_bytes:").unwrap_or(0),
+        cancelled_write_bytes: parse_proc_io_i64(io, "cancelled_write_bytes:").unwrap_or(0),
+    };
+
+    if snapshot.rchar_bytes == 0
+        && snapshot.wchar_bytes == 0
+        && snapshot.syscr == 0
+        && snapshot.syscw == 0
+        && snapshot.read_bytes == 0
+        && snapshot.write_bytes == 0
+        && snapshot.cancelled_write_bytes == 0
+    {
+        return None;
+    }
+
+    Some(snapshot)
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn read_proc_limits_snapshot(pid: u32) -> Option<ProcLimitsSnapshot> {
+    let path = format!("/proc/{pid}/limits");
+    let limits = fs::read_to_string(path).ok()?;
+    parse_proc_limits_snapshot(&limits)
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_limits_snapshot(limits: &str) -> Option<ProcLimitsSnapshot> {
+    for line in limits.lines() {
+        if !line.starts_with("Max open files") {
+            continue;
+        }
+
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        let soft = parts.get(3).and_then(|v| parse_proc_limit_value(v));
+        let hard = parts.get(4).and_then(|v| parse_proc_limit_value(v));
+        if soft.is_none() && hard.is_none() {
+            return None;
+        }
+
+        return Some(ProcLimitsSnapshot {
+            fd_limit_soft: soft.unwrap_or(0),
+            fd_limit_hard: hard.unwrap_or(0),
+        });
+    }
+
+    None
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_limit_value(value: &str) -> Option<u64> {
+    if value.eq_ignore_ascii_case("unlimited") {
+        return Some(u64::MAX);
+    }
+    value.parse::<u64>().ok()
+}
+
+#[cfg(all(feature = "bpf", not(test)))]
+fn read_proc_fd_count(pid: u32) -> Option<u32> {
+    let path = format!("/proc/{pid}/fd");
+    let entries = fs::read_dir(path).ok()?;
+    let mut count = 0u32;
+    for entry in entries {
+        if entry.is_ok() {
+            count = count.saturating_add(1);
+        }
+    }
+    Some(count)
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_status_kb_bytes(status: &str, key: &str) -> Option<u64> {
+    parse_proc_status_u64(status, key).map(|v| v.saturating_mul(1024))
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_status_u64(status: &str, key: &str) -> Option<u64> {
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.split_whitespace();
+            return parts.next()?.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_io_u64(io: &str, key: &str) -> Option<u64> {
+    for line in io.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.split_whitespace();
+            return parts.next()?.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_io_i64(io: &str, key: &str) -> Option<i64> {
+    for line in io.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.split_whitespace();
+            return parts.next()?.parse::<i64>().ok();
+        }
+    }
+    None
 }
 
 /// Converts a raw u8 client type to the enum, defaulting to Unknown.
@@ -705,6 +1249,7 @@ mod tests {
             false,
             false,
             16,
+            0,
         )
     }
 
@@ -719,6 +1264,14 @@ mod tests {
         assert!(batch.counter.is_empty());
         assert!(batch.gauge.is_empty());
         assert!(batch.cpu_util.is_empty());
+        #[cfg(feature = "bpf")]
+        assert!(batch.process_io_usage.is_empty());
+        #[cfg(feature = "bpf")]
+        assert!(batch.process_fd_usage.is_empty());
+        #[cfg(feature = "bpf")]
+        assert!(batch.process_sched_usage.is_empty());
+        #[cfg(feature = "bpf")]
+        assert!(batch.memory_usage.is_empty());
     }
 
     #[test]
@@ -992,6 +1545,17 @@ mod tests {
         assert_eq!(direct.counter.len(), reused.counter.len());
         assert_eq!(direct.gauge.len(), reused.gauge.len());
         assert_eq!(direct.cpu_util.len(), reused.cpu_util.len());
+        #[cfg(feature = "bpf")]
+        assert_eq!(direct.memory_usage.len(), reused.memory_usage.len());
+        #[cfg(feature = "bpf")]
+        assert_eq!(direct.process_io_usage.len(), reused.process_io_usage.len());
+        #[cfg(feature = "bpf")]
+        assert_eq!(direct.process_fd_usage.len(), reused.process_fd_usage.len());
+        #[cfg(feature = "bpf")]
+        assert_eq!(
+            direct.process_sched_usage.len(),
+            reused.process_sched_usage.len()
+        );
     }
 
     #[test]
@@ -1012,6 +1576,14 @@ mod tests {
         let counter_capacity = batch.counter.capacity();
         let gauge_capacity = batch.gauge.capacity();
         let cpu_util_capacity = batch.cpu_util.capacity();
+        #[cfg(feature = "bpf")]
+        let memory_usage_capacity = batch.memory_usage.capacity();
+        #[cfg(feature = "bpf")]
+        let process_io_usage_capacity = batch.process_io_usage.capacity();
+        #[cfg(feature = "bpf")]
+        let process_fd_usage_capacity = batch.process_fd_usage.capacity();
+        #[cfg(feature = "bpf")]
+        let process_sched_usage_capacity = batch.process_sched_usage.capacity();
 
         collector.collect_into(&buf, &mut batch);
 
@@ -1019,6 +1591,17 @@ mod tests {
         assert_eq!(batch.counter.capacity(), counter_capacity);
         assert_eq!(batch.gauge.capacity(), gauge_capacity);
         assert_eq!(batch.cpu_util.capacity(), cpu_util_capacity);
+        #[cfg(feature = "bpf")]
+        assert_eq!(batch.memory_usage.capacity(), memory_usage_capacity);
+        #[cfg(feature = "bpf")]
+        assert_eq!(batch.process_io_usage.capacity(), process_io_usage_capacity);
+        #[cfg(feature = "bpf")]
+        assert_eq!(batch.process_fd_usage.capacity(), process_fd_usage_capacity);
+        #[cfg(feature = "bpf")]
+        assert_eq!(
+            batch.process_sched_usage.capacity(),
+            process_sched_usage_capacity
+        );
     }
 
     #[test]
@@ -1031,9 +1614,9 @@ mod tests {
         };
 
         // 1.5ms on core 2, 0.5ms on core 4 over a 1s window.
-        buf.add_sched_switch(dim, 1_000_000, 2);
-        buf.add_sched_switch(dim, 500_000, 2);
-        buf.add_sched_switch(dim, 500_000, 4);
+        buf.add_sched_switch(dim, 1_000_000, 2, 0);
+        buf.add_sched_switch(dim, 500_000, 2, 0);
+        buf.add_sched_switch(dim, 500_000, 4, 0);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);
@@ -1051,5 +1634,224 @@ mod tests {
         assert!((m.mean_core_pct - 0.1).abs() < 0.0001);
         assert!((m.min_core_pct - 0.05).abs() < 0.0001);
         assert!((m.max_core_pct - 0.15).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_collect_cpu_utilization_no_overflow() {
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
+        // Buffer starts at ktime=1B ns (1 second).
+        let buf = Buffer::new(
+            SystemTime::now(),
+            100,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            16,
+            1_000_000_000,
+        );
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+
+        // Event at ktime=2s with on_cpu_ns=2s — started 1s before the window.
+        // Should be trimmed to 1s for cpu_on_core.
+        buf.add_sched_switch(dim, 2_000_000_000, 0, 2_000_000_000);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.cpu_util.len(), 1);
+
+        let m = &batch.cpu_util[0];
+        // max_core_pct should be <= 100% after trimming.
+        assert!(
+            m.max_core_pct <= 100.0,
+            "max_core_pct should be <= 100% but was {}",
+            m.max_core_pct
+        );
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_collect_process_snapshots() {
+        let mut collector = Collector::new_with_process_snapshots(
+            Duration::from_secs(1),
+            &SamplingConfig::default(),
+            true,
+        );
+
+        collector.proc_status_reader = |_pid| {
+            Some(ProcStatusSnapshot {
+                memory: Some(ProcMemorySnapshot {
+                    vm_size_bytes: 10_000,
+                    vm_rss_bytes: 9_000,
+                    rss_anon_bytes: 7_000,
+                    rss_file_bytes: 1_500,
+                    rss_shmem_bytes: 500,
+                    vm_swap_bytes: 100,
+                }),
+                threads: 24,
+                voluntary_ctxt_switches: 1234,
+                nonvoluntary_ctxt_switches: 55,
+            })
+        };
+        collector.proc_io_reader = |_pid| {
+            Some(ProcIOSnapshot {
+                rchar_bytes: 111,
+                wchar_bytes: 222,
+                syscr: 10,
+                syscw: 20,
+                read_bytes: 333,
+                write_bytes: 444,
+                cancelled_write_bytes: 5,
+            })
+        };
+        collector.proc_limits_reader = |_pid| {
+            Some(ProcLimitsSnapshot {
+                fd_limit_soft: 1024,
+                fd_limit_hard: 4096,
+            })
+        };
+        collector.proc_fd_count_reader = |_pid| Some(64);
+
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+        buf.add_sched_switch(dim, 1_000_000, 2, 0);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.cpu_util.len(), 1);
+        assert_eq!(batch.memory_usage.len(), 1);
+        assert_eq!(batch.process_io_usage.len(), 1);
+        assert_eq!(batch.process_fd_usage.len(), 1);
+        assert_eq!(batch.process_sched_usage.len(), 1);
+
+        let mem = &batch.memory_usage[0];
+        assert_eq!(mem.vm_rss_bytes, 9_000);
+        let io = &batch.process_io_usage[0];
+        assert_eq!(io.read_bytes, 333);
+        let fd = &batch.process_fd_usage[0];
+        assert_eq!(fd.open_fds, 64);
+        assert_eq!(fd.fd_limit_soft, 1024);
+        let sched = &batch.process_sched_usage[0];
+        assert_eq!(sched.threads, 24);
+        assert_eq!(sched.voluntary_ctxt_switches, 1234);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_status_snapshot() {
+        let status = r#"
+Name:   geth
+VmSize:      1000 kB
+VmRSS:        500 kB
+RssAnon:      300 kB
+RssFile:      150 kB
+RssShmem:      50 kB
+VmSwap:        25 kB
+Threads:       16
+voluntary_ctxt_switches:        100
+nonvoluntary_ctxt_switches:     7
+"#;
+
+        let snapshot = parse_proc_status_snapshot(status).expect("status snapshot should parse");
+        let memory = snapshot.memory.expect("memory snapshot should exist");
+        assert_eq!(memory.vm_size_bytes, 1_024_000);
+        assert_eq!(memory.vm_rss_bytes, 512_000);
+        assert_eq!(snapshot.threads, 16);
+        assert_eq!(snapshot.voluntary_ctxt_switches, 100);
+        assert_eq!(snapshot.nonvoluntary_ctxt_switches, 7);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_status_snapshot_missing_fields_returns_none() {
+        let status = "Name:\tgeth\nState:\tS (sleeping)\n";
+        assert!(parse_proc_status_snapshot(status).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_io_snapshot() {
+        let io = r#"
+rchar: 111
+wchar: 222
+syscr: 10
+syscw: 20
+read_bytes: 333
+write_bytes: 444
+cancelled_write_bytes: 5
+"#;
+
+        let snapshot = parse_proc_io_snapshot(io).expect("io snapshot should parse");
+        assert_eq!(snapshot.rchar_bytes, 111);
+        assert_eq!(snapshot.wchar_bytes, 222);
+        assert_eq!(snapshot.read_bytes, 333);
+        assert_eq!(snapshot.write_bytes, 444);
+        assert_eq!(snapshot.cancelled_write_bytes, 5);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_io_snapshot_missing_fields_returns_none() {
+        let io = "syscr: 0\nsyscw: 0\n";
+        assert!(parse_proc_io_snapshot(io).is_none());
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_limits_snapshot() {
+        let limits = r#"
+Limit                     Soft Limit           Hard Limit           Units
+Max open files            1024                 4096                 files
+"#;
+
+        let snapshot = parse_proc_limits_snapshot(limits).expect("limits snapshot should parse");
+        assert_eq!(snapshot.fd_limit_soft, 1024);
+        assert_eq!(snapshot.fd_limit_hard, 4096);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_limits_snapshot_unlimited() {
+        let limits = r#"
+Limit                     Soft Limit           Hard Limit           Units
+Max open files            unlimited            unlimited            files
+"#;
+
+        let snapshot = parse_proc_limits_snapshot(limits).expect("limits snapshot should parse");
+        assert_eq!(snapshot.fd_limit_soft, u64::MAX);
+        assert_eq!(snapshot.fd_limit_hard, u64::MAX);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_memory_snapshot() {
+        let status = r#"
+Name:   geth
+VmSize:      12345 kB
+VmRSS:        6789 kB
+RssAnon:      4000 kB
+RssFile:      2500 kB
+RssShmem:      289 kB
+VmSwap:        512 kB
+"#;
+
+        let snapshot = parse_proc_memory_snapshot(status).expect("snapshot should parse");
+        assert_eq!(snapshot.vm_size_bytes, 12_641_280);
+        assert_eq!(snapshot.vm_rss_bytes, 6_951_936);
+        assert_eq!(snapshot.rss_anon_bytes, 4_096_000);
+        assert_eq!(snapshot.rss_file_bytes, 2_560_000);
+        assert_eq!(snapshot.rss_shmem_bytes, 295_936);
+        assert_eq!(snapshot.vm_swap_bytes, 524_288);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_parse_proc_memory_snapshot_missing_fields_returns_none() {
+        let status = "Name:\tkthreadd\nState:\tS (sleeping)\n";
+        assert!(parse_proc_memory_snapshot(status).is_none());
     }
 }

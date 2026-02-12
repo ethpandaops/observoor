@@ -144,6 +144,77 @@ pub struct CpuUtilMetric {
     pub max_core_pct: f32,
 }
 
+/// Process memory usage snapshot metric (per process, per window).
+#[cfg(feature = "bpf")]
+#[derive(Debug, Clone)]
+pub struct MemoryUsageMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
+    pub vm_size_bytes: u64,
+    pub vm_rss_bytes: u64,
+    pub rss_anon_bytes: u64,
+    pub rss_file_bytes: u64,
+    pub rss_shmem_bytes: u64,
+    pub vm_swap_bytes: u64,
+}
+
+/// Process I/O usage snapshot metric (per process, per window).
+#[cfg(feature = "bpf")]
+#[derive(Debug, Clone)]
+pub struct ProcessIOUsageMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
+    pub rchar_bytes: u64,
+    pub wchar_bytes: u64,
+    pub syscr: u64,
+    pub syscw: u64,
+    pub read_bytes: u64,
+    pub write_bytes: u64,
+    pub cancelled_write_bytes: i64,
+}
+
+/// Process file descriptor usage snapshot metric (per process, per window).
+#[cfg(feature = "bpf")]
+#[derive(Debug, Clone)]
+pub struct ProcessFDUsageMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
+    pub open_fds: u32,
+    pub fd_limit_soft: u64,
+    pub fd_limit_hard: u64,
+}
+
+/// Process scheduler snapshot metric (per process, per window).
+#[cfg(feature = "bpf")]
+#[derive(Debug, Clone)]
+pub struct ProcessSchedUsageMetric {
+    pub metric_type: &'static str,
+    pub window: WindowInfo,
+    pub slot: SlotInfo,
+    pub pid: u32,
+    pub client_type: ClientType,
+    pub sampling_mode: SamplingMode,
+    pub sampling_rate: f32,
+    pub threads: u32,
+    pub voluntary_ctxt_switches: u64,
+    pub nonvoluntary_ctxt_switches: u64,
+}
+
 /// A batch of collected metrics ready for export.
 #[derive(Debug, Clone)]
 pub struct MetricBatch {
@@ -152,12 +223,33 @@ pub struct MetricBatch {
     pub counter: Vec<CounterMetric>,
     pub gauge: Vec<GaugeMetric>,
     pub cpu_util: Vec<CpuUtilMetric>,
+    #[cfg(feature = "bpf")]
+    pub memory_usage: Vec<MemoryUsageMetric>,
+    #[cfg(feature = "bpf")]
+    pub process_io_usage: Vec<ProcessIOUsageMetric>,
+    #[cfg(feature = "bpf")]
+    pub process_fd_usage: Vec<ProcessFDUsageMetric>,
+    #[cfg(feature = "bpf")]
+    pub process_sched_usage: Vec<ProcessSchedUsageMetric>,
 }
 
 impl MetricBatch {
     /// Total number of metrics in this batch.
     pub fn len(&self) -> usize {
-        self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len()
+        #[cfg(not(feature = "bpf"))]
+        let total =
+            self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len();
+        #[cfg(feature = "bpf")]
+        let mut total =
+            self.latency.len() + self.counter.len() + self.gauge.len() + self.cpu_util.len();
+        #[cfg(feature = "bpf")]
+        {
+            total += self.memory_usage.len();
+            total += self.process_io_usage.len();
+            total += self.process_fd_usage.len();
+            total += self.process_sched_usage.len();
+        }
+        total
     }
 
     /// Whether the batch contains no metrics.
