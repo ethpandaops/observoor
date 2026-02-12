@@ -802,6 +802,31 @@ pub struct SyncStateRow {
     pub el_offline: bool,
 }
 
+/// Host specs row for the host_specs table.
+#[allow(dead_code)]
+pub struct HostSpecsRow {
+    pub updated_date_time: SystemTime,
+    pub event_time: SystemTime,
+    pub wallclock_slot: u32,
+    pub wallclock_slot_start_date_time: SystemTime,
+    pub host_id: String,
+    pub hostname: String,
+    pub machine_id: String,
+    pub kernel_release: String,
+    pub os_name: String,
+    pub architecture: String,
+    pub cpu_model: String,
+    pub cpu_vendor: String,
+    pub cpu_online_cores: u16,
+    pub cpu_logical_cores: u16,
+    pub memory_total_bytes: u64,
+    pub memory_type: String,
+    pub memory_speed_mts: u32,
+    pub disk_count: u16,
+    pub disk_total_bytes: u64,
+    pub disk_models: String,
+}
+
 impl ClickHouseExporter {
     /// Writes a sync state row to the sync_state table.
     #[allow(dead_code)]
@@ -839,6 +864,66 @@ impl ClickHouseExporter {
         if let Err(e) = handle.execute(sql.as_str()).await {
             self.record_batch_error("sync_state");
             return Err(e).context("sending sync_state batch");
+        }
+
+        Ok(())
+    }
+
+    /// Writes a host specs row to the host_specs table.
+    #[allow(dead_code)]
+    pub async fn export_host_specs(&self, row: &HostSpecsRow, meta: &BatchMetadata) -> Result<()> {
+        let table = format!("{}.host_specs", self.database);
+
+        let updated = format_datetime(row.updated_date_time);
+        let event_time = format_datetime(row.event_time);
+        let slot_start = format_datetime(row.wallclock_slot_start_date_time);
+        let host_id = escape_sql(&row.host_id);
+        let hostname = escape_sql(&row.hostname);
+        let machine_id = escape_sql(&row.machine_id);
+        let kernel_release = escape_sql(&row.kernel_release);
+        let os_name = escape_sql(&row.os_name);
+        let architecture = escape_sql(&row.architecture);
+        let cpu_model = escape_sql(&row.cpu_model);
+        let cpu_vendor = escape_sql(&row.cpu_vendor);
+        let memory_type = escape_sql(&row.memory_type);
+        let disk_models = escape_sql(&row.disk_models);
+        let client_name = escape_sql(&meta.client_name);
+        let network_name = escape_sql(&meta.network_name);
+
+        let sql = format!(
+            "INSERT INTO {table} (\
+             updated_date_time, event_time, wallclock_slot, wallclock_slot_start_date_time, \
+             host_id, hostname, machine_id, kernel_release, os_name, architecture, \
+             cpu_model, cpu_vendor, cpu_online_cores, cpu_logical_cores, \
+             memory_total_bytes, memory_type, memory_speed_mts, \
+             disk_count, disk_total_bytes, disk_models, \
+             meta_client_name, meta_network_name\
+             ) VALUES (\
+             {updated}, {event_time}, {}, {slot_start}, \
+             '{host_id}', '{hostname}', '{machine_id}', '{kernel_release}', '{os_name}', '{architecture}', \
+             '{cpu_model}', '{cpu_vendor}', {}, {}, \
+             {}, '{memory_type}', {}, \
+             {}, {}, '{disk_models}', \
+             '{client_name}', '{network_name}'\
+             )",
+            row.wallclock_slot,
+            row.cpu_online_cores,
+            row.cpu_logical_cores,
+            row.memory_total_bytes,
+            row.memory_speed_mts,
+            row.disk_count,
+            row.disk_total_bytes,
+        );
+
+        let mut handle = self
+            .pool
+            .get_handle()
+            .await
+            .context("getting handle for host_specs insert")?;
+
+        if let Err(e) = handle.execute(sql.as_str()).await {
+            self.record_batch_error("host_specs");
+            return Err(e).context("sending host_specs batch");
         }
 
         Ok(())

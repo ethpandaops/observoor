@@ -130,3 +130,42 @@ ENGINE = Distributed(
     process_sched_usage_local,
     cityHash64(window_start, meta_network_name, meta_client_name)
 );
+
+CREATE TABLE host_specs_local ON CLUSTER '{cluster}' (
+    updated_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    event_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot UInt32 CODEC(DoubleDelta, ZSTD(1)),
+    wallclock_slot_start_date_time DateTime64(3) CODEC(DoubleDelta, ZSTD(1)),
+    host_id String,
+    hostname LowCardinality(String),
+    machine_id String,
+    kernel_release LowCardinality(String),
+    os_name LowCardinality(String),
+    architecture LowCardinality(String),
+    cpu_model String,
+    cpu_vendor LowCardinality(String),
+    cpu_online_cores UInt16 CODEC(ZSTD(1)),
+    cpu_logical_cores UInt16 CODEC(ZSTD(1)),
+    memory_total_bytes UInt64 CODEC(ZSTD(1)),
+    memory_type LowCardinality(String),
+    memory_speed_mts UInt32 CODEC(ZSTD(1)),
+    disk_count UInt16 CODEC(ZSTD(1)),
+    disk_total_bytes UInt64 CODEC(ZSTD(1)),
+    disk_models String,
+    meta_client_name LowCardinality(String),
+    meta_network_name LowCardinality(String)
+) ENGINE = ReplicatedReplacingMergeTree(
+    '/clickhouse/{installation}/{cluster}/tables/{shard}/{database}/{table}',
+    '{replica}',
+    updated_date_time
+)
+PARTITION BY toStartOfMonth(event_time)
+ORDER BY (meta_network_name, event_time, host_id, meta_client_name);
+
+CREATE TABLE host_specs ON CLUSTER '{cluster}' AS host_specs_local
+ENGINE = Distributed(
+    '{cluster}',
+    currentDatabase(),
+    host_specs_local,
+    cityHash64(event_time, meta_network_name, host_id, meta_client_name)
+);

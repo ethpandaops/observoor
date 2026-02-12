@@ -125,6 +125,10 @@ pub struct ResolutionConfig {
     #[allow(dead_code)]
     pub sync_state_poll_interval: Duration,
 
+    /// Interval for writing host specs snapshots. Default: 24h.
+    #[serde(default = "default_host_specs_poll_interval", with = "humantime_serde")]
+    pub host_specs_poll_interval: Duration,
+
     /// Per-metric interval overrides for lower-priority metric families.
     #[serde(default)]
     pub overrides: Vec<IntervalOverride>,
@@ -397,6 +401,10 @@ fn default_sync_state_poll_interval() -> Duration {
     Duration::from_secs(12)
 }
 
+fn default_host_specs_poll_interval() -> Duration {
+    Duration::from_secs(24 * 60 * 60)
+}
+
 fn default_database() -> String {
     "default".to_string()
 }
@@ -474,6 +482,7 @@ impl Default for ResolutionConfig {
             interval: default_resolution_interval(),
             slot_aligned: true,
             sync_state_poll_interval: default_sync_state_poll_interval(),
+            host_specs_poll_interval: default_host_specs_poll_interval(),
             overrides: Vec::new(),
         }
     }
@@ -580,6 +589,24 @@ impl Config {
         let base_interval = self.sinks.aggregated.resolution.interval;
         if base_interval.is_zero() {
             bail!("sinks.aggregated.resolution.interval must be positive");
+        }
+        if self
+            .sinks
+            .aggregated
+            .resolution
+            .sync_state_poll_interval
+            .is_zero()
+        {
+            bail!("sinks.aggregated.resolution.sync_state_poll_interval must be positive");
+        }
+        if self
+            .sinks
+            .aggregated
+            .resolution
+            .host_specs_poll_interval
+            .is_zero()
+        {
+            bail!("sinks.aggregated.resolution.host_specs_poll_interval must be positive");
         }
 
         let base_interval_ms = base_interval.as_millis();
@@ -1159,5 +1186,13 @@ mod tests {
         assert!(err
             .to_string()
             .contains("net_tx and net_rx sampling rules must match"));
+    }
+
+    #[test]
+    fn test_validation_host_specs_poll_interval_must_be_positive() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.resolution.host_specs_poll_interval = Duration::ZERO;
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("host_specs_poll_interval"));
     }
 }

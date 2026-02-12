@@ -6,6 +6,7 @@ pub mod dimension;
 pub mod exporter;
 pub mod flush;
 pub mod histogram;
+pub mod host_specs;
 pub mod metric;
 
 pub mod clickhouse;
@@ -25,11 +26,12 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, EventType, NetIOEvent, ParsedEvent, TypedEvent};
 
 use self::buffer::Buffer;
-use self::clickhouse::SyncStateRow;
+use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
+use self::host_specs::collect_host_specs;
 use self::metric::{BatchMetadata, MetricBatch};
 
 /// Shared atomic state that can be safely sent to a spawned task.
@@ -169,6 +171,35 @@ impl AggregatedSink {
             cl_syncing: state.cl_syncing.load(Ordering::Relaxed) == 1,
             el_optimistic: state.el_optimistic.load(Ordering::Relaxed) == 1,
             el_offline: state.el_offline.load(Ordering::Relaxed) == 1,
+        }
+    }
+
+    /// Builds a host-specs row from current shared state and machine snapshot.
+    fn new_host_specs_row(state: &SharedState, now: SystemTime) -> HostSpecsRow {
+        let snapshot = collect_host_specs();
+
+        HostSpecsRow {
+            updated_date_time: now,
+            event_time: now,
+            wallclock_slot: u32::try_from(state.current_slot.load(Ordering::Relaxed))
+                .unwrap_or(u32::MAX),
+            wallclock_slot_start_date_time: state.slot_start_time(),
+            host_id: snapshot.host_id,
+            hostname: snapshot.hostname,
+            machine_id: snapshot.machine_id,
+            kernel_release: snapshot.kernel_release,
+            os_name: snapshot.os_name,
+            architecture: snapshot.architecture,
+            cpu_model: snapshot.cpu_model,
+            cpu_vendor: snapshot.cpu_vendor,
+            cpu_online_cores: snapshot.cpu_online_cores,
+            cpu_logical_cores: snapshot.cpu_logical_cores,
+            memory_total_bytes: snapshot.memory_total_bytes,
+            memory_type: snapshot.memory_type,
+            memory_speed_mts: snapshot.memory_speed_mts,
+            disk_count: snapshot.disk_count,
+            disk_total_bytes: snapshot.disk_total_bytes,
+            disk_models: snapshot.disk_models,
         }
     }
 
@@ -328,6 +359,7 @@ impl Sink for AggregatedSink {
         let dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
+        let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
         let collector = Collector::new_with_process_snapshots(interval, &sampling_cfg, true);
@@ -340,6 +372,8 @@ impl Sink for AggregatedSink {
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
             sync_state_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut host_specs_ticker = tokio::time::interval(host_specs_interval);
+            host_specs_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut reusable_batch = MetricBatch {
                 metadata: BatchMetadata {
                     client_name: Arc::clone(&meta_client_name),
@@ -361,6 +395,29 @@ impl Sink for AggregatedSink {
             };
 
             const BATCH_SIZE: usize = 256;
+
+            // Emit host specs once on startup, then on the configured ticker.
+            {
+                let now = SystemTime::now();
+                let row = AggregatedSink::new_host_specs_row(&state, now);
+                let meta = BatchMetadata {
+                    client_name: Arc::clone(&meta_client_name),
+                    network_name: Arc::clone(&meta_network_name),
+                    updated_time: now,
+                };
+
+                for exporter in &exporters {
+                    if let Err(e) = exporter.export_host_specs(&row, &meta).await {
+                        tracing::error!(
+                            exporter = exporter.name(),
+                            error = %e,
+                            "startup host specs export failed",
+                        );
+                    }
+                }
+            }
+            // Consume the immediate first tick after startup export.
+            host_specs_ticker.tick().await;
 
             loop {
                 tokio::select! {
@@ -576,6 +633,26 @@ impl Sink for AggregatedSink {
                             }
                         }
                     }
+
+                    _ = host_specs_ticker.tick() => {
+                        let now = SystemTime::now();
+                        let row = AggregatedSink::new_host_specs_row(&state, now);
+                        let meta = BatchMetadata {
+                            client_name: Arc::clone(&meta_client_name),
+                            network_name: Arc::clone(&meta_network_name),
+                            updated_time: now,
+                        };
+
+                        for exporter in &exporters {
+                            if let Err(e) = exporter.export_host_specs(&row, &meta).await {
+                                tracing::error!(
+                                    exporter = exporter.name(),
+                                    error = %e,
+                                    "host specs export failed",
+                                );
+                            }
+                        }
+                    }
                 }
             }
         });
@@ -583,6 +660,7 @@ impl Sink for AggregatedSink {
 
         info!(
             interval = ?self.cfg.resolution.interval,
+            host_specs_interval = ?self.cfg.resolution.host_specs_poll_interval,
             slot_aligned = self.cfg.resolution.slot_aligned,
             tier_overrides = self.cfg.resolution.overrides.len(),
             "aggregated sink started"
