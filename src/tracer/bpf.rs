@@ -520,6 +520,7 @@ fn attach_programs(ebpf: &mut Ebpf) -> Result<AttachmentStats> {
     // Required network kprobes
     // ---------------------------------------------------------------
     attach_kprobe_required(ebpf, "kprobe_tcp_sendmsg", "tcp_sendmsg", &mut stats)?;
+    attach_kprobe_required(ebpf, "kretprobe_tcp_sendmsg", "tcp_sendmsg", &mut stats)?;
     attach_kprobe_required(ebpf, "kprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
     attach_kprobe_required(ebpf, "kretprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
 

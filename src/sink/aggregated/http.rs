@@ -8,7 +8,10 @@ use tokio::sync::{mpsc, Semaphore};
 
 use crate::config::HttpExportConfig;
 
-use super::metric::{CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch};
+use super::clickhouse::{HostSpecsRow, SyncStateRow};
+use super::metric::{
+    BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
+};
 #[cfg(feature = "bpf")]
 use super::metric::{
     MemoryUsageMetric, ProcessFDUsageMetric, ProcessIOUsageMetric, ProcessSchedUsageMetric,
@@ -140,6 +143,83 @@ pub struct AggregatedMetricJson {
     pub meta_network_name: Arc<str>,
 }
 
+/// JSON schema for HTTP export of sync-state snapshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct SyncStateJson {
+    pub metric_type: &'static str,
+    pub updated_date_time: String,
+    pub event_time: String,
+    pub wallclock_slot: u32,
+    pub wallclock_slot_start_date_time: String,
+    pub cl_syncing: bool,
+    pub el_optimistic: bool,
+    pub el_offline: bool,
+    pub meta_client_name: Arc<str>,
+    pub meta_network_name: Arc<str>,
+}
+
+/// JSON schema for HTTP export of host-specs snapshots.
+#[derive(Debug, Clone, Serialize)]
+pub struct HostSpecsJson {
+    pub metric_type: &'static str,
+    pub updated_date_time: String,
+    pub event_time: String,
+    pub wallclock_slot: u32,
+    pub wallclock_slot_start_date_time: String,
+    pub host_id: String,
+    pub kernel_release: String,
+    pub os_name: String,
+    pub architecture: String,
+    pub cpu_model: String,
+    pub cpu_vendor: String,
+    pub cpu_online_cores: u16,
+    pub cpu_logical_cores: u16,
+    pub cpu_physical_cores: u16,
+    pub cpu_performance_cores: u16,
+    pub cpu_efficiency_cores: u16,
+    pub cpu_unknown_type_cores: u16,
+    pub cpu_logical_ids: Vec<u16>,
+    pub cpu_core_ids: Vec<i32>,
+    pub cpu_package_ids: Vec<i32>,
+    pub cpu_die_ids: Vec<i32>,
+    pub cpu_cluster_ids: Vec<i32>,
+    pub cpu_core_types: Vec<u8>,
+    pub cpu_core_type_labels: Vec<String>,
+    pub cpu_online_flags: Vec<u8>,
+    pub cpu_max_freq_khz: Vec<u64>,
+    pub cpu_base_freq_khz: Vec<u64>,
+    pub memory_total_bytes: u64,
+    pub memory_type: String,
+    pub memory_speed_mts: u32,
+    pub memory_dimm_count: u16,
+    pub memory_dimm_sizes_bytes: Vec<u64>,
+    pub memory_dimm_types: Vec<String>,
+    pub memory_dimm_speeds_mts: Vec<u32>,
+    pub memory_dimm_configured_speeds_mts: Vec<u32>,
+    pub memory_dimm_locators: Vec<String>,
+    pub memory_dimm_bank_locators: Vec<String>,
+    pub memory_dimm_manufacturers: Vec<String>,
+    pub memory_dimm_part_numbers: Vec<String>,
+    pub memory_dimm_serials: Vec<String>,
+    pub disk_count: u16,
+    pub disk_total_bytes: u64,
+    pub disk_names: Vec<String>,
+    pub disk_models: Vec<String>,
+    pub disk_vendors: Vec<String>,
+    pub disk_serials: Vec<String>,
+    pub disk_sizes_bytes: Vec<u64>,
+    pub disk_rotational: Vec<u8>,
+    pub meta_client_name: Arc<str>,
+    pub meta_network_name: Arc<str>,
+}
+
+#[derive(Debug, Clone)]
+enum HttpExportItem {
+    AggregatedMetric(Box<AggregatedMetricJson>),
+    SyncState(SyncStateJson),
+    HostSpecs(Box<HostSpecsJson>),
+}
+
 fn is_empty_str(v: &&str) -> bool {
     v.is_empty()
 }
@@ -167,7 +247,7 @@ struct SharedBatchStrings {
 /// workers for backpressure.
 pub struct HttpExporter {
     cfg: HttpExportConfig,
-    tx: Option<mpsc::Sender<AggregatedMetricJson>>,
+    tx: Option<mpsc::Sender<HttpExportItem>>,
     cancel: Option<tokio_util::sync::CancellationToken>,
 }
 
@@ -659,6 +739,76 @@ impl HttpExporter {
         }
     }
 
+    fn sync_state_to_json(row: &SyncStateRow, meta: &BatchMetadata) -> SyncStateJson {
+        SyncStateJson {
+            metric_type: "sync_state",
+            updated_date_time: format_datetime(row.updated_date_time),
+            event_time: format_datetime(row.event_time),
+            wallclock_slot: row.wallclock_slot,
+            wallclock_slot_start_date_time: format_datetime(row.wallclock_slot_start_date_time),
+            cl_syncing: row.cl_syncing,
+            el_optimistic: row.el_optimistic,
+            el_offline: row.el_offline,
+            meta_client_name: Arc::clone(&meta.client_name),
+            meta_network_name: Arc::clone(&meta.network_name),
+        }
+    }
+
+    fn host_specs_to_json(row: &HostSpecsRow, meta: &BatchMetadata) -> HostSpecsJson {
+        HostSpecsJson {
+            metric_type: "host_specs",
+            updated_date_time: format_datetime(row.updated_date_time),
+            event_time: format_datetime(row.event_time),
+            wallclock_slot: row.wallclock_slot,
+            wallclock_slot_start_date_time: format_datetime(row.wallclock_slot_start_date_time),
+            host_id: row.host_id.clone(),
+            kernel_release: row.kernel_release.clone(),
+            os_name: row.os_name.clone(),
+            architecture: row.architecture.clone(),
+            cpu_model: row.cpu_model.clone(),
+            cpu_vendor: row.cpu_vendor.clone(),
+            cpu_online_cores: row.cpu_online_cores,
+            cpu_logical_cores: row.cpu_logical_cores,
+            cpu_physical_cores: row.cpu_physical_cores,
+            cpu_performance_cores: row.cpu_performance_cores,
+            cpu_efficiency_cores: row.cpu_efficiency_cores,
+            cpu_unknown_type_cores: row.cpu_unknown_type_cores,
+            cpu_logical_ids: row.cpu_logical_ids.clone(),
+            cpu_core_ids: row.cpu_core_ids.clone(),
+            cpu_package_ids: row.cpu_package_ids.clone(),
+            cpu_die_ids: row.cpu_die_ids.clone(),
+            cpu_cluster_ids: row.cpu_cluster_ids.clone(),
+            cpu_core_types: row.cpu_core_types.clone(),
+            cpu_core_type_labels: row.cpu_core_type_labels.clone(),
+            cpu_online_flags: row.cpu_online_flags.clone(),
+            cpu_max_freq_khz: row.cpu_max_freq_khz.clone(),
+            cpu_base_freq_khz: row.cpu_base_freq_khz.clone(),
+            memory_total_bytes: row.memory_total_bytes,
+            memory_type: row.memory_type.clone(),
+            memory_speed_mts: row.memory_speed_mts,
+            memory_dimm_count: row.memory_dimm_count,
+            memory_dimm_sizes_bytes: row.memory_dimm_sizes_bytes.clone(),
+            memory_dimm_types: row.memory_dimm_types.clone(),
+            memory_dimm_speeds_mts: row.memory_dimm_speeds_mts.clone(),
+            memory_dimm_configured_speeds_mts: row.memory_dimm_configured_speeds_mts.clone(),
+            memory_dimm_locators: row.memory_dimm_locators.clone(),
+            memory_dimm_bank_locators: row.memory_dimm_bank_locators.clone(),
+            memory_dimm_manufacturers: row.memory_dimm_manufacturers.clone(),
+            memory_dimm_part_numbers: row.memory_dimm_part_numbers.clone(),
+            memory_dimm_serials: row.memory_dimm_serials.clone(),
+            disk_count: row.disk_count,
+            disk_total_bytes: row.disk_total_bytes,
+            disk_names: row.disk_names.clone(),
+            disk_models: row.disk_models.clone(),
+            disk_vendors: row.disk_vendors.clone(),
+            disk_serials: row.disk_serials.clone(),
+            disk_sizes_bytes: row.disk_sizes_bytes.clone(),
+            disk_rotational: row.disk_rotational.clone(),
+            meta_client_name: Arc::clone(&meta.client_name),
+            meta_network_name: Arc::clone(&meta.network_name),
+        }
+    }
+
     #[inline]
     fn memory_usage_len(_batch: &MetricBatch) -> usize {
         #[cfg(feature = "bpf")]
@@ -725,7 +875,7 @@ impl HttpExporter {
             bail!("http workers must be positive");
         }
 
-        let (tx, mut rx) = mpsc::channel::<AggregatedMetricJson>(self.cfg.max_queue_size);
+        let (tx, mut rx) = mpsc::channel::<HttpExportItem>(self.cfg.max_queue_size);
         self.tx = Some(tx);
         self.cancel = Some(ctx.clone());
 
@@ -920,7 +1070,8 @@ impl HttpExporter {
             }
 
             let json = Self::latency_to_json(m, &shared);
-            if tx.try_send(json).is_err() {
+            let item = HttpExportItem::AggregatedMetric(Box::new(json));
+            if tx.try_send(item).is_err() {
                 dropped += batch.latency.len() - i
                     + batch.counter.len()
                     + batch.gauge.len()
@@ -941,7 +1092,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::counter_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.counter.len() - i
                         + batch.gauge.len()
                         + batch.cpu_util.len()
@@ -959,7 +1111,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::gauge_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
                     break;
                 }
@@ -974,7 +1127,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::cpu_util_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.cpu_util.len() - i + snapshot_tail_len;
                     break;
                 }
@@ -993,7 +1147,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::memory_usage_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.memory_usage.len() - i
                         + process_io_usage_len
                         + process_fd_usage_len
@@ -1014,7 +1169,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_io_usage_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_io_usage.len() - i
                         + process_fd_usage_len
                         + process_sched_usage_len;
@@ -1032,7 +1188,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_fd_usage_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
                     break;
                 }
@@ -1048,7 +1205,8 @@ impl HttpExporter {
                 }
 
                 let json = Self::process_sched_usage_to_json(m, &shared);
-                if tx.try_send(json).is_err() {
+                let item = HttpExportItem::AggregatedMetric(Box::new(json));
+                if tx.try_send(item).is_err() {
                     dropped += batch.process_sched_usage.len() - i;
                     break;
                 }
@@ -1057,6 +1215,46 @@ impl HttpExporter {
 
         if dropped > 0 {
             tracing::warn!(dropped, "HTTP export queue full, dropping items");
+        }
+
+        Ok(())
+    }
+
+    /// Export a sync-state row.
+    pub async fn export_sync_state(&self, row: &SyncStateRow, meta: &BatchMetadata) -> Result<()> {
+        let tx = match &self.tx {
+            Some(tx) => tx,
+            None => return Ok(()),
+        };
+
+        if tx.capacity() == 0 {
+            tracing::warn!("HTTP export queue full, dropping sync_state item");
+            return Ok(());
+        }
+
+        let item = HttpExportItem::SyncState(Self::sync_state_to_json(row, meta));
+        if tx.try_send(item).is_err() {
+            tracing::warn!("HTTP export queue full, dropping sync_state item");
+        }
+
+        Ok(())
+    }
+
+    /// Export a host-specs row.
+    pub async fn export_host_specs(&self, row: &HostSpecsRow, meta: &BatchMetadata) -> Result<()> {
+        let tx = match &self.tx {
+            Some(tx) => tx,
+            None => return Ok(()),
+        };
+
+        if tx.capacity() == 0 {
+            tracing::warn!("HTTP export queue full, dropping host_specs item");
+            return Ok(());
+        }
+
+        let item = HttpExportItem::HostSpecs(Box::new(Self::host_specs_to_json(row, meta)));
+        if tx.try_send(item).is_err() {
+            tracing::warn!("HTTP export queue full, dropping host_specs item");
         }
 
         Ok(())
@@ -1080,7 +1278,7 @@ fn spawn_send_batch(
     client: reqwest::Client,
     cfg: Arc<HttpExportConfig>,
     semaphore: Arc<Semaphore>,
-    items: Vec<AggregatedMetricJson>,
+    items: Vec<HttpExportItem>,
 ) {
     if items.is_empty() {
         return;
@@ -1107,7 +1305,7 @@ fn spawn_send_batch(
 async fn send_batch(
     client: &reqwest::Client,
     cfg: &HttpExportConfig,
-    items: Vec<AggregatedMetricJson>,
+    items: Vec<HttpExportItem>,
 ) -> Result<()> {
     if items.is_empty() {
         return Ok(());
@@ -1116,7 +1314,19 @@ async fn send_batch(
     // Serialize to NDJSON.
     let mut buf = Vec::with_capacity(items.len() * 256);
     for item in &items {
-        serde_json::to_writer(&mut buf, item).context("serializing metric to JSON")?;
+        match item {
+            HttpExportItem::AggregatedMetric(metric) => {
+                serde_json::to_writer(&mut buf, metric).context("serializing metric to JSON")?;
+            }
+            HttpExportItem::SyncState(sync_state) => {
+                serde_json::to_writer(&mut buf, sync_state)
+                    .context("serializing sync-state to JSON")?;
+            }
+            HttpExportItem::HostSpecs(host_specs) => {
+                serde_json::to_writer(&mut buf, host_specs)
+                    .context("serializing host-specs to JSON")?;
+            }
+        }
         buf.push(b'\n');
     }
 
@@ -1390,6 +1600,98 @@ mod tests {
         assert!(!json_str.contains("port_label"));
         assert!(!json_str.contains("direction"));
         assert!(!json_str.contains("device_id"));
+    }
+
+    #[test]
+    fn test_sync_state_json_serialization() {
+        let row = SyncStateRow {
+            updated_date_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            event_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            wallclock_slot: 123,
+            wallclock_slot_start_date_time: SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(12),
+            cl_syncing: true,
+            el_optimistic: false,
+            el_offline: true,
+        };
+        let meta = BatchMetadata {
+            client_name: Arc::from("test-node"),
+            network_name: Arc::from("mainnet"),
+            updated_time: SystemTime::UNIX_EPOCH,
+        };
+
+        let json = HttpExporter::sync_state_to_json(&row, &meta);
+        let json_str = serde_json::to_string(&json).expect("serialize");
+        assert!(json_str.contains("\"metric_type\":\"sync_state\""));
+        assert!(json_str.contains("\"wallclock_slot\":123"));
+        assert!(json_str.contains("\"cl_syncing\":true"));
+        assert!(json_str.contains("\"meta_client_name\":\"test-node\""));
+    }
+
+    #[test]
+    fn test_host_specs_json_serialization() {
+        let row = HostSpecsRow {
+            updated_date_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            event_time: SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10),
+            wallclock_slot: 123,
+            wallclock_slot_start_date_time: SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(12),
+            host_id: "host-1".to_string(),
+            kernel_release: "6.10.0".to_string(),
+            os_name: "Linux".to_string(),
+            architecture: "x86_64".to_string(),
+            cpu_model: "CPU".to_string(),
+            cpu_vendor: "Vendor".to_string(),
+            cpu_online_cores: 8,
+            cpu_logical_cores: 8,
+            cpu_physical_cores: 4,
+            cpu_performance_cores: 4,
+            cpu_efficiency_cores: 0,
+            cpu_unknown_type_cores: 0,
+            cpu_logical_ids: vec![0, 1],
+            cpu_core_ids: vec![0, 0],
+            cpu_package_ids: vec![0, 0],
+            cpu_die_ids: vec![0, 0],
+            cpu_cluster_ids: vec![0, 0],
+            cpu_core_types: vec![0, 0],
+            cpu_core_type_labels: vec!["unknown".to_string(), "unknown".to_string()],
+            cpu_online_flags: vec![1, 1],
+            cpu_max_freq_khz: vec![3600000, 3600000],
+            cpu_base_freq_khz: vec![3200000, 3200000],
+            memory_total_bytes: 32 * 1024 * 1024 * 1024,
+            memory_type: "DDR5".to_string(),
+            memory_speed_mts: 5600,
+            memory_dimm_count: 2,
+            memory_dimm_sizes_bytes: vec![16 * 1024 * 1024 * 1024, 16 * 1024 * 1024 * 1024],
+            memory_dimm_types: vec!["DDR5".to_string(), "DDR5".to_string()],
+            memory_dimm_speeds_mts: vec![5600, 5600],
+            memory_dimm_configured_speeds_mts: vec![5600, 5600],
+            memory_dimm_locators: vec!["A1".to_string(), "B1".to_string()],
+            memory_dimm_bank_locators: vec!["BANK0".to_string(), "BANK1".to_string()],
+            memory_dimm_manufacturers: vec!["Acme".to_string(), "Acme".to_string()],
+            memory_dimm_part_numbers: vec!["PN1".to_string(), "PN2".to_string()],
+            memory_dimm_serials: vec!["SN1".to_string(), "SN2".to_string()],
+            disk_count: 1,
+            disk_total_bytes: 1_000_000_000_000,
+            disk_names: vec!["nvme0n1".to_string()],
+            disk_models: vec!["FastDisk".to_string()],
+            disk_vendors: vec!["DiskCo".to_string()],
+            disk_serials: vec!["DSN1".to_string()],
+            disk_sizes_bytes: vec![1_000_000_000_000],
+            disk_rotational: vec![0],
+        };
+        let meta = BatchMetadata {
+            client_name: Arc::from("test-node"),
+            network_name: Arc::from("mainnet"),
+            updated_time: SystemTime::UNIX_EPOCH,
+        };
+
+        let json = HttpExporter::host_specs_to_json(&row, &meta);
+        let json_str = serde_json::to_string(&json).expect("serialize");
+        assert!(json_str.contains("\"metric_type\":\"host_specs\""));
+        assert!(json_str.contains("\"host_id\":\"host-1\""));
+        assert!(json_str.contains("\"disk_names\":[\"nvme0n1\"]"));
+        assert!(json_str.contains("\"meta_network_name\":\"mainnet\""));
     }
 
     #[test]
