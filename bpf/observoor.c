@@ -765,29 +765,59 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
     };
     bpf_map_update_elem(&sock_owner, &sk_key, &sval, BPF_ANY);
 
-    if (!should_emit_event(EVENT_NET_TX))
+    // Stash socket metadata + TCP metrics for the kretprobe.
+    // We capture TCP metrics here because sk is only available on entry.
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+    struct net_send_val val = {};
+    val.ts = bpf_ktime_get_ns();
+    val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    val.dport = __builtin_bswap16(
+        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    val.pid = pid;
+    val.client_type = ct;
+    {
+        __u32 srtt = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
+        val.srtt_us = srtt >> 3;
+    }
+    val.snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
+    bpf_map_update_elem(&net_send_start, &key, &val, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/tcp_sendmsg")
+int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+
+    struct net_send_val *val = bpf_map_lookup_elem(&net_send_start, &key);
+    if (!val)
         return 0;
+
+    if (ret <= 0)
+        goto cleanup;
+
+    if (!should_emit_event(EVENT_NET_TX))
+        goto cleanup;
 
     struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
-        return 0;
+        goto cleanup;
 
-    fill_header(&e->hdr, EVENT_NET_TX, ct);
-    e->bytes = (__u32)size;
-    e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
-    e->dport = __builtin_bswap16(
-        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
+    e->hdr.pid = val->pid;
+    e->bytes = (__u32)ret;
+    e->sport = val->sport;
+    e->dport = val->dport;
     e->direction = 0; // TX
-
-    // Inline TCP metrics into the net_tx event (saves a separate ring buffer entry).
     e->has_metrics = 1;
-    {
-        __u32 srtt = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
-        e->srtt_us = srtt >> 3;
-    }
-    e->snd_cwnd = BPF_CORE_READ((struct tcp_sock *)sk, snd_cwnd);
+    e->srtt_us = val->srtt_us;
+    e->snd_cwnd = val->snd_cwnd;
 
     bpf_ringbuf_submit(e, 0);
+
+cleanup:
+    bpf_map_delete_elem(&net_send_start, &key);
     return 0;
 }
 

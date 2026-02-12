@@ -203,6 +203,18 @@ struct net_recv_val {
     __u8  pad[7];
 };
 
+// Network send tracking (32 bytes, 8-byte aligned).
+struct net_send_val {
+    __u64 ts;
+    __u16 sport;
+    __u16 dport;
+    __u32 pid;
+    __u8  client_type;
+    __u8  pad[3];
+    __u32 srtt_us;
+    __u32 snd_cwnd;
+};
+
 // Page fault tracking.
 struct fault_val {
     __u64 ts;
