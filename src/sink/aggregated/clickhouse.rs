@@ -810,8 +810,6 @@ pub struct HostSpecsRow {
     pub wallclock_slot: u32,
     pub wallclock_slot_start_date_time: SystemTime,
     pub host_id: String,
-    pub hostname: String,
-    pub machine_id: String,
     pub kernel_release: String,
     pub os_name: String,
     pub architecture: String,
@@ -819,9 +817,33 @@ pub struct HostSpecsRow {
     pub cpu_vendor: String,
     pub cpu_online_cores: u16,
     pub cpu_logical_cores: u16,
+    pub cpu_physical_cores: u16,
+    pub cpu_performance_cores: u16,
+    pub cpu_efficiency_cores: u16,
+    pub cpu_unknown_type_cores: u16,
+    pub cpu_logical_ids: Vec<u16>,
+    pub cpu_core_ids: Vec<i32>,
+    pub cpu_package_ids: Vec<i32>,
+    pub cpu_die_ids: Vec<i32>,
+    pub cpu_cluster_ids: Vec<i32>,
+    pub cpu_core_types: Vec<u8>,
+    pub cpu_core_type_labels: Vec<String>,
+    pub cpu_online_flags: Vec<u8>,
+    pub cpu_max_freq_khz: Vec<u64>,
+    pub cpu_base_freq_khz: Vec<u64>,
     pub memory_total_bytes: u64,
     pub memory_type: String,
     pub memory_speed_mts: u32,
+    pub memory_dimm_count: u16,
+    pub memory_dimm_sizes_bytes: Vec<u64>,
+    pub memory_dimm_types: Vec<String>,
+    pub memory_dimm_speeds_mts: Vec<u32>,
+    pub memory_dimm_configured_speeds_mts: Vec<u32>,
+    pub memory_dimm_locators: Vec<String>,
+    pub memory_dimm_bank_locators: Vec<String>,
+    pub memory_dimm_manufacturers: Vec<String>,
+    pub memory_dimm_part_numbers: Vec<String>,
+    pub memory_dimm_serials: Vec<String>,
     pub disk_count: u16,
     pub disk_total_bytes: u64,
     pub disk_names: Vec<String>,
@@ -883,14 +905,32 @@ impl ClickHouseExporter {
         let event_time = format_datetime(row.event_time);
         let slot_start = format_datetime(row.wallclock_slot_start_date_time);
         let host_id = escape_sql(&row.host_id);
-        let hostname = escape_sql(&row.hostname);
-        let machine_id = escape_sql(&row.machine_id);
         let kernel_release = escape_sql(&row.kernel_release);
         let os_name = escape_sql(&row.os_name);
         let architecture = escape_sql(&row.architecture);
         let cpu_model = escape_sql(&row.cpu_model);
         let cpu_vendor = escape_sql(&row.cpu_vendor);
+        let cpu_logical_ids = format_u16_array(&row.cpu_logical_ids);
+        let cpu_core_ids = format_i32_array(&row.cpu_core_ids);
+        let cpu_package_ids = format_i32_array(&row.cpu_package_ids);
+        let cpu_die_ids = format_i32_array(&row.cpu_die_ids);
+        let cpu_cluster_ids = format_i32_array(&row.cpu_cluster_ids);
+        let cpu_core_types = format_u8_array(&row.cpu_core_types);
+        let cpu_core_type_labels = format_string_array(&row.cpu_core_type_labels);
+        let cpu_online_flags = format_u8_array(&row.cpu_online_flags);
+        let cpu_max_freq_khz = format_u64_array(&row.cpu_max_freq_khz);
+        let cpu_base_freq_khz = format_u64_array(&row.cpu_base_freq_khz);
         let memory_type = escape_sql(&row.memory_type);
+        let memory_dimm_sizes_bytes = format_u64_array(&row.memory_dimm_sizes_bytes);
+        let memory_dimm_types = format_string_array(&row.memory_dimm_types);
+        let memory_dimm_speeds_mts = format_u32_array(&row.memory_dimm_speeds_mts);
+        let memory_dimm_configured_speeds_mts =
+            format_u32_array(&row.memory_dimm_configured_speeds_mts);
+        let memory_dimm_locators = format_string_array(&row.memory_dimm_locators);
+        let memory_dimm_bank_locators = format_string_array(&row.memory_dimm_bank_locators);
+        let memory_dimm_manufacturers = format_string_array(&row.memory_dimm_manufacturers);
+        let memory_dimm_part_numbers = format_string_array(&row.memory_dimm_part_numbers);
+        let memory_dimm_serials = format_string_array(&row.memory_dimm_serials);
         let disk_names = format_string_array(&row.disk_names);
         let disk_models = format_string_array(&row.disk_models);
         let disk_vendors = format_string_array(&row.disk_vendors);
@@ -903,25 +943,41 @@ impl ClickHouseExporter {
         let sql = format!(
             "INSERT INTO {table} (\
              updated_date_time, event_time, wallclock_slot, wallclock_slot_start_date_time, \
-             host_id, hostname, machine_id, kernel_release, os_name, architecture, \
+             host_id, kernel_release, os_name, architecture, \
              cpu_model, cpu_vendor, cpu_online_cores, cpu_logical_cores, \
-             memory_total_bytes, memory_type, memory_speed_mts, \
+             cpu_physical_cores, cpu_performance_cores, cpu_efficiency_cores, cpu_unknown_type_cores, \
+             cpu_logical_ids, cpu_core_ids, cpu_package_ids, cpu_die_ids, cpu_cluster_ids, \
+             cpu_core_types, cpu_core_type_labels, cpu_online_flags, cpu_max_freq_khz, cpu_base_freq_khz, \
+             memory_total_bytes, memory_type, memory_speed_mts, memory_dimm_count, \
+             memory_dimm_sizes_bytes, memory_dimm_types, memory_dimm_speeds_mts, \
+             memory_dimm_configured_speeds_mts, memory_dimm_locators, memory_dimm_bank_locators, \
+             memory_dimm_manufacturers, memory_dimm_part_numbers, memory_dimm_serials, \
              disk_count, disk_total_bytes, \
              disk_names, disk_models, disk_vendors, disk_serials, disk_sizes_bytes, disk_rotational, \
              meta_client_name, meta_network_name\
              ) VALUES (\
              {updated}, {event_time}, {}, {slot_start}, \
-             '{host_id}', '{hostname}', '{machine_id}', '{kernel_release}', '{os_name}', '{architecture}', \
-             '{cpu_model}', '{cpu_vendor}', {}, {}, \
-             {}, '{memory_type}', {}, \
+             '{host_id}', '{kernel_release}', '{os_name}', '{architecture}', \
+             '{cpu_model}', '{cpu_vendor}', {}, {}, {}, {}, {}, {}, \
+             {cpu_logical_ids}, {cpu_core_ids}, {cpu_package_ids}, {cpu_die_ids}, {cpu_cluster_ids}, \
+             {cpu_core_types}, {cpu_core_type_labels}, {cpu_online_flags}, {cpu_max_freq_khz}, {cpu_base_freq_khz}, \
+             {}, '{memory_type}', {}, {}, \
+             {memory_dimm_sizes_bytes}, {memory_dimm_types}, {memory_dimm_speeds_mts}, \
+             {memory_dimm_configured_speeds_mts}, {memory_dimm_locators}, {memory_dimm_bank_locators}, \
+             {memory_dimm_manufacturers}, {memory_dimm_part_numbers}, {memory_dimm_serials}, \
              {}, {}, {disk_names}, {disk_models}, {disk_vendors}, {disk_serials}, {disk_sizes_bytes}, {disk_rotational}, \
              '{client_name}', '{network_name}'\
              )",
             row.wallclock_slot,
             row.cpu_online_cores,
             row.cpu_logical_cores,
+            row.cpu_physical_cores,
+            row.cpu_performance_cores,
+            row.cpu_efficiency_cores,
+            row.cpu_unknown_type_cores,
             row.memory_total_bytes,
             row.memory_speed_mts,
+            row.memory_dimm_count,
             row.disk_count,
             row.disk_total_bytes,
         );
@@ -978,6 +1034,57 @@ fn format_u64_array(values: &[u64]) -> String {
     }
 
     let mut out = String::with_capacity(values.len() * 8 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u32_array(values: &[u32]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 6 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_u16_array(values: &[u16]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 4 + 2);
+    out.push('[');
+    for (idx, value) in values.iter().enumerate() {
+        if idx > 0 {
+            out.push_str(", ");
+        }
+        let _ = write!(out, "{value}");
+    }
+    out.push(']');
+    out
+}
+
+fn format_i32_array(values: &[i32]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+
+    let mut out = String::with_capacity(values.len() * 6 + 2);
     out.push('[');
     for (idx, value) in values.iter().enumerate() {
         if idx > 0 {
@@ -1064,6 +1171,24 @@ mod tests {
     fn test_format_u64_array() {
         assert_eq!(format_u64_array(&[1, 42, 1000]), "[1, 42, 1000]");
         assert_eq!(format_u64_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u32_array() {
+        assert_eq!(format_u32_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u32_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_u16_array() {
+        assert_eq!(format_u16_array(&[1, 42, 1000]), "[1, 42, 1000]");
+        assert_eq!(format_u16_array(&[]), "[]");
+    }
+
+    #[test]
+    fn test_format_i32_array() {
+        assert_eq!(format_i32_array(&[-1, 0, 42]), "[-1, 0, 42]");
+        assert_eq!(format_i32_array(&[]), "[]");
     }
 
     #[test]

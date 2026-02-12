@@ -157,6 +157,7 @@ impl AggregatedSink {
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
             system_cores,
+            buffer::monotonic_ns(),
         )
     }
 
@@ -185,8 +186,6 @@ impl AggregatedSink {
                 .unwrap_or(u32::MAX),
             wallclock_slot_start_date_time: state.slot_start_time(),
             host_id: snapshot.host_id,
-            hostname: snapshot.hostname,
-            machine_id: snapshot.machine_id,
             kernel_release: snapshot.kernel_release,
             os_name: snapshot.os_name,
             architecture: snapshot.architecture,
@@ -194,9 +193,33 @@ impl AggregatedSink {
             cpu_vendor: snapshot.cpu_vendor,
             cpu_online_cores: snapshot.cpu_online_cores,
             cpu_logical_cores: snapshot.cpu_logical_cores,
+            cpu_physical_cores: snapshot.cpu_physical_cores,
+            cpu_performance_cores: snapshot.cpu_performance_cores,
+            cpu_efficiency_cores: snapshot.cpu_efficiency_cores,
+            cpu_unknown_type_cores: snapshot.cpu_unknown_type_cores,
+            cpu_logical_ids: snapshot.cpu_logical_ids,
+            cpu_core_ids: snapshot.cpu_core_ids,
+            cpu_package_ids: snapshot.cpu_package_ids,
+            cpu_die_ids: snapshot.cpu_die_ids,
+            cpu_cluster_ids: snapshot.cpu_cluster_ids,
+            cpu_core_types: snapshot.cpu_core_types,
+            cpu_core_type_labels: snapshot.cpu_core_type_labels,
+            cpu_online_flags: snapshot.cpu_online_flags,
+            cpu_max_freq_khz: snapshot.cpu_max_freq_khz,
+            cpu_base_freq_khz: snapshot.cpu_base_freq_khz,
             memory_total_bytes: snapshot.memory_total_bytes,
             memory_type: snapshot.memory_type,
             memory_speed_mts: snapshot.memory_speed_mts,
+            memory_dimm_count: snapshot.memory_dimm_count,
+            memory_dimm_sizes_bytes: snapshot.memory_dimm_sizes_bytes,
+            memory_dimm_types: snapshot.memory_dimm_types,
+            memory_dimm_speeds_mts: snapshot.memory_dimm_speeds_mts,
+            memory_dimm_configured_speeds_mts: snapshot.memory_dimm_configured_speeds_mts,
+            memory_dimm_locators: snapshot.memory_dimm_locators,
+            memory_dimm_bank_locators: snapshot.memory_dimm_bank_locators,
+            memory_dimm_manufacturers: snapshot.memory_dimm_manufacturers,
+            memory_dimm_part_numbers: snapshot.memory_dimm_part_numbers,
+            memory_dimm_serials: snapshot.memory_dimm_serials,
             disk_count: snapshot.disk_count,
             disk_total_bytes: snapshot.disk_total_bytes,
             disk_names: snapshot.disk_names,
@@ -278,7 +301,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id, event.raw.timestamp_ns);
             }
 
             TypedEvent::SchedRunqueue(e) => {
@@ -939,6 +962,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -979,6 +1003,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1022,6 +1047,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1060,6 +1086,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1110,6 +1137,7 @@ mod tests {
             false,
             false,
             8,
+            0,
         );
         let dims = DimensionsConfig::default();
 

@@ -57,6 +57,8 @@ parking_lot = "0.12"
 arc-swap = "1"
 chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
+libc = "0.2"
+sha2 = "0.10"
 
 [features]
 default = ["bpf", "profiling"]

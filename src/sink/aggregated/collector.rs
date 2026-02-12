@@ -1249,6 +1249,7 @@ mod tests {
             false,
             false,
             16,
+            0,
         )
     }
 
@@ -1613,9 +1614,9 @@ mod tests {
         };
 
         // 1.5ms on core 2, 0.5ms on core 4 over a 1s window.
-        buf.add_sched_switch(dim, 1_000_000, 2);
-        buf.add_sched_switch(dim, 500_000, 2);
-        buf.add_sched_switch(dim, 500_000, 4);
+        buf.add_sched_switch(dim, 1_000_000, 2, 0);
+        buf.add_sched_switch(dim, 500_000, 2, 0);
+        buf.add_sched_switch(dim, 500_000, 4, 0);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);
@@ -1633,6 +1634,41 @@ mod tests {
         assert!((m.mean_core_pct - 0.1).abs() < 0.0001);
         assert!((m.min_core_pct - 0.05).abs() < 0.0001);
         assert!((m.max_core_pct - 0.15).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_collect_cpu_utilization_no_overflow() {
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
+        // Buffer starts at ktime=1B ns (1 second).
+        let buf = Buffer::new(
+            SystemTime::now(),
+            100,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            16,
+            1_000_000_000,
+        );
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+
+        // Event at ktime=2s with on_cpu_ns=2s — started 1s before the window.
+        // Should be trimmed to 1s for cpu_on_core.
+        buf.add_sched_switch(dim, 2_000_000_000, 0, 2_000_000_000);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.cpu_util.len(), 1);
+
+        let m = &batch.cpu_util[0];
+        // max_core_pct should be <= 100% after trimming.
+        assert!(
+            m.max_core_pct <= 100.0,
+            "max_core_pct should be <= 100% but was {}",
+            m.max_core_pct
+        );
     }
 
     #[test]
@@ -1683,7 +1719,7 @@ mod tests {
             pid: 123,
             client_type: 1,
         };
-        buf.add_sched_switch(dim, 1_000_000, 2);
+        buf.add_sched_switch(dim, 1_000_000, 2, 0);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);
