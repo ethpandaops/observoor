@@ -96,6 +96,22 @@ struct {
     __type(value, struct net_send_val);
 } net_send_start SEC(".maps");
 
+// net_recv_udp_start: Socket info during UDP recvmsg.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, struct syscall_key);
+    __type(value, struct net_recv_val);
+} net_recv_udp_start SEC(".maps");
+
+// net_send_udp_start: Socket info during UDP sendmsg.
+struct {
+    __uint(type, BPF_MAP_TYPE_HASH);
+    __uint(max_entries, 4096);
+    __type(key, struct syscall_key);
+    __type(value, struct net_send_val);
+} net_send_udp_start SEC(".maps");
+
 // fault_start: Page fault entry timestamps.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);

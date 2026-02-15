@@ -186,11 +186,12 @@ pub enum ClientType {
     Lodestar = 9,
     Nimbus = 10,
     Ethrex = 11,
+    Grandine = 12,
 }
 
 /// Maximum ClientType value, used for array sizing.
 #[allow(dead_code)]
-pub const MAX_CLIENT_TYPE: usize = 11;
+pub const MAX_CLIENT_TYPE: usize = 12;
 /// Number of ClientType variants including Unknown.
 pub const CLIENT_TYPE_CARDINALITY: usize = MAX_CLIENT_TYPE + 1;
 
@@ -210,6 +211,7 @@ impl ClientType {
             Self::Lodestar => "lodestar",
             Self::Nimbus => "nimbus",
             Self::Ethrex => "ethrex",
+            Self::Grandine => "grandine",
         }
     }
 
@@ -228,6 +230,7 @@ impl ClientType {
             9 => Some(Self::Lodestar),
             10 => Some(Self::Nimbus),
             11 => Some(Self::Ethrex),
+            12 => Some(Self::Grandine),
             _ => None,
         }
     }
@@ -246,6 +249,7 @@ impl ClientType {
             Self::Lodestar,
             Self::Nimbus,
             Self::Ethrex,
+            Self::Grandine,
         ]
     }
 
@@ -264,6 +268,7 @@ impl ClientType {
             Self::Lodestar,
             Self::Nimbus,
             Self::Ethrex,
+            Self::Grandine,
         ]
     }
 
@@ -305,6 +310,33 @@ impl fmt::Display for Direction {
         match self {
             Self::TX => f.write_str("tx"),
             Self::RX => f.write_str("rx"),
+        }
+    }
+}
+
+/// Network transport protocol.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
+pub enum NetTransport {
+    Tcp = 0,
+    Udp = 1,
+}
+
+impl NetTransport {
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Tcp),
+            1 => Some(Self::Udp),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for NetTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Tcp => f.write_str("tcp"),
+            Self::Udp => f.write_str("udp"),
         }
     }
 }
@@ -355,6 +387,7 @@ pub struct NetIOEvent {
     pub src_port: u16,
     pub dst_port: u16,
     pub direction: Direction,
+    pub transport: NetTransport,
     pub has_metrics: bool,
     pub srtt_us: u32,
     pub cwnd: u32,
@@ -509,7 +542,7 @@ mod tests {
             let ct = ClientType::from_u8(i).expect("valid client type");
             assert_eq!(ct as u8, i);
         }
-        assert!(ClientType::from_u8(12).is_none());
+        assert!(ClientType::from_u8(13).is_none());
     }
 
     #[test]
@@ -546,19 +579,20 @@ mod tests {
         assert_eq!(ClientType::Geth.to_string(), "geth");
         assert_eq!(ClientType::Unknown.to_string(), "unknown");
         assert_eq!(ClientType::Ethrex.to_string(), "ethrex");
+        assert_eq!(ClientType::Grandine.to_string(), "grandine");
     }
 
     #[test]
     fn test_all_client_types() {
         let all = ClientType::all();
-        assert_eq!(all.len(), 11);
+        assert_eq!(all.len(), 12);
         assert!(!all.contains(&ClientType::Unknown));
     }
 
     #[test]
     fn test_all_client_names_includes_unknown() {
         let names = ClientType::all_names();
-        assert_eq!(names.len(), 12);
+        assert_eq!(names.len(), 13);
         assert!(names.contains(&"unknown".to_string()));
     }
 
@@ -566,5 +600,11 @@ mod tests {
     fn test_direction_display() {
         assert_eq!(Direction::TX.to_string(), "tx");
         assert_eq!(Direction::RX.to_string(), "rx");
+    }
+
+    #[test]
+    fn test_net_transport_display() {
+        assert_eq!(NetTransport::Tcp.to_string(), "tcp");
+        assert_eq!(NetTransport::Udp.to_string(), "udp");
     }
 }

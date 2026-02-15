@@ -30,6 +30,12 @@ enum event_type {
     EVENT_PROCESS_EXIT       = 25,
 };
 
+// Network transport protocol for net_io_event.
+enum net_transport {
+    NET_TRANSPORT_TCP = 0,
+    NET_TRANSPORT_UDP = 1,
+};
+
 // Common event header (24 bytes, 8-byte aligned).
 struct event_header {
     __u64 timestamp_ns;
@@ -68,7 +74,8 @@ struct net_io_event {
     __u16 dport;
     __u8  direction;    // 0=TX, 1=RX
     __u8  has_metrics;  // 1 if srtt_us/snd_cwnd are populated
-    __u8  pad[2];
+    __u8  transport;    // 0=TCP, 1=UDP
+    __u8  pad[1];
     __u32 srtt_us;      // Smoothed RTT (0 when has_metrics==0)
     __u32 snd_cwnd;     // Congestion window (0 when has_metrics==0)
 };
@@ -200,7 +207,8 @@ struct net_recv_val {
     __u16 dport;
     __u32 pid;
     __u8  client_type;
-    __u8  pad[7];
+    __u8  transport;
+    __u8  pad[6];
 };
 
 // Network send tracking (32 bytes, 8-byte aligned).
@@ -210,7 +218,8 @@ struct net_send_val {
     __u16 dport;
     __u32 pid;
     __u8  client_type;
-    __u8  pad[3];
+    __u8  transport;
+    __u8  pad[2];
     __u32 srtt_us;
     __u32 snd_cwnd;
 };

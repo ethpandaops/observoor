@@ -245,7 +245,7 @@ pub struct NetworkDimensionsConfig {
 
     /// Runtime port-to-label map (not configurable via YAML).
     #[serde(skip)]
-    pub port_label_map: Option<std::collections::HashMap<u16, crate::agent::ports::PortLabel>>,
+    pub port_label_map: Option<crate::agent::ports::PortLabelMap>,
 }
 
 /// Disk metric dimension configuration.
@@ -766,20 +766,41 @@ impl NetworkDimensionsConfig {
     ///
     /// Returns `PortLabel::Unknown as u8` if the port is not in the label map.
     pub fn resolve_port_label(&self, port: u16) -> u8 {
+        self.resolve_tcp_port_label(crate::tracer::event::ClientType::Unknown, port, port)
+    }
+
+    /// Resolves TCP traffic to a semantic `PortLabel` discriminant (`u8`).
+    ///
+    /// Resolution is client-aware and checks `primary_port` first, then `secondary_port`.
+    pub fn resolve_tcp_port_label(
+        &self,
+        client_type: crate::tracer::event::ClientType,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> u8 {
         match &self.port_label_map {
-            Some(map) => map
-                .get(&port)
-                .copied()
-                .unwrap_or(crate::agent::ports::PortLabel::Unknown) as u8,
+            Some(map) => map.resolve_tcp(client_type, primary_port, secondary_port) as u8,
+            None => crate::agent::ports::PortLabel::Unknown as u8,
+        }
+    }
+
+    /// Resolves UDP traffic to a semantic `PortLabel` discriminant (`u8`).
+    ///
+    /// Resolution is client-aware and checks `primary_port` first, then `secondary_port`.
+    pub fn resolve_udp_port_label(
+        &self,
+        client_type: crate::tracer::event::ClientType,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> u8 {
+        match &self.port_label_map {
+            Some(map) => map.resolve_udp(client_type, primary_port, secondary_port) as u8,
             None => crate::agent::ports::PortLabel::Unknown as u8,
         }
     }
 
     /// Set the runtime port-to-label map.
-    pub fn set_port_label_map(
-        &mut self,
-        map: std::collections::HashMap<u16, crate::agent::ports::PortLabel>,
-    ) {
+    pub fn set_port_label_map(&mut self, map: crate::agent::ports::PortLabelMap) {
         self.port_label_map = Some(map);
     }
 }
@@ -862,17 +883,49 @@ mod tests {
 
     #[test]
     fn test_resolve_port_label_with_map() {
-        use crate::agent::ports::PortLabel;
+        use crate::agent::ports::{PortLabel, PortLabelMap};
+        use crate::tracer::event::ClientType;
 
         let mut cfg = NetworkDimensionsConfig::default();
-        let mut map = std::collections::HashMap::new();
-        map.insert(8545, PortLabel::ElJsonRpc);
-        map.insert(30303, PortLabel::ElP2PTcp);
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Geth, 8545, PortLabel::ElJsonRpc);
+        map.insert(ClientType::Geth, 30303, PortLabel::ElP2PTcp);
         cfg.set_port_label_map(map);
 
         assert_eq!(cfg.resolve_port_label(8545), PortLabel::ElJsonRpc as u8);
-        assert_eq!(cfg.resolve_port_label(30303), PortLabel::ElP2PTcp as u8);
-        assert_eq!(cfg.resolve_port_label(9999), PortLabel::Unknown as u8);
+        assert_eq!(
+            cfg.resolve_tcp_port_label(ClientType::Geth, 30303, 45000),
+            PortLabel::ElP2PTcp as u8
+        );
+        assert_eq!(
+            cfg.resolve_tcp_port_label(ClientType::Geth, 45000, 30303),
+            PortLabel::ElP2PTcp as u8
+        );
+        assert_eq!(
+            cfg.resolve_tcp_port_label(ClientType::Geth, 9999, 9998),
+            PortLabel::Unknown as u8
+        );
+    }
+
+    #[test]
+    fn test_resolve_tcp_port_label_ignores_udp_labels() {
+        use crate::agent::ports::{PortLabel, PortLabelMap};
+        use crate::tracer::event::ClientType;
+
+        let mut cfg = NetworkDimensionsConfig::default();
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClDiscovery);
+        cfg.set_port_label_map(map);
+
+        assert_eq!(
+            cfg.resolve_tcp_port_label(ClientType::Prysm, 13000, 45000),
+            PortLabel::ClP2PTcp as u8
+        );
+        assert_eq!(
+            cfg.resolve_udp_port_label(ClientType::Prysm, 13000, 45000),
+            PortLabel::ClDiscovery as u8
+        );
     }
 
     #[test]

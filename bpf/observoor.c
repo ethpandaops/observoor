@@ -775,6 +775,7 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
         BPF_CORE_READ(sk, __sk_common.skc_dport));
     val.pid = pid;
     val.client_type = ct;
+    val.transport = NET_TRANSPORT_TCP;
     {
         __u32 srtt = BPF_CORE_READ((struct tcp_sock *)sk, srtt_us);
         val.srtt_us = srtt >> 3;
@@ -811,6 +812,8 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     e->dport = val->dport;
     e->direction = 0; // TX
     e->has_metrics = 1;
+    e->transport = val->transport;
+    e->pad[0] = 0;
     e->srtt_us = val->srtt_us;
     e->snd_cwnd = val->snd_cwnd;
 
@@ -848,6 +851,7 @@ int BPF_KPROBE(kprobe_tcp_recvmsg, struct sock *sk)
         BPF_CORE_READ(sk, __sk_common.skc_dport));
     val.pid = pid;
     val.client_type = ct;
+    val.transport = NET_TRANSPORT_TCP;
     bpf_map_update_elem(&net_recv_start, &key, &val, BPF_ANY);
     return 0;
 }
@@ -879,6 +883,8 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     e->dport = val->dport;
     e->direction = 1; // RX
     e->has_metrics = 0;
+    e->transport = val->transport;
+    e->pad[0] = 0;
     e->srtt_us = 0;
     e->snd_cwnd = 0;
 
@@ -886,6 +892,133 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
 
 cleanup:
     bpf_map_delete_elem(&net_recv_start, &key);
+    return 0;
+}
+
+SEC("kprobe/udp_sendmsg")
+int BPF_KPROBE(kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg,
+               size_t size)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    __u8 ct;
+
+    if (!is_tracked(pid, &ct))
+        return 0;
+
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+    struct net_send_val val = {};
+    val.ts = bpf_ktime_get_ns();
+    val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    val.dport = __builtin_bswap16(
+        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    val.pid = pid;
+    val.client_type = ct;
+    val.transport = NET_TRANSPORT_UDP;
+    val.srtt_us = 0;
+    val.snd_cwnd = 0;
+    bpf_map_update_elem(&net_send_udp_start, &key, &val, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/udp_sendmsg")
+int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+
+    struct net_send_val *val = bpf_map_lookup_elem(&net_send_udp_start, &key);
+    if (!val)
+        return 0;
+
+    if (ret <= 0)
+        goto cleanup;
+
+    if (!should_emit_event(EVENT_NET_TX))
+        goto cleanup;
+
+    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        goto cleanup;
+
+    fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
+    e->hdr.pid = val->pid;
+    e->bytes = (__u32)ret;
+    e->sport = val->sport;
+    e->dport = val->dport;
+    e->direction = 0; // TX
+    e->has_metrics = 0;
+    e->transport = val->transport;
+    e->pad[0] = 0;
+    e->srtt_us = 0;
+    e->snd_cwnd = 0;
+
+    bpf_ringbuf_submit(e, 0);
+
+cleanup:
+    bpf_map_delete_elem(&net_send_udp_start, &key);
+    return 0;
+}
+
+SEC("kprobe/udp_recvmsg")
+int BPF_KPROBE(kprobe_udp_recvmsg, struct sock *sk)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    __u8 ct;
+
+    if (!is_tracked(pid, &ct))
+        return 0;
+
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+    struct net_recv_val val = {};
+    val.ts = bpf_ktime_get_ns();
+    val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
+    val.dport = __builtin_bswap16(
+        BPF_CORE_READ(sk, __sk_common.skc_dport));
+    val.pid = pid;
+    val.client_type = ct;
+    val.transport = NET_TRANSPORT_UDP;
+    bpf_map_update_elem(&net_recv_udp_start, &key, &val, BPF_ANY);
+    return 0;
+}
+
+SEC("kretprobe/udp_recvmsg")
+int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
+{
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    struct syscall_key key = { .pid_tgid = pid_tgid };
+
+    struct net_recv_val *val = bpf_map_lookup_elem(&net_recv_udp_start, &key);
+    if (!val)
+        return 0;
+
+    if (ret <= 0)
+        goto cleanup;
+
+    if (!should_emit_event(EVENT_NET_RX))
+        goto cleanup;
+
+    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        goto cleanup;
+
+    fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
+    e->hdr.pid = val->pid;
+    e->bytes = (__u32)ret;
+    e->sport = val->sport;
+    e->dport = val->dport;
+    e->direction = 1; // RX
+    e->has_metrics = 0;
+    e->transport = val->transport;
+    e->pad[0] = 0;
+    e->srtt_us = 0;
+    e->snd_cwnd = 0;
+
+    bpf_ringbuf_submit(e, 0);
+
+cleanup:
+    bpf_map_delete_elem(&net_recv_udp_start, &key);
     return 0;
 }
 

@@ -28,6 +28,7 @@ pub const DEFAULT_PROCESS_NAMES: &[&str] = &[
     "lodestar",
     "nimbus",
     "nimbus_beacon_n",
+    "grandine",
     // Generic runtimes (client type resolved via cmdline)
     "java",
     "node",
@@ -296,6 +297,7 @@ fn client_type_from_comm(comm: &str) -> Option<ClientType> {
         "teku" => Some(ClientType::Teku),
         "lodestar" => Some(ClientType::Lodestar),
         "nimbus" | "nimbus_beacon_n" => Some(ClientType::Nimbus),
+        "grandine" => Some(ClientType::Grandine),
         _ => None,
     }
 }
@@ -316,6 +318,9 @@ fn client_type_from_cmdline(cmdline: &str) -> Option<ClientType> {
     }
     if lower.contains("nimbus") {
         return Some(ClientType::Nimbus);
+    }
+    if lower.contains("grandine") {
+        return Some(ClientType::Grandine);
     }
     if lower.contains("ethrex") {
         return Some(ClientType::Ethrex);
@@ -375,6 +380,10 @@ mod tests {
             client_type_from_comm("nimbus_beacon_n"),
             Some(ClientType::Nimbus)
         );
+        assert_eq!(
+            client_type_from_comm("grandine"),
+            Some(ClientType::Grandine)
+        );
     }
 
     #[test]
@@ -403,6 +412,10 @@ mod tests {
             Some(ClientType::Nimbus),
         );
         assert_eq!(
+            client_type_from_cmdline("/usr/bin/grandine --network mainnet"),
+            Some(ClientType::Grandine),
+        );
+        assert_eq!(
             client_type_from_cmdline("/usr/bin/ethrex --config=foo"),
             Some(ClientType::Ethrex),
         );
@@ -416,7 +429,7 @@ mod tests {
 
     #[test]
     fn test_default_process_names_count() {
-        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 17);
+        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 18);
     }
 
     #[test]
