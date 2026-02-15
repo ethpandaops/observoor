@@ -445,7 +445,9 @@ mod tests {
             Some(ClientType::Ethrex),
         );
         assert_eq!(
-            client_type_from_cmdline("/usr/local/bin/reth-binary node --chain=/network-configs/genesis.json"),
+            client_type_from_cmdline(
+                "/usr/local/bin/reth-binary node --chain=/network-configs/genesis.json"
+            ),
             Some(ClientType::Reth),
         );
         assert_eq!(
