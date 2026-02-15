@@ -72,13 +72,13 @@ impl PortLabel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
-            Self::ElP2PTcp => "el_p2p_tcp",
+            Self::ElP2PTcp => "el_p2p",
             Self::ElDiscovery => "el_discovery",
             Self::ElJsonRpc => "el_json_rpc",
             Self::ElWebSocket => "el_ws",
             Self::ElEngineApi => "el_engine_api",
-            Self::ClP2PTcp => "cl_p2p_tcp",
-            Self::ClP2PQuic => "cl_p2p_quic",
+            Self::ClP2PTcp => "cl_p2p",
+            Self::ClP2PQuic => "cl_p2p",
             Self::ClDiscovery => "cl_discovery",
             Self::ClBeaconApi => "cl_beacon_api",
             Self::ClGrpc => "cl_grpc",
@@ -674,8 +674,10 @@ mod tests {
     #[test]
     fn test_port_label_as_str() {
         assert_eq!(PortLabel::Unknown.as_str(), "unknown");
-        assert_eq!(PortLabel::ElP2PTcp.as_str(), "el_p2p_tcp");
+        assert_eq!(PortLabel::ElP2PTcp.as_str(), "el_p2p");
         assert_eq!(PortLabel::ElJsonRpc.as_str(), "el_json_rpc");
+        assert_eq!(PortLabel::ClP2PTcp.as_str(), "cl_p2p");
+        assert_eq!(PortLabel::ClP2PQuic.as_str(), "cl_p2p");
         assert_eq!(PortLabel::ClBeaconApi.as_str(), "cl_beacon_api");
         assert_eq!(PortLabel::ClGrpc.as_str(), "cl_grpc");
     }
