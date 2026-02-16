@@ -890,7 +890,7 @@ impl Config {
         // Validate probe group config.
         let disabled_probes = self.probes.disabled_set()?;
 
-        // Warn on nonsensical but harmless combinations.
+        // Validate inter-probe dependencies and warn on nonsensical but harmless combinations.
         if disabled_probes.contains(&ProbeGroup::Scheduler)
             && !disabled_probes.contains(&ProbeGroup::SchedulerWakeup)
             && self.probes.entries.contains_key("scheduler_wakeup")
@@ -898,6 +898,11 @@ impl Config {
             tracing::warn!(
                 "scheduler_wakeup is enabled but scheduler is disabled — wakeup data has no effect without sched_switch"
             );
+        }
+        if !disabled_probes.contains(&ProbeGroup::DiskIo)
+            && disabled_probes.contains(&ProbeGroup::BlockMerge)
+        {
+            bail!("block_merge cannot be disabled while disk_io is enabled");
         }
         if disabled_probes.contains(&ProbeGroup::DiskIo)
             && !disabled_probes.contains(&ProbeGroup::BlockMerge)
@@ -908,20 +913,18 @@ impl Config {
             );
         }
         {
-            let all_net_disabled = disabled_probes.contains(&ProbeGroup::TcpSend)
-                && disabled_probes.contains(&ProbeGroup::TcpRecv)
-                && disabled_probes.contains(&ProbeGroup::UdpSend)
-                && disabled_probes.contains(&ProbeGroup::UdpRecv);
-            if all_net_disabled {
-                if !disabled_probes.contains(&ProbeGroup::TcpRetransmit)
-                    && self.probes.entries.contains_key("tcp_retransmit")
-                {
-                    tracing::warn!("tcp_retransmit is enabled but all network probes are disabled");
+            let tcp_tracking_disabled = disabled_probes.contains(&ProbeGroup::TcpSend)
+                && disabled_probes.contains(&ProbeGroup::TcpRecv);
+            if tcp_tracking_disabled {
+                if !disabled_probes.contains(&ProbeGroup::TcpRetransmit) {
+                    bail!(
+                        "tcp_retransmit cannot be enabled when both tcp_send and tcp_recv are disabled"
+                    );
                 }
-                if !disabled_probes.contains(&ProbeGroup::TcpState)
-                    && self.probes.entries.contains_key("tcp_state")
-                {
-                    tracing::warn!("tcp_state is enabled but all network probes are disabled");
+                if !disabled_probes.contains(&ProbeGroup::TcpState) {
+                    bail!(
+                        "tcp_state cannot be enabled when both tcp_send and tcp_recv are disabled"
+                    );
                 }
             }
         }
@@ -1575,6 +1578,57 @@ mod tests {
         let cfg = ProbesConfig { entries };
         let err = cfg.disabled_set().unwrap_err();
         assert!(err.to_string().contains("unknown probe group"));
+    }
+
+    #[test]
+    fn test_validation_block_merge_cannot_be_disabled_while_disk_io_enabled() {
+        let mut cfg = valid_config();
+        cfg.probes
+            .entries
+            .insert("block_merge".to_string(), ProbeConfig { enabled: false });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("block_merge cannot be disabled while disk_io is enabled"));
+    }
+
+    #[test]
+    fn test_validation_tcp_retransmit_requires_tcp_tracking_probe() {
+        let mut cfg = valid_config();
+        cfg.probes
+            .entries
+            .insert("tcp_send".to_string(), ProbeConfig { enabled: false });
+        cfg.probes
+            .entries
+            .insert("tcp_recv".to_string(), ProbeConfig { enabled: false });
+        cfg.probes
+            .entries
+            .insert("tcp_state".to_string(), ProbeConfig { enabled: false });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains(
+            "tcp_retransmit cannot be enabled when both tcp_send and tcp_recv are disabled"
+        ));
+    }
+
+    #[test]
+    fn test_validation_tcp_state_requires_tcp_tracking_probe() {
+        let mut cfg = valid_config();
+        cfg.probes
+            .entries
+            .insert("tcp_send".to_string(), ProbeConfig { enabled: false });
+        cfg.probes
+            .entries
+            .insert("tcp_recv".to_string(), ProbeConfig { enabled: false });
+        cfg.probes
+            .entries
+            .insert("tcp_retransmit".to_string(), ProbeConfig { enabled: false });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("tcp_state cannot be enabled when both tcp_send and tcp_recv are disabled"));
     }
 
     #[test]

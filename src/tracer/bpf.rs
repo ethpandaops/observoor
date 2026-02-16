@@ -649,6 +649,7 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // ---------------------------------------------------------------
     // Optional tracepoints (with probe group gating)
     // ---------------------------------------------------------------
+    let disk_io_enabled = !disabled.contains(&ProbeGroup::DiskIo);
     let optional_tracepoints: &[(ProbeGroup, &str, &str, &str)] = &[
         (
             ProbeGroup::BlockMerge,
@@ -698,10 +699,18 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     ];
 
     for (group, prog_name, tp_group, tp_name) in optional_tracepoints {
-        if disabled.contains(group) {
+        let block_merge_required_for_disk = *group == ProbeGroup::BlockMerge && disk_io_enabled;
+        if disabled.contains(group) && !block_merge_required_for_disk {
             tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
             stats.tracepoints_skipped += 1;
             continue;
+        }
+        if disabled.contains(group) && block_merge_required_for_disk {
+            tracing::warn!(
+                probe = %group,
+                program = prog_name,
+                "configured disabled but disk_io is enabled; attaching to preserve disk I/O accounting"
+            );
         }
         attach_tracepoint_optional(ebpf, prog_name, tp_group, tp_name, &mut stats);
     }
