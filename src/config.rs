@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -7,6 +8,213 @@ use serde::Deserialize;
 
 use crate::sink::aggregated::collector::ALL_METRIC_NAMES;
 use crate::tracer::event::EventType;
+
+/// Identifies a group of BPF programs that are loaded/attached as a unit.
+///
+/// Each variant maps 1:1 to a BPF attachment unit (enter/exit pair, kprobe/kretprobe
+/// pair, or single program). Disabling a probe group prevents the corresponding BPF
+/// programs from being loaded — zero kernel overhead.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ProbeGroup {
+    SyscallRead,
+    SyscallWrite,
+    SyscallFutex,
+    SyscallMmap,
+    SyscallEpollWait,
+    SyscallFsync,
+    SyscallFdatasync,
+    SyscallPwrite,
+    FdOpen,
+    FdClose,
+    DiskIo,
+    BlockMerge,
+    TcpSend,
+    TcpRecv,
+    UdpSend,
+    UdpRecv,
+    TcpRetransmit,
+    TcpState,
+    Scheduler,
+    SchedulerWakeup,
+    PageFault,
+    MemReclaim,
+    MemCompaction,
+    SwapIn,
+    SwapOut,
+    OomKill,
+    ProcessExit,
+}
+
+impl ProbeGroup {
+    /// Returns the canonical snake_case config key.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::SyscallRead => "syscall_read",
+            Self::SyscallWrite => "syscall_write",
+            Self::SyscallFutex => "syscall_futex",
+            Self::SyscallMmap => "syscall_mmap",
+            Self::SyscallEpollWait => "syscall_epoll_wait",
+            Self::SyscallFsync => "syscall_fsync",
+            Self::SyscallFdatasync => "syscall_fdatasync",
+            Self::SyscallPwrite => "syscall_pwrite",
+            Self::FdOpen => "fd_open",
+            Self::FdClose => "fd_close",
+            Self::DiskIo => "disk_io",
+            Self::BlockMerge => "block_merge",
+            Self::TcpSend => "tcp_send",
+            Self::TcpRecv => "tcp_recv",
+            Self::UdpSend => "udp_send",
+            Self::UdpRecv => "udp_recv",
+            Self::TcpRetransmit => "tcp_retransmit",
+            Self::TcpState => "tcp_state",
+            Self::Scheduler => "scheduler",
+            Self::SchedulerWakeup => "scheduler_wakeup",
+            Self::PageFault => "page_fault",
+            Self::MemReclaim => "mem_reclaim",
+            Self::MemCompaction => "mem_compaction",
+            Self::SwapIn => "swap_in",
+            Self::SwapOut => "swap_out",
+            Self::OomKill => "oom_kill",
+            Self::ProcessExit => "process_exit",
+        }
+    }
+
+    /// Parse from a config key string.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name {
+            "syscall_read" => Some(Self::SyscallRead),
+            "syscall_write" => Some(Self::SyscallWrite),
+            "syscall_futex" => Some(Self::SyscallFutex),
+            "syscall_mmap" => Some(Self::SyscallMmap),
+            "syscall_epoll_wait" => Some(Self::SyscallEpollWait),
+            "syscall_fsync" => Some(Self::SyscallFsync),
+            "syscall_fdatasync" => Some(Self::SyscallFdatasync),
+            "syscall_pwrite" => Some(Self::SyscallPwrite),
+            "fd_open" => Some(Self::FdOpen),
+            "fd_close" => Some(Self::FdClose),
+            "disk_io" => Some(Self::DiskIo),
+            "block_merge" => Some(Self::BlockMerge),
+            "tcp_send" => Some(Self::TcpSend),
+            "tcp_recv" => Some(Self::TcpRecv),
+            "udp_send" => Some(Self::UdpSend),
+            "udp_recv" => Some(Self::UdpRecv),
+            "tcp_retransmit" => Some(Self::TcpRetransmit),
+            "tcp_state" => Some(Self::TcpState),
+            "scheduler" => Some(Self::Scheduler),
+            "scheduler_wakeup" => Some(Self::SchedulerWakeup),
+            "page_fault" => Some(Self::PageFault),
+            "mem_reclaim" => Some(Self::MemReclaim),
+            "mem_compaction" => Some(Self::MemCompaction),
+            "swap_in" => Some(Self::SwapIn),
+            "swap_out" => Some(Self::SwapOut),
+            "oom_kill" => Some(Self::OomKill),
+            "process_exit" => Some(Self::ProcessExit),
+            _ => None,
+        }
+    }
+
+    /// All probe groups in definition order.
+    pub fn all() -> &'static [Self] {
+        &[
+            Self::SyscallRead,
+            Self::SyscallWrite,
+            Self::SyscallFutex,
+            Self::SyscallMmap,
+            Self::SyscallEpollWait,
+            Self::SyscallFsync,
+            Self::SyscallFdatasync,
+            Self::SyscallPwrite,
+            Self::FdOpen,
+            Self::FdClose,
+            Self::DiskIo,
+            Self::BlockMerge,
+            Self::TcpSend,
+            Self::TcpRecv,
+            Self::UdpSend,
+            Self::UdpRecv,
+            Self::TcpRetransmit,
+            Self::TcpState,
+            Self::Scheduler,
+            Self::SchedulerWakeup,
+            Self::PageFault,
+            Self::MemReclaim,
+            Self::MemCompaction,
+            Self::SwapIn,
+            Self::SwapOut,
+            Self::OomKill,
+            Self::ProcessExit,
+        ]
+    }
+
+    /// Event types produced by this probe group.
+    pub fn event_types(self) -> &'static [EventType] {
+        match self {
+            Self::SyscallRead => &[EventType::SyscallRead],
+            Self::SyscallWrite => &[EventType::SyscallWrite],
+            Self::SyscallFutex => &[EventType::SyscallFutex],
+            Self::SyscallMmap => &[EventType::SyscallMmap],
+            Self::SyscallEpollWait => &[EventType::SyscallEpollWait],
+            Self::SyscallFsync => &[EventType::SyscallFsync],
+            Self::SyscallFdatasync => &[EventType::SyscallFdatasync],
+            Self::SyscallPwrite => &[EventType::SyscallPwrite],
+            Self::FdOpen => &[EventType::FDOpen],
+            Self::FdClose => &[EventType::FDClose],
+            Self::DiskIo => &[EventType::DiskIO],
+            Self::BlockMerge => &[EventType::BlockMerge],
+            Self::TcpSend => &[EventType::NetTX],
+            Self::TcpRecv => &[EventType::NetRX],
+            Self::UdpSend => &[EventType::NetTX],
+            Self::UdpRecv => &[EventType::NetRX],
+            Self::TcpRetransmit => &[EventType::TcpRetransmit],
+            Self::TcpState => &[EventType::TcpState],
+            Self::Scheduler => &[EventType::SchedSwitch, EventType::SchedRunqueue],
+            Self::SchedulerWakeup => &[], // auxiliary, improves runqueue data
+            Self::PageFault => &[EventType::PageFault],
+            Self::MemReclaim => &[EventType::MemReclaim],
+            Self::MemCompaction => &[EventType::MemCompaction],
+            Self::SwapIn => &[EventType::SwapIn],
+            Self::SwapOut => &[EventType::SwapOut],
+            Self::OomKill => &[EventType::OOMKill],
+            Self::ProcessExit => &[EventType::ProcessExit],
+        }
+    }
+}
+
+impl fmt::Display for ProbeGroup {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Per-probe-group configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProbeConfig {
+    /// Whether this probe group is enabled. Default: true.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+/// Top-level probe group configuration, keyed by probe group name.
+#[derive(Debug, Default, Clone, Deserialize)]
+pub struct ProbesConfig {
+    #[serde(flatten)]
+    pub entries: HashMap<String, ProbeConfig>,
+}
+
+impl ProbesConfig {
+    /// Returns the set of disabled probe groups after validating all keys.
+    pub fn disabled_set(&self) -> Result<HashSet<ProbeGroup>> {
+        let mut disabled = HashSet::new();
+        for (key, cfg) in &self.entries {
+            let group = ProbeGroup::from_name(key)
+                .ok_or_else(|| anyhow::anyhow!("unknown probe group in config: {key}"))?;
+            if !cfg.enabled {
+                disabled.insert(group);
+            }
+        }
+        Ok(disabled)
+    }
+}
 
 /// Top-level configuration for the observoor agent.
 #[derive(Debug, Deserialize)]
@@ -47,6 +255,10 @@ pub struct Config {
     /// Identifies the Ethereum network (e.g., mainnet, holesky).
     #[serde(default)]
     pub meta_network_name: String,
+
+    /// Per-probe-group enable/disable configuration.
+    #[serde(default)]
+    pub probes: ProbesConfig,
 }
 
 /// Beacon node connection configuration.
@@ -463,6 +675,7 @@ impl Default for Config {
             ring_buffer_size: default_ring_buffer_size(),
             meta_client_name: String::new(),
             meta_network_name: String::new(),
+            probes: ProbesConfig::default(),
         }
     }
 }
@@ -671,6 +884,45 @@ impl Config {
                 .context("invalid sampling rule for net_rx")?;
             if tx_rule != rx_rule {
                 bail!("net_tx and net_rx sampling rules must match when network.include_direction=false");
+            }
+        }
+
+        // Validate probe group config.
+        let disabled_probes = self.probes.disabled_set()?;
+
+        // Warn on nonsensical but harmless combinations.
+        if disabled_probes.contains(&ProbeGroup::Scheduler)
+            && !disabled_probes.contains(&ProbeGroup::SchedulerWakeup)
+            && self.probes.entries.contains_key("scheduler_wakeup")
+        {
+            tracing::warn!(
+                "scheduler_wakeup is enabled but scheduler is disabled — wakeup data has no effect without sched_switch"
+            );
+        }
+        if disabled_probes.contains(&ProbeGroup::DiskIo)
+            && !disabled_probes.contains(&ProbeGroup::BlockMerge)
+            && self.probes.entries.contains_key("block_merge")
+        {
+            tracing::warn!(
+                "block_merge is enabled but disk_io is disabled — merge data has limited value without disk I/O"
+            );
+        }
+        {
+            let all_net_disabled = disabled_probes.contains(&ProbeGroup::TcpSend)
+                && disabled_probes.contains(&ProbeGroup::TcpRecv)
+                && disabled_probes.contains(&ProbeGroup::UdpSend)
+                && disabled_probes.contains(&ProbeGroup::UdpRecv);
+            if all_net_disabled {
+                if !disabled_probes.contains(&ProbeGroup::TcpRetransmit)
+                    && self.probes.entries.contains_key("tcp_retransmit")
+                {
+                    tracing::warn!("tcp_retransmit is enabled but all network probes are disabled");
+                }
+                if !disabled_probes.contains(&ProbeGroup::TcpState)
+                    && self.probes.entries.contains_key("tcp_state")
+                {
+                    tracing::warn!("tcp_state is enabled but all network probes are disabled");
+                }
             }
         }
 
@@ -1247,5 +1499,104 @@ mod tests {
         cfg.sinks.aggregated.resolution.host_specs_poll_interval = Duration::ZERO;
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("host_specs_poll_interval"));
+    }
+
+    // --- ProbeGroup tests ---
+
+    #[test]
+    fn test_probe_group_roundtrip() {
+        for group in ProbeGroup::all() {
+            let name = group.as_str();
+            let parsed = ProbeGroup::from_name(name);
+            assert_eq!(parsed, Some(*group), "roundtrip failed for {name}");
+        }
+    }
+
+    #[test]
+    fn test_probe_group_all_count() {
+        assert_eq!(ProbeGroup::all().len(), 27);
+    }
+
+    #[test]
+    fn test_probe_group_from_name_unknown() {
+        assert!(ProbeGroup::from_name("not_a_probe").is_none());
+        assert!(ProbeGroup::from_name("").is_none());
+    }
+
+    #[test]
+    fn test_probe_group_display() {
+        assert_eq!(ProbeGroup::SyscallRead.to_string(), "syscall_read");
+        assert_eq!(ProbeGroup::Scheduler.to_string(), "scheduler");
+        assert_eq!(ProbeGroup::OomKill.to_string(), "oom_kill");
+    }
+
+    #[test]
+    fn test_probe_group_event_types() {
+        assert_eq!(
+            ProbeGroup::SyscallRead.event_types(),
+            &[EventType::SyscallRead]
+        );
+        assert_eq!(
+            ProbeGroup::Scheduler.event_types(),
+            &[EventType::SchedSwitch, EventType::SchedRunqueue]
+        );
+        assert!(ProbeGroup::SchedulerWakeup.event_types().is_empty());
+        assert_eq!(ProbeGroup::TcpSend.event_types(), &[EventType::NetTX]);
+        assert_eq!(ProbeGroup::UdpSend.event_types(), &[EventType::NetTX]);
+    }
+
+    #[test]
+    fn test_probes_config_disabled_set_empty() {
+        let cfg = ProbesConfig::default();
+        let disabled = cfg.disabled_set().expect("should parse");
+        assert!(disabled.is_empty());
+    }
+
+    #[test]
+    fn test_probes_config_disabled_set_with_disabled() {
+        let mut entries = HashMap::new();
+        entries.insert("syscall_futex".to_string(), ProbeConfig { enabled: false });
+        entries.insert("scheduler".to_string(), ProbeConfig { enabled: false });
+        entries.insert("disk_io".to_string(), ProbeConfig { enabled: true });
+
+        let cfg = ProbesConfig { entries };
+        let disabled = cfg.disabled_set().expect("should parse");
+        assert_eq!(disabled.len(), 2);
+        assert!(disabled.contains(&ProbeGroup::SyscallFutex));
+        assert!(disabled.contains(&ProbeGroup::Scheduler));
+        assert!(!disabled.contains(&ProbeGroup::DiskIo));
+    }
+
+    #[test]
+    fn test_probes_config_disabled_set_rejects_unknown() {
+        let mut entries = HashMap::new();
+        entries.insert("not_a_probe".to_string(), ProbeConfig { enabled: false });
+
+        let cfg = ProbesConfig { entries };
+        let err = cfg.disabled_set().unwrap_err();
+        assert!(err.to_string().contains("unknown probe group"));
+    }
+
+    #[test]
+    fn test_validation_unknown_probe_group_rejected() {
+        let mut cfg = valid_config();
+        cfg.probes
+            .entries
+            .insert("bogus_probe".to_string(), ProbeConfig { enabled: false });
+
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("unknown probe group"));
+    }
+
+    #[test]
+    fn test_validation_valid_probe_config_accepted() {
+        let mut cfg = valid_config();
+        cfg.probes
+            .entries
+            .insert("syscall_futex".to_string(), ProbeConfig { enabled: false });
+        cfg.probes
+            .entries
+            .insert("scheduler".to_string(), ProbeConfig { enabled: false });
+        assert!(cfg.validate().is_ok());
     }
 }

@@ -3,7 +3,7 @@
 //! Implements the [`Tracer`] trait using aya to manage eBPF programs.
 //! All code is gated behind `#[cfg(feature = "bpf")]`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
@@ -15,7 +15,7 @@ use aya::maps::RingBuf;
 use aya::programs::{KProbe, TracePoint};
 use aya::{Ebpf, EbpfLoader};
 
-use crate::config::{EventSamplingMode, SamplingConfig};
+use crate::config::{EventSamplingMode, ProbeGroup, SamplingConfig};
 
 use super::event::ClientType;
 use super::event::EventType;
@@ -68,15 +68,19 @@ const BPF_SAMPLING_PROBABILITY_SCALE: u32 = 1_000_000;
 pub struct AttachmentStats {
     pub tracepoints_attached: u32,
     pub tracepoints_failed: u32,
+    pub tracepoints_skipped: u32,
     pub kprobes_attached: u32,
     pub kprobes_failed: u32,
+    pub kprobes_skipped: u32,
     pub kretprobes_attached: u32,
     pub kretprobes_failed: u32,
+    pub kretprobes_skipped: u32,
 }
 
 /// BPF-backed tracer implementation.
 pub struct BpfTracer {
     ring_buf_size: u32,
+    disabled_probes: HashSet<ProbeGroup>,
     event_handlers: Vec<EventHandler>,
     error_handlers: Vec<ErrorHandler>,
     stats_handlers: Vec<RingbufStatsHandler>,
@@ -86,10 +90,11 @@ pub struct BpfTracer {
 }
 
 impl BpfTracer {
-    /// Create a new BPF tracer with the given ring buffer size.
-    pub fn new(ring_buf_size: u32) -> Self {
+    /// Create a new BPF tracer with the given ring buffer size and disabled probe groups.
+    pub fn new(ring_buf_size: u32, disabled_probes: HashSet<ProbeGroup>) -> Self {
         Self {
             ring_buf_size,
+            disabled_probes,
             event_handlers: Vec::with_capacity(4),
             error_handlers: Vec::with_capacity(2),
             stats_handlers: Vec::with_capacity(2),
@@ -167,8 +172,8 @@ impl Tracer for BpfTracer {
             .load(BPF_OBJ)
             .context("loading BPF objects")?;
 
-        // Attach all BPF programs.
-        self.attach_stats = attach_programs(&mut ebpf)?;
+        // Attach all BPF programs (skipping disabled probe groups).
+        self.attach_stats = attach_programs(&mut ebpf, &self.disabled_probes)?;
         log_attachment_stats(&self.attach_stats);
 
         // Take the ring buffer map for the read task.
@@ -424,175 +429,306 @@ fn report_parse_error(handlers: &[ErrorHandler], err: &ParseError) {
 // BPF program attachment
 // ---------------------------------------------------------------------------
 
-fn attach_programs(ebpf: &mut Ebpf) -> Result<AttachmentStats> {
+fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<AttachmentStats> {
     let mut stats = AttachmentStats::default();
 
     // ---------------------------------------------------------------
-    // Required syscall tracepoints (16 enter/exit pairs for 8 syscalls)
+    // Syscall tracepoints (enter/exit pairs grouped by ProbeGroup)
     // ---------------------------------------------------------------
-    let required_syscall_tracepoints: &[(&str, &str, &str)] = &[
-        // read
-        ("trace_sys_enter_read", "syscalls", "sys_enter_read"),
-        ("trace_sys_exit_read", "syscalls", "sys_exit_read"),
-        // write
-        ("trace_sys_enter_write", "syscalls", "sys_enter_write"),
-        ("trace_sys_exit_write", "syscalls", "sys_exit_write"),
-        // futex
-        ("trace_sys_enter_futex", "syscalls", "sys_enter_futex"),
-        ("trace_sys_exit_futex", "syscalls", "sys_exit_futex"),
-        // mmap
-        ("trace_sys_enter_mmap", "syscalls", "sys_enter_mmap"),
-        ("trace_sys_exit_mmap", "syscalls", "sys_exit_mmap"),
-        // epoll_wait
+    let syscall_probes: &[(
+        ProbeGroup,
+        (&str, &str, &str), // enter: (prog, group, name)
+        (&str, &str, &str), // exit:  (prog, group, name)
+    )] = &[
         (
-            "trace_sys_enter_epoll_wait",
-            "syscalls",
-            "sys_enter_epoll_wait",
+            ProbeGroup::SyscallRead,
+            ("trace_sys_enter_read", "syscalls", "sys_enter_read"),
+            ("trace_sys_exit_read", "syscalls", "sys_exit_read"),
         ),
         (
-            "trace_sys_exit_epoll_wait",
-            "syscalls",
-            "sys_exit_epoll_wait",
+            ProbeGroup::SyscallWrite,
+            ("trace_sys_enter_write", "syscalls", "sys_enter_write"),
+            ("trace_sys_exit_write", "syscalls", "sys_exit_write"),
         ),
-        // fsync
-        ("trace_sys_enter_fsync", "syscalls", "sys_enter_fsync"),
-        ("trace_sys_exit_fsync", "syscalls", "sys_exit_fsync"),
-        // fdatasync
         (
-            "trace_sys_enter_fdatasync",
-            "syscalls",
-            "sys_enter_fdatasync",
+            ProbeGroup::SyscallFutex,
+            ("trace_sys_enter_futex", "syscalls", "sys_enter_futex"),
+            ("trace_sys_exit_futex", "syscalls", "sys_exit_futex"),
         ),
-        ("trace_sys_exit_fdatasync", "syscalls", "sys_exit_fdatasync"),
-        // pwrite64
-        ("trace_sys_enter_pwrite64", "syscalls", "sys_enter_pwrite64"),
-        ("trace_sys_exit_pwrite64", "syscalls", "sys_exit_pwrite64"),
+        (
+            ProbeGroup::SyscallMmap,
+            ("trace_sys_enter_mmap", "syscalls", "sys_enter_mmap"),
+            ("trace_sys_exit_mmap", "syscalls", "sys_exit_mmap"),
+        ),
+        (
+            ProbeGroup::SyscallEpollWait,
+            (
+                "trace_sys_enter_epoll_wait",
+                "syscalls",
+                "sys_enter_epoll_wait",
+            ),
+            (
+                "trace_sys_exit_epoll_wait",
+                "syscalls",
+                "sys_exit_epoll_wait",
+            ),
+        ),
+        (
+            ProbeGroup::SyscallFsync,
+            ("trace_sys_enter_fsync", "syscalls", "sys_enter_fsync"),
+            ("trace_sys_exit_fsync", "syscalls", "sys_exit_fsync"),
+        ),
+        (
+            ProbeGroup::SyscallFdatasync,
+            (
+                "trace_sys_enter_fdatasync",
+                "syscalls",
+                "sys_enter_fdatasync",
+            ),
+            ("trace_sys_exit_fdatasync", "syscalls", "sys_exit_fdatasync"),
+        ),
+        (
+            ProbeGroup::SyscallPwrite,
+            ("trace_sys_enter_pwrite64", "syscalls", "sys_enter_pwrite64"),
+            ("trace_sys_exit_pwrite64", "syscalls", "sys_exit_pwrite64"),
+        ),
     ];
 
-    for &(prog_name, group, name) in required_syscall_tracepoints {
-        attach_tracepoint_required(ebpf, prog_name, group, name, &mut stats)?;
+    for (group, (ep, eg, en), (xp, xg, xn)) in syscall_probes {
+        if disabled.contains(group) {
+            tracing::info!(probe = %group, "skipping (disabled)");
+            stats.tracepoints_skipped += 2;
+            continue;
+        }
+        attach_tracepoint_required(ebpf, ep, eg, en, &mut stats)?;
+        attach_tracepoint_required(ebpf, xp, xg, xn, &mut stats)?;
     }
 
     // ---------------------------------------------------------------
-    // Required FD tracepoints
+    // FD tracepoints
     // ---------------------------------------------------------------
-    attach_tracepoint_required(
-        ebpf,
-        "trace_sys_enter_openat",
-        "syscalls",
-        "sys_enter_openat",
-        &mut stats,
-    )?;
-    attach_tracepoint_required(
-        ebpf,
-        "trace_sys_exit_openat",
-        "syscalls",
-        "sys_exit_openat",
-        &mut stats,
-    )?;
-    attach_tracepoint_required(
-        ebpf,
-        "trace_sys_enter_close",
-        "syscalls",
-        "sys_enter_close",
-        &mut stats,
-    )?;
+    if disabled.contains(&ProbeGroup::FdOpen) {
+        tracing::info!(probe = "fd_open", "skipping (disabled)");
+        stats.tracepoints_skipped += 2;
+    } else {
+        attach_tracepoint_required(
+            ebpf,
+            "trace_sys_enter_openat",
+            "syscalls",
+            "sys_enter_openat",
+            &mut stats,
+        )?;
+        attach_tracepoint_required(
+            ebpf,
+            "trace_sys_exit_openat",
+            "syscalls",
+            "sys_exit_openat",
+            &mut stats,
+        )?;
+    }
+
+    if disabled.contains(&ProbeGroup::FdClose) {
+        tracing::info!(probe = "fd_close", "skipping (disabled)");
+        stats.tracepoints_skipped += 1;
+    } else {
+        attach_tracepoint_required(
+            ebpf,
+            "trace_sys_enter_close",
+            "syscalls",
+            "sys_enter_close",
+            &mut stats,
+        )?;
+    }
 
     // ---------------------------------------------------------------
-    // Required block I/O tracepoints
+    // Block I/O tracepoints
     // ---------------------------------------------------------------
-    attach_tracepoint_required(
-        ebpf,
-        "trace_block_rq_issue",
-        "block",
-        "block_rq_issue",
-        &mut stats,
-    )?;
-    attach_tracepoint_required(
-        ebpf,
-        "trace_block_rq_complete",
-        "block",
-        "block_rq_complete",
-        &mut stats,
-    )?;
+    if disabled.contains(&ProbeGroup::DiskIo) {
+        tracing::info!(probe = "disk_io", "skipping (disabled)");
+        stats.tracepoints_skipped += 2;
+    } else {
+        attach_tracepoint_required(
+            ebpf,
+            "trace_block_rq_issue",
+            "block",
+            "block_rq_issue",
+            &mut stats,
+        )?;
+        attach_tracepoint_required(
+            ebpf,
+            "trace_block_rq_complete",
+            "block",
+            "block_rq_complete",
+            &mut stats,
+        )?;
+    }
 
     // ---------------------------------------------------------------
-    // Required network kprobes
+    // Network kprobes (grouped by ProbeGroup)
     // ---------------------------------------------------------------
-    attach_kprobe_required(ebpf, "kprobe_tcp_sendmsg", "tcp_sendmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kretprobe_tcp_sendmsg", "tcp_sendmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kretprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kprobe_udp_sendmsg", "udp_sendmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kretprobe_udp_sendmsg", "udp_sendmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kprobe_udp_recvmsg", "udp_recvmsg", &mut stats)?;
-    attach_kprobe_required(ebpf, "kretprobe_udp_recvmsg", "udp_recvmsg", &mut stats)?;
-
-    // ---------------------------------------------------------------
-    // Required scheduler tracepoint
-    // ---------------------------------------------------------------
-    attach_tracepoint_required(
-        ebpf,
-        "trace_sched_switch",
-        "sched",
-        "sched_switch",
-        &mut stats,
-    )?;
-
-    // ---------------------------------------------------------------
-    // Required memory kprobes
-    // ---------------------------------------------------------------
-    attach_kprobe_required(
-        ebpf,
-        "kprobe_handle_mm_fault",
-        "handle_mm_fault",
-        &mut stats,
-    )?;
-    attach_kprobe_required(
-        ebpf,
-        "kretprobe_handle_mm_fault",
-        "handle_mm_fault",
-        &mut stats,
-    )?;
-
-    // ---------------------------------------------------------------
-    // Optional tracepoints
-    // ---------------------------------------------------------------
-    let optional_tracepoints: &[(&str, &str, &str)] = &[
-        ("trace_block_rq_merge", "block", "block_rq_merge"),
-        ("trace_sched_wakeup", "sched", "sched_wakeup"),
-        ("trace_sched_wakeup_new", "sched", "sched_wakeup_new"),
+    let net_kprobes: &[(ProbeGroup, &str, &str, &str, &str)] = &[
         (
+            ProbeGroup::TcpSend,
+            "kprobe_tcp_sendmsg",
+            "kretprobe_tcp_sendmsg",
+            "tcp_sendmsg",
+            "tcp_sendmsg",
+        ),
+        (
+            ProbeGroup::TcpRecv,
+            "kprobe_tcp_recvmsg",
+            "kretprobe_tcp_recvmsg",
+            "tcp_recvmsg",
+            "tcp_recvmsg",
+        ),
+        (
+            ProbeGroup::UdpSend,
+            "kprobe_udp_sendmsg",
+            "kretprobe_udp_sendmsg",
+            "udp_sendmsg",
+            "udp_sendmsg",
+        ),
+        (
+            ProbeGroup::UdpRecv,
+            "kprobe_udp_recvmsg",
+            "kretprobe_udp_recvmsg",
+            "udp_recvmsg",
+            "udp_recvmsg",
+        ),
+    ];
+
+    for (group, kp, krp, ksym, krsym) in net_kprobes {
+        if disabled.contains(group) {
+            tracing::info!(probe = %group, "skipping (disabled)");
+            stats.kprobes_skipped += 1;
+            stats.kretprobes_skipped += 1;
+            continue;
+        }
+        attach_kprobe_required(ebpf, kp, ksym, &mut stats)?;
+        attach_kprobe_required(ebpf, krp, krsym, &mut stats)?;
+    }
+
+    // ---------------------------------------------------------------
+    // Scheduler tracepoint
+    // ---------------------------------------------------------------
+    if disabled.contains(&ProbeGroup::Scheduler) {
+        tracing::info!(probe = "scheduler", "skipping (disabled)");
+        stats.tracepoints_skipped += 1;
+    } else {
+        attach_tracepoint_required(
+            ebpf,
+            "trace_sched_switch",
+            "sched",
+            "sched_switch",
+            &mut stats,
+        )?;
+    }
+
+    // ---------------------------------------------------------------
+    // Page fault kprobes
+    // ---------------------------------------------------------------
+    if disabled.contains(&ProbeGroup::PageFault) {
+        tracing::info!(probe = "page_fault", "skipping (disabled)");
+        stats.kprobes_skipped += 1;
+        stats.kretprobes_skipped += 1;
+    } else {
+        attach_kprobe_required(
+            ebpf,
+            "kprobe_handle_mm_fault",
+            "handle_mm_fault",
+            &mut stats,
+        )?;
+        attach_kprobe_required(
+            ebpf,
+            "kretprobe_handle_mm_fault",
+            "handle_mm_fault",
+            &mut stats,
+        )?;
+    }
+
+    // ---------------------------------------------------------------
+    // Optional tracepoints (with probe group gating)
+    // ---------------------------------------------------------------
+    let optional_tracepoints: &[(ProbeGroup, &str, &str, &str)] = &[
+        (
+            ProbeGroup::BlockMerge,
+            "trace_block_rq_merge",
+            "block",
+            "block_rq_merge",
+        ),
+        (
+            ProbeGroup::SchedulerWakeup,
+            "trace_sched_wakeup",
+            "sched",
+            "sched_wakeup",
+        ),
+        (
+            ProbeGroup::SchedulerWakeup,
+            "trace_sched_wakeup_new",
+            "sched",
+            "sched_wakeup_new",
+        ),
+        (
+            ProbeGroup::MemReclaim,
             "trace_reclaim_begin",
             "vmscan",
             "mm_vmscan_direct_reclaim_begin",
         ),
         (
+            ProbeGroup::MemReclaim,
             "trace_reclaim_end",
             "vmscan",
             "mm_vmscan_direct_reclaim_end",
         ),
-        ("trace_compaction_begin", "compaction", "compaction_begin"),
-        ("trace_compaction_end", "compaction", "compaction_end"),
-        ("trace_swapin", "swap", "swapin"),
-        ("trace_swapout", "swap", "swapout"),
-        ("trace_oom_kill", "oom", "oom_kill"),
+        (
+            ProbeGroup::MemCompaction,
+            "trace_compaction_begin",
+            "compaction",
+            "compaction_begin",
+        ),
+        (
+            ProbeGroup::MemCompaction,
+            "trace_compaction_end",
+            "compaction",
+            "compaction_end",
+        ),
+        (ProbeGroup::SwapIn, "trace_swapin", "swap", "swapin"),
+        (ProbeGroup::SwapOut, "trace_swapout", "swap", "swapout"),
+        (ProbeGroup::OomKill, "trace_oom_kill", "oom", "oom_kill"),
     ];
 
-    for &(prog_name, group, name) in optional_tracepoints {
-        attach_tracepoint_optional(ebpf, prog_name, group, name, &mut stats);
+    for (group, prog_name, tp_group, tp_name) in optional_tracepoints {
+        if disabled.contains(group) {
+            tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
+            stats.tracepoints_skipped += 1;
+            continue;
+        }
+        attach_tracepoint_optional(ebpf, prog_name, tp_group, tp_name, &mut stats);
     }
 
     // ---------------------------------------------------------------
-    // Optional kprobes
+    // Optional kprobes (with probe group gating)
     // ---------------------------------------------------------------
-    let optional_kprobes: &[(&str, &str)] = &[
-        ("kprobe_tcp_retransmit_skb", "tcp_retransmit_skb"),
-        ("kprobe_tcp_set_state", "tcp_set_state"),
-        ("kprobe_do_exit", "do_exit"),
+    let optional_kprobes: &[(ProbeGroup, &str, &str)] = &[
+        (
+            ProbeGroup::TcpRetransmit,
+            "kprobe_tcp_retransmit_skb",
+            "tcp_retransmit_skb",
+        ),
+        (
+            ProbeGroup::TcpState,
+            "kprobe_tcp_set_state",
+            "tcp_set_state",
+        ),
+        (ProbeGroup::ProcessExit, "kprobe_do_exit", "do_exit"),
     ];
 
-    for &(prog_name, symbol) in optional_kprobes {
+    for (group, prog_name, symbol) in optional_kprobes {
+        if disabled.contains(group) {
+            tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
+            stats.kprobes_skipped += 1;
+            continue;
+        }
         attach_kprobe_optional(ebpf, prog_name, symbol, &mut stats);
     }
 
@@ -763,10 +899,13 @@ fn log_attachment_stats(stats: &AttachmentStats) {
     tracing::info!(
         tracepoints_attached = stats.tracepoints_attached,
         tracepoints_failed = stats.tracepoints_failed,
+        tracepoints_skipped = stats.tracepoints_skipped,
         kprobes_attached = stats.kprobes_attached,
         kprobes_failed = stats.kprobes_failed,
+        kprobes_skipped = stats.kprobes_skipped,
         kretprobes_attached = stats.kretprobes_attached,
         kretprobes_failed = stats.kretprobes_failed,
+        kretprobes_skipped = stats.kretprobes_skipped,
         "BPF program attachment summary"
     );
 }
