@@ -1,5 +1,7 @@
 use std::time::{Duration, SystemTime};
 
+use observoor::agent::ports::{PortLabel, PortLabelMap};
+use observoor::config::NetworkDimensionsConfig;
 use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
@@ -7,7 +9,9 @@ use observoor::sink::aggregated::dimension::{
     BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
 use observoor::sink::aggregated::metric::{BatchMetadata, MetricBatch};
-use observoor::tracer::event::{Direction, EventType, ParsedEvent, TypedEvent};
+use observoor::tracer::event::{
+    ClientType, Direction, EventType, NetTransport, ParsedEvent, TypedEvent,
+};
 use observoor::tracer::parse::parse_event;
 
 const HEADER_SIZE: usize = 24;
@@ -82,6 +86,7 @@ fn net_payload(
     src_port: u16,
     dst_port: u16,
     direction: Direction,
+    transport: NetTransport,
     has_metrics: bool,
     srtt_us: u32,
     cwnd: u32,
@@ -92,7 +97,8 @@ fn net_payload(
     data.extend_from_slice(&dst_port.to_le_bytes());
     data.push(direction as u8);
     data.push(u8::from(has_metrics));
-    data.extend_from_slice(&[0u8; 2]);
+    data.push(transport as u8);
+    data.push(0);
     data.extend_from_slice(&srtt_us.to_le_bytes());
     data.extend_from_slice(&cwnd.to_le_bytes());
     data
@@ -198,7 +204,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
                 direction: e.direction as u8,
             };
             buf.add_net_io(net, i64::from(e.bytes));
-            if e.has_metrics {
+            if e.has_metrics && e.transport == NetTransport::Tcp {
                 let tcp = TCPMetricsDimension {
                     pid: event.raw.pid,
                     client_type: event.raw.client_type as u8,
@@ -318,6 +324,7 @@ fn pipeline_blackbox_correctness_and_invariants() {
             30_303,
             9_000,
             Direction::TX,
+            NetTransport::Tcp,
             true,
             120,
             100_000,
@@ -330,6 +337,7 @@ fn pipeline_blackbox_correctness_and_invariants() {
             9_000,
             30_303,
             Direction::RX,
+            NetTransport::Tcp,
             false,
             0,
             0,
@@ -417,4 +425,26 @@ fn pipeline_blackbox_correctness_and_invariants() {
     assert_eq!(gauge_totals(&batch, "tcp_rtt"), (1, 120));
     assert_eq!(gauge_totals(&batch, "tcp_cwnd"), (1, 100_000));
     assert_eq!(gauge_totals(&batch, "disk_queue_depth"), (2, 12));
+}
+
+#[test]
+fn network_port_label_resolution_prefers_tcp_and_peer_fallback() {
+    let mut cfg = NetworkDimensionsConfig::default();
+    let mut map = PortLabelMap::default();
+    map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+    map.insert(ClientType::Prysm, 13000, PortLabel::ClDiscovery);
+    cfg.set_port_label_map(map);
+
+    assert_eq!(
+        cfg.resolve_tcp_port_label(ClientType::Prysm, 45432, 13000),
+        PortLabel::ClP2PTcp as u8
+    );
+    assert_eq!(
+        cfg.resolve_tcp_port_label(ClientType::Prysm, 13000, 45432),
+        PortLabel::ClP2PTcp as u8
+    );
+    assert_eq!(
+        cfg.resolve_tcp_port_label(ClientType::Prysm, 45432, 45433),
+        PortLabel::Unknown as u8
+    );
 }

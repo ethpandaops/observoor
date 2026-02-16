@@ -1439,7 +1439,7 @@ mod tests {
             .filter(|m| m.metric_type == "tcp_rtt")
             .collect();
         assert_eq!(rtt.len(), 1);
-        assert_eq!(rtt[0].port_label, Some("el_p2p_tcp"));
+        assert_eq!(rtt[0].port_label, Some("el_p2p"));
         assert_eq!(rtt[0].sum, 100);
 
         let cwnd: Vec<_> = batch

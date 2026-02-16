@@ -28,6 +28,7 @@ pub const DEFAULT_PROCESS_NAMES: &[&str] = &[
     "lodestar",
     "nimbus",
     "nimbus_beacon_n",
+    "grandine",
     // Generic runtimes (client type resolved via cmdline)
     "java",
     "node",
@@ -152,7 +153,11 @@ fn discover_by_process_name(names: &[String]) -> Result<Vec<u32>> {
             Err(_) => continue,
         };
 
-        if name_set.contains(comm.as_str()) {
+        if name_set.contains(comm.as_str())
+            || comm
+                .strip_suffix("-binary")
+                .is_some_and(|base| name_set.contains(base))
+        {
             debug!(pid, comm = %comm, "found matching process");
             pids.push(pid);
         }
@@ -284,7 +289,9 @@ pub fn discover_tids(
 
 /// Map comm name to ClientType.
 fn client_type_from_comm(comm: &str) -> Option<ClientType> {
-    match comm {
+    let normalized = comm.strip_suffix("-binary").unwrap_or(comm);
+
+    match normalized {
         "geth" => Some(ClientType::Geth),
         "reth" => Some(ClientType::Reth),
         "besu" => Some(ClientType::Besu),
@@ -296,6 +303,7 @@ fn client_type_from_comm(comm: &str) -> Option<ClientType> {
         "teku" => Some(ClientType::Teku),
         "lodestar" => Some(ClientType::Lodestar),
         "nimbus" | "nimbus_beacon_n" => Some(ClientType::Nimbus),
+        "grandine" => Some(ClientType::Grandine),
         _ => None,
     }
 }
@@ -317,8 +325,29 @@ fn client_type_from_cmdline(cmdline: &str) -> Option<ClientType> {
     if lower.contains("nimbus") {
         return Some(ClientType::Nimbus);
     }
+    if lower.contains("grandine") {
+        return Some(ClientType::Grandine);
+    }
     if lower.contains("ethrex") {
         return Some(ClientType::Ethrex);
+    }
+    if lower.contains("lighthouse") {
+        return Some(ClientType::Lighthouse);
+    }
+    if lower.contains("prysm") || lower.contains("beacon-chain") {
+        return Some(ClientType::Prysm);
+    }
+    if lower.contains("nethermind") {
+        return Some(ClientType::Nethermind);
+    }
+    if lower.contains("erigon") {
+        return Some(ClientType::Erigon);
+    }
+    if lower.contains("reth") {
+        return Some(ClientType::Reth);
+    }
+    if lower.contains("geth") {
+        return Some(ClientType::Geth);
     }
 
     None
@@ -348,6 +377,7 @@ mod tests {
     fn test_client_type_from_comm_known() {
         assert_eq!(client_type_from_comm("geth"), Some(ClientType::Geth));
         assert_eq!(client_type_from_comm("reth"), Some(ClientType::Reth));
+        assert_eq!(client_type_from_comm("reth-binary"), Some(ClientType::Reth));
         assert_eq!(client_type_from_comm("besu"), Some(ClientType::Besu));
         assert_eq!(
             client_type_from_comm("nethermind"),
@@ -374,6 +404,10 @@ mod tests {
         assert_eq!(
             client_type_from_comm("nimbus_beacon_n"),
             Some(ClientType::Nimbus)
+        );
+        assert_eq!(
+            client_type_from_comm("grandine"),
+            Some(ClientType::Grandine)
         );
     }
 
@@ -403,8 +437,30 @@ mod tests {
             Some(ClientType::Nimbus),
         );
         assert_eq!(
+            client_type_from_cmdline("/usr/bin/grandine --network mainnet"),
+            Some(ClientType::Grandine),
+        );
+        assert_eq!(
             client_type_from_cmdline("/usr/bin/ethrex --config=foo"),
             Some(ClientType::Ethrex),
+        );
+        assert_eq!(
+            client_type_from_cmdline(
+                "/usr/local/bin/reth-binary node --chain=/network-configs/genesis.json"
+            ),
+            Some(ClientType::Reth),
+        );
+        assert_eq!(
+            client_type_from_cmdline("/usr/bin/geth --datadir=/data/geth"),
+            Some(ClientType::Geth),
+        );
+        assert_eq!(
+            client_type_from_cmdline("/usr/local/bin/beacon-chain --grpc-gateway-host=0.0.0.0"),
+            Some(ClientType::Prysm),
+        );
+        assert_eq!(
+            client_type_from_cmdline("/usr/bin/lighthouse bn --network mainnet"),
+            Some(ClientType::Lighthouse),
         );
     }
 
@@ -416,7 +472,7 @@ mod tests {
 
     #[test]
     fn test_default_process_names_count() {
-        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 17);
+        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 18);
     }
 
     #[test]

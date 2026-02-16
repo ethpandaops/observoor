@@ -23,7 +23,9 @@ use tracing::{info, warn};
 use crate::beacon::SyncStatus;
 use crate::config::{AggregatedSinkConfig, DimensionsConfig};
 use crate::sink::Sink;
-use crate::tracer::event::{Direction, EventType, NetIOEvent, ParsedEvent, TypedEvent};
+use crate::tracer::event::{
+    ClientType, Direction, EventType, NetIOEvent, NetTransport, ParsedEvent, TypedEvent,
+};
 
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
@@ -138,10 +140,7 @@ impl AggregatedSink {
     }
 
     /// Sets the port-to-label map for network dimensions.
-    pub fn set_port_label_map(
-        &mut self,
-        map: std::collections::HashMap<u16, crate::agent::ports::PortLabel>,
-    ) {
+    pub fn set_port_label_map(&mut self, map: crate::agent::ports::PortLabelMap) {
         self.cfg.dimensions.network.set_port_label_map(map);
     }
 
@@ -252,8 +251,8 @@ impl AggregatedSink {
                 );
                 buf.add_net_io(net_dim, i64::from(e.bytes));
 
-                // Extract inline TCP metrics from merged net_tx events.
-                if e.has_metrics {
+                // Inline metrics are valid only for TCP net_tx events.
+                if e.has_metrics && e.transport == NetTransport::Tcp {
                     let tcp_dim = build_tcp_metrics_dim_from_net_io(
                         event.raw.pid,
                         event.raw.client_type as u8,
@@ -269,6 +268,7 @@ impl AggregatedSink {
                     event.raw.pid,
                     event.raw.client_type as u8,
                     e.src_port,
+                    e.dst_port,
                     dimensions,
                 );
                 buf.add_tcp_retransmit(net_dim, i64::from(e.bytes));
@@ -807,8 +807,13 @@ fn build_network_dimension(
     }
 
     if dims.network.include_port {
-        let port = local_port(e);
-        dim.port_label = dims.network.resolve_port_label(port);
+        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
+        let local = local_port(e);
+        let remote = remote_port(e);
+        dim.port_label = match e.transport {
+            NetTransport::Tcp => dims.network.resolve_tcp_port_label(client, local, remote),
+            NetTransport::Udp => dims.network.resolve_udp_port_label(client, local, remote),
+        };
     }
 
     dim
@@ -819,6 +824,7 @@ fn build_network_dimension_from_tcp_retransmit(
     pid: u32,
     client_type: u8,
     src_port: u16,
+    dst_port: u16,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
     let mut dim = NetworkDimension {
@@ -829,7 +835,11 @@ fn build_network_dimension_from_tcp_retransmit(
     };
 
     if dims.network.include_port {
-        dim.port_label = dims.network.resolve_port_label(src_port);
+        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
+        // Retransmits are TCP-only by definition.
+        dim.port_label = dims
+            .network
+            .resolve_tcp_port_label(client, src_port, dst_port);
     }
 
     dim
@@ -849,8 +859,11 @@ fn build_tcp_metrics_dim_from_net_io(
     };
 
     if dims.network.include_port {
-        let port = local_port(e);
-        dim.port_label = dims.network.resolve_port_label(port);
+        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
+        let local = local_port(e);
+        let remote = remote_port(e);
+        // Inline TCP metrics are only attached to net_tx TCP probes.
+        dim.port_label = dims.network.resolve_tcp_port_label(client, local, remote);
     }
 
     dim
@@ -889,6 +902,15 @@ fn local_port(e: &NetIOEvent) -> u16 {
         e.src_port
     } else {
         e.dst_port
+    }
+}
+
+/// Extracts the peer/remote port from a network event.
+fn remote_port(e: &NetIOEvent) -> u16 {
+    if e.direction == Direction::TX {
+        e.dst_port
+    } else {
+        e.src_port
     }
 }
 
@@ -937,6 +959,7 @@ mod atomic_buffer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::ports::{PortLabel, PortLabelMap};
     use crate::tracer::event::*;
 
     fn make_event(event_type: EventType, typed: TypedEvent) -> ParsedEvent {
@@ -1021,6 +1044,7 @@ mod tests {
                 src_port: 8545,
                 dst_port: 30303,
                 direction: Direction::TX,
+                transport: NetTransport::Tcp,
                 has_metrics: true,
                 srtt_us: 100,
                 cwnd: 65535,
@@ -1282,11 +1306,13 @@ mod tests {
             src_port: 8545,
             dst_port: 30303,
             direction: Direction::TX,
+            transport: NetTransport::Tcp,
             has_metrics: false,
             srtt_us: 0,
             cwnd: 0,
         };
         assert_eq!(local_port(&tx_event), 8545);
+        assert_eq!(remote_port(&tx_event), 30303);
 
         let rx_event = NetIOEvent {
             event: Event {
@@ -1300,11 +1326,111 @@ mod tests {
             src_port: 30303,
             dst_port: 8545,
             direction: Direction::RX,
+            transport: NetTransport::Tcp,
             has_metrics: false,
             srtt_us: 0,
             cwnd: 0,
         };
         assert_eq!(local_port(&rx_event), 8545);
+        assert_eq!(remote_port(&rx_event), 30303);
+    }
+
+    #[test]
+    fn test_network_dimension_resolves_peer_port_when_local_is_ephemeral() {
+        let mut dims = DimensionsConfig::default();
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+        dims.network.set_port_label_map(map);
+
+        let net_event = NetIOEvent {
+            event: Event {
+                timestamp_ns: 0,
+                pid: 1,
+                tid: 1,
+                event_type: EventType::NetTX,
+                client_type: ClientType::Prysm,
+            },
+            bytes: 100,
+            src_port: 45432,
+            dst_port: 13000,
+            direction: Direction::TX,
+            transport: NetTransport::Tcp,
+            has_metrics: false,
+            srtt_us: 0,
+            cwnd: 0,
+        };
+
+        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        assert_eq!(net_dim.port_label, PortLabel::ClP2PTcp as u8);
+    }
+
+    #[test]
+    fn test_network_dimension_uses_tcp_label_for_shared_port() {
+        let mut dims = DimensionsConfig::default();
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClDiscovery);
+        dims.network.set_port_label_map(map);
+
+        let net_event = NetIOEvent {
+            event: Event {
+                timestamp_ns: 0,
+                pid: 1,
+                tid: 1,
+                event_type: EventType::NetRX,
+                client_type: ClientType::Prysm,
+            },
+            bytes: 100,
+            src_port: 13000,
+            dst_port: 13000,
+            direction: Direction::RX,
+            transport: NetTransport::Tcp,
+            has_metrics: false,
+            srtt_us: 0,
+            cwnd: 0,
+        };
+
+        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        assert_eq!(net_dim.port_label, PortLabel::ClP2PTcp as u8);
+
+        let retransmit_dim = build_network_dimension_from_tcp_retransmit(
+            1,
+            ClientType::Prysm as u8,
+            45432,
+            13000,
+            &dims,
+        );
+        assert_eq!(retransmit_dim.port_label, PortLabel::ClP2PTcp as u8);
+    }
+
+    #[test]
+    fn test_network_dimension_uses_udp_label_for_shared_port() {
+        let mut dims = DimensionsConfig::default();
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClDiscovery);
+        dims.network.set_port_label_map(map);
+
+        let net_event = NetIOEvent {
+            event: Event {
+                timestamp_ns: 0,
+                pid: 1,
+                tid: 1,
+                event_type: EventType::NetRX,
+                client_type: ClientType::Prysm,
+            },
+            bytes: 100,
+            src_port: 13000,
+            dst_port: 13000,
+            direction: Direction::RX,
+            transport: NetTransport::Udp,
+            has_metrics: false,
+            srtt_us: 0,
+            cwnd: 0,
+        };
+
+        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        assert_eq!(net_dim.port_label, PortLabel::ClDiscovery as u8);
     }
 
     #[test]
@@ -1346,6 +1472,7 @@ mod tests {
             src_port: 8545,
             dst_port: 30303,
             direction: Direction::TX,
+            transport: NetTransport::Tcp,
             has_metrics: false,
             srtt_us: 0,
             cwnd: 0,

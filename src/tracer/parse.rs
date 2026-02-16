@@ -8,9 +8,9 @@ use thiserror::Error;
 
 use super::event::{
     BlockMergeEvent, ClientType, Direction, DiskIOEvent, Event, EventType, FDEvent,
-    MemLatencyEvent, NetIOEvent, OOMKillEvent, PageFaultEvent, ParsedEvent, ProcessExitEvent,
-    SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TcpStateEvent,
-    TypedEvent,
+    MemLatencyEvent, NetIOEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
+    ProcessExitEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent,
+    TcpStateEvent, TypedEvent,
 };
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
@@ -33,6 +33,9 @@ pub enum ParseError {
 
     #[error("reading {event_name}: invalid direction byte {raw}")]
     InvalidDirection { event_name: &'static str, raw: u8 },
+
+    #[error("reading {event_name}: invalid transport byte {raw}")]
+    InvalidNetTransport { event_name: &'static str, raw: u8 },
 }
 
 /// Parse a raw ring buffer sample into a [`ParsedEvent`].
@@ -196,14 +199,21 @@ fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
         event_name: "net IO event",
         raw: direction_raw,
     })?;
+    let transport_raw = read_u8(data, 10);
+    let transport =
+        NetTransport::from_u8(transport_raw).ok_or(ParseError::InvalidNetTransport {
+            event_name: "net IO event",
+            raw: transport_raw,
+        })?;
     Ok(NetIOEvent {
         event,
         bytes: read_u32_le(data, 0),
         src_port: read_u16_le(data, 4),
         dst_port: read_u16_le(data, 6),
         direction,
+        transport,
         has_metrics: read_u8(data, 9) != 0,
-        // pad[2] at 10-11
+        // pad[1] at 11
         srtt_us: read_u32_le(data, 12),
         cwnd: read_u32_le(data, 16),
     })
@@ -440,6 +450,22 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_net_io_invalid_transport() {
+        let mut data = header(1000, 42, 43, 7, 1);
+        data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
+        data.extend_from_slice(&80u16.to_le_bytes()); // sport
+        data.extend_from_slice(&90u16.to_le_bytes()); // dport
+        data.push(0); // TX
+        data.push(0); // no metrics
+        data.push(7); // invalid transport
+        data.extend_from_slice(&[0u8; 9]); // rest of payload
+        assert!(matches!(
+            parse_event(&data).unwrap_err(),
+            ParseError::InvalidNetTransport { raw: 7, .. }
+        ));
+    }
+
     // -- Syscall events --
 
     #[test]
@@ -528,7 +554,8 @@ mod tests {
         data.extend_from_slice(&9090u16.to_le_bytes()); // dport
         data.push(0); // TX
         data.push(1); // has_metrics
-        data.extend_from_slice(&[0u8; 2]); // pad
+        data.push(0); // TCP
+        data.push(0); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
 
@@ -540,6 +567,7 @@ mod tests {
         assert_eq!(e.src_port, 8080);
         assert_eq!(e.dst_port, 9090);
         assert_eq!(e.direction, Direction::TX);
+        assert_eq!(e.transport, NetTransport::Tcp);
         assert!(e.has_metrics);
         assert_eq!(e.srtt_us, 50_000);
         assert_eq!(e.cwnd, 10);
@@ -553,7 +581,8 @@ mod tests {
         data.extend_from_slice(&12345u16.to_le_bytes());
         data.push(1); // RX
         data.push(0); // no metrics
-        data.extend_from_slice(&[0u8; 2]);
+        data.push(1); // UDP
+        data.push(0); // pad
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
 
@@ -562,6 +591,7 @@ mod tests {
             panic!("expected NetIO");
         };
         assert_eq!(e.direction, Direction::RX);
+        assert_eq!(e.transport, NetTransport::Udp);
         assert!(!e.has_metrics);
         assert_eq!(e.bytes, 2048);
     }

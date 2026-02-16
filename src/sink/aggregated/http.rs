@@ -1740,7 +1740,7 @@ mod tests {
                 client_type: ClientType::Geth,
                 device_id: None,
                 rw: None,
-                port_label: Some("el_p2p_tcp"),
+                port_label: Some("el_p2p"),
                 direction: Some("tx"),
                 sampling_mode: SamplingMode::None,
                 sampling_rate: 1.0,

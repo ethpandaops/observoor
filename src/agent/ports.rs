@@ -6,6 +6,32 @@ use tracing::debug;
 
 use crate::tracer::event::ClientType;
 
+/// Transport for a labeled service port.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PortTransport {
+    Any,
+    Tcp,
+    Udp,
+}
+
+impl PortTransport {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Any => "any",
+            Self::Tcp => "tcp",
+            Self::Udp => "udp",
+        }
+    }
+
+    const fn sort_key(self) -> u8 {
+        match self {
+            Self::Any => 0,
+            Self::Tcp => 1,
+            Self::Udp => 2,
+        }
+    }
+}
+
 /// Semantic label for a well-known Ethereum client port.
 ///
 /// Stored as a `u8` discriminant in dimension keys for zero-cost aggregation.
@@ -33,7 +59,7 @@ pub enum PortLabel {
     ClP2PTcp = 6,
     /// libp2p QUIC (default 9001).
     ClP2PQuic = 7,
-    /// discv5 UDP (default 12000).
+    /// discv5 UDP (default 12000/9000).
     ClDiscovery = 8,
     /// Beacon REST API (default 5052/3500/5051/9596).
     ClBeaconApi = 9,
@@ -46,16 +72,25 @@ impl PortLabel {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
-            Self::ElP2PTcp => "el_p2p_tcp",
+            Self::ElP2PTcp => "el_p2p",
             Self::ElDiscovery => "el_discovery",
             Self::ElJsonRpc => "el_json_rpc",
             Self::ElWebSocket => "el_ws",
             Self::ElEngineApi => "el_engine_api",
-            Self::ClP2PTcp => "cl_p2p_tcp",
-            Self::ClP2PQuic => "cl_p2p_quic",
+            Self::ClP2PTcp => "cl_p2p",
+            Self::ClP2PQuic => "cl_p2p",
             Self::ClDiscovery => "cl_discovery",
             Self::ClBeaconApi => "cl_beacon_api",
             Self::ClGrpc => "cl_grpc",
+        }
+    }
+
+    /// Returns the expected transport for this label.
+    pub const fn transport(self) -> PortTransport {
+        match self {
+            Self::Unknown => PortTransport::Any,
+            Self::ElDiscovery | Self::ClP2PQuic | Self::ClDiscovery => PortTransport::Udp,
+            _ => PortTransport::Tcp,
         }
     }
 
@@ -84,13 +119,201 @@ impl fmt::Display for PortLabel {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+struct PortTransportLabels {
+    any: Option<PortLabel>,
+    tcp: Option<PortLabel>,
+    udp: Option<PortLabel>,
+}
+
+impl PortTransportLabels {
+    fn set(&mut self, transport: PortTransport, label: PortLabel) {
+        match transport {
+            PortTransport::Any => upsert_slot(&mut self.any, label),
+            PortTransport::Tcp => upsert_slot(&mut self.tcp, label),
+            PortTransport::Udp => upsert_slot(&mut self.udp, label),
+        }
+    }
+
+    fn get(&self, transport: PortTransport) -> Option<PortLabel> {
+        match transport {
+            PortTransport::Any => self.any,
+            PortTransport::Tcp => self.tcp.or(self.any),
+            PortTransport::Udp => self.udp.or(self.any),
+        }
+    }
+}
+
+fn upsert_slot(slot: &mut Option<PortLabel>, incoming: PortLabel) {
+    match *slot {
+        Some(existing) if existing == incoming => {}
+        Some(PortLabel::Unknown) => *slot = Some(incoming),
+        Some(_) if incoming == PortLabel::Unknown => {}
+        Some(_) => {}
+        None => *slot = Some(incoming),
+    }
+}
+
+fn upsert_port_label(port_labels: &mut Vec<(u16, PortLabel)>, port: u16, label: PortLabel) {
+    let transport = label.transport();
+    if let Some((_, existing_label)) =
+        port_labels
+            .iter_mut()
+            .find(|(existing_port, existing_label)| {
+                *existing_port == port && existing_label.transport() == transport
+            })
+    {
+        *existing_label = label;
+    } else {
+        port_labels.push((port, label));
+    }
+}
+
+/// Client-aware runtime map for semantic port labels.
+#[derive(Debug, Clone, Default)]
+pub struct PortLabelMap {
+    by_client: HashMap<ClientType, HashMap<u16, PortTransportLabels>>,
+    global: HashMap<u16, PortTransportLabels>,
+}
+
+impl PortLabelMap {
+    pub fn is_empty(&self) -> bool {
+        self.by_client.is_empty()
+    }
+
+    /// Inserts a label for `(client_type, port, transport)`.
+    pub fn insert(&mut self, client_type: ClientType, port: u16, label: PortLabel) {
+        let transport = label.transport();
+
+        let client_map = self.by_client.entry(client_type).or_default();
+        client_map.entry(port).or_default().set(transport, label);
+
+        self.global.entry(port).or_default().set(transport, label);
+    }
+
+    /// Resolve a TCP label for this client, preferring `primary_port` then `secondary_port`.
+    pub fn resolve_tcp(
+        &self,
+        client_type: ClientType,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> PortLabel {
+        self.resolve(
+            client_type,
+            PortTransport::Tcp,
+            primary_port,
+            secondary_port,
+        )
+    }
+
+    /// Resolve a UDP label for this client, preferring `primary_port` then `secondary_port`.
+    pub fn resolve_udp(
+        &self,
+        client_type: ClientType,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> PortLabel {
+        self.resolve(
+            client_type,
+            PortTransport::Udp,
+            primary_port,
+            secondary_port,
+        )
+    }
+
+    /// Flatten mappings for structured logging/debugging.
+    pub fn mappings(&self) -> Vec<(ClientType, u16, PortTransport, PortLabel)> {
+        let mut out = Vec::with_capacity(64);
+
+        for (&client_type, ports) in &self.by_client {
+            for (&port, labels) in ports {
+                if let Some(label) = labels.tcp {
+                    out.push((client_type, port, PortTransport::Tcp, label));
+                }
+                if let Some(label) = labels.udp {
+                    out.push((client_type, port, PortTransport::Udp, label));
+                }
+                if let Some(label) = labels.any {
+                    out.push((client_type, port, PortTransport::Any, label));
+                }
+            }
+        }
+
+        out.sort_unstable_by_key(|(client_type, port, transport, label)| {
+            (
+                *client_type as u8,
+                *port,
+                transport.sort_key(),
+                *label as u8,
+            )
+        });
+        out
+    }
+
+    fn resolve(
+        &self,
+        client_type: ClientType,
+        transport: PortTransport,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> PortLabel {
+        let candidates = [primary_port, secondary_port];
+
+        if let Some(label) = self.resolve_from_client(client_type, transport, &candidates) {
+            return label;
+        }
+
+        if client_type != ClientType::Unknown {
+            if let Some(label) =
+                self.resolve_from_client(ClientType::Unknown, transport, &candidates)
+            {
+                return label;
+            }
+        }
+
+        if client_type == ClientType::Unknown {
+            for port in candidates {
+                if let Some(label) = self
+                    .global
+                    .get(&port)
+                    .and_then(|labels| labels.get(transport))
+                {
+                    return label;
+                }
+            }
+        }
+
+        PortLabel::Unknown
+    }
+
+    fn resolve_from_client(
+        &self,
+        client_type: ClientType,
+        transport: PortTransport,
+        candidates: &[u16; 2],
+    ) -> Option<PortLabel> {
+        let client_map = self.by_client.get(&client_type)?;
+
+        for port in candidates {
+            if let Some(label) = client_map
+                .get(port)
+                .and_then(|labels| labels.get(transport))
+            {
+                return Some(label);
+            }
+        }
+
+        None
+    }
+}
+
 /// Discovered port information for a PID.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct PortInfo {
     pub pid: u32,
     pub client_type: ClientType,
-    pub ports: HashMap<u16, PortLabel>,
+    pub ports: Vec<(u16, PortLabel)>,
 }
 
 /// Default well-known ports per client type with semantic labels.
@@ -129,6 +352,7 @@ pub fn default_ports(client: ClientType) -> &'static [(u16, PortLabel)] {
         ClientType::Lighthouse => &[
             (5052, PortLabel::ClBeaconApi),
             (9000, PortLabel::ClP2PTcp),
+            (9000, PortLabel::ClDiscovery),
             (9001, PortLabel::ClP2PQuic),
         ],
         ClientType::Prysm => &[
@@ -141,9 +365,23 @@ pub fn default_ports(client: ClientType) -> &'static [(u16, PortLabel)] {
             (5051, PortLabel::ClBeaconApi),
             (5052, PortLabel::ClBeaconApi),
             (9000, PortLabel::ClP2PTcp),
+            (9000, PortLabel::ClDiscovery),
         ],
-        ClientType::Lodestar => &[(9596, PortLabel::ClBeaconApi), (9000, PortLabel::ClP2PTcp)],
-        ClientType::Nimbus => &[(5052, PortLabel::ClBeaconApi), (9000, PortLabel::ClP2PTcp)],
+        ClientType::Lodestar => &[
+            (9596, PortLabel::ClBeaconApi),
+            (9000, PortLabel::ClP2PTcp),
+            (9000, PortLabel::ClDiscovery),
+        ],
+        ClientType::Nimbus => &[
+            (5052, PortLabel::ClBeaconApi),
+            (9000, PortLabel::ClP2PTcp),
+            (9000, PortLabel::ClDiscovery),
+        ],
+        ClientType::Grandine => &[
+            (5052, PortLabel::ClBeaconApi),
+            (9000, PortLabel::ClP2PTcp),
+            (9000, PortLabel::ClDiscovery),
+        ],
         // No defaults for unknown or ethrex.
         _ => &[],
     }
@@ -214,6 +452,17 @@ fn port_flags(client: ClientType) -> &'static [(&'static str, PortLabel)] {
             ("--tcp-port", PortLabel::ClP2PTcp),
             ("--udp-port", PortLabel::ClDiscovery),
         ],
+        ClientType::Grandine => &[
+            ("--http-port", PortLabel::ClBeaconApi),
+            ("--libp2p-port", PortLabel::ClP2PTcp),
+            ("--discovery-port", PortLabel::ClDiscovery),
+            ("--enr-tcp-port", PortLabel::ClP2PTcp),
+            ("--enr-udp-port", PortLabel::ClDiscovery),
+            ("--libp2p-port-ipv6", PortLabel::ClP2PTcp),
+            ("--discovery-port-ipv6", PortLabel::ClDiscovery),
+            ("--enr-tcp-port-ipv6", PortLabel::ClP2PTcp),
+            ("--enr-udp-port-ipv6", PortLabel::ClDiscovery),
+        ],
         _ => &[],
     }
 }
@@ -232,14 +481,14 @@ pub fn discover_ports(
             .copied()
             .unwrap_or(ClientType::Unknown);
 
-        let mut ports = HashMap::with_capacity(8);
+        let mut ports = Vec::with_capacity(8);
 
         // Try to parse ports from cmdline.
         match read_proc_cmdline(pid) {
             Ok(cmdline) => {
                 let parsed = parse_ports_from_cmdline(&cmdline, client_type);
                 for (port, label) in parsed {
-                    ports.insert(port, label);
+                    upsert_port_label(&mut ports, port, label);
                 }
             }
             Err(e) => {
@@ -251,7 +500,7 @@ pub fn discover_ports(
         if ports.is_empty() {
             let defaults = default_ports(client_type);
             for &(port, label) in defaults {
-                ports.insert(port, label);
+                upsert_port_label(&mut ports, port, label);
             }
 
             if !defaults.is_empty() {
@@ -284,13 +533,18 @@ pub fn discover_ports(
     result
 }
 
-/// Collect all port-to-label mappings across all PIDs.
-pub fn all_port_labels(port_infos: &HashMap<u32, PortInfo>) -> HashMap<u16, PortLabel> {
-    let mut result = HashMap::with_capacity(32);
+/// Collect all client-aware port mappings across all PIDs.
+pub fn all_port_labels(port_infos: &HashMap<u32, PortInfo>) -> PortLabelMap {
+    let mut result = PortLabelMap::default();
 
-    for info in port_infos.values() {
-        for (&port, &label) in &info.ports {
-            result.insert(port, label);
+    let mut pids: Vec<u32> = port_infos.keys().copied().collect();
+    pids.sort_unstable();
+
+    for pid in pids {
+        if let Some(info) = port_infos.get(&pid) {
+            for &(port, label) in &info.ports {
+                result.insert(info.client_type, port, label);
+            }
         }
     }
 
@@ -407,11 +661,23 @@ fn read_proc_cmdline(_pid: u32) -> Result<String> {
 mod tests {
     use super::*;
 
+    fn assert_contains_label(ports: &[(u16, PortLabel)], port: u16, label: PortLabel) {
+        assert!(
+            ports
+                .iter()
+                .any(|(candidate_port, candidate_label)| *candidate_port == port
+                    && *candidate_label == label),
+            "missing {label:?} for port {port}",
+        );
+    }
+
     #[test]
     fn test_port_label_as_str() {
         assert_eq!(PortLabel::Unknown.as_str(), "unknown");
-        assert_eq!(PortLabel::ElP2PTcp.as_str(), "el_p2p_tcp");
+        assert_eq!(PortLabel::ElP2PTcp.as_str(), "el_p2p");
         assert_eq!(PortLabel::ElJsonRpc.as_str(), "el_json_rpc");
+        assert_eq!(PortLabel::ClP2PTcp.as_str(), "cl_p2p");
+        assert_eq!(PortLabel::ClP2PQuic.as_str(), "cl_p2p");
         assert_eq!(PortLabel::ClBeaconApi.as_str(), "cl_beacon_api");
         assert_eq!(PortLabel::ClGrpc.as_str(), "cl_grpc");
     }
@@ -432,33 +698,47 @@ mod tests {
     }
 
     #[test]
+    fn test_port_label_transport() {
+        assert_eq!(PortLabel::ElP2PTcp.transport(), PortTransport::Tcp);
+        assert_eq!(PortLabel::ElDiscovery.transport(), PortTransport::Udp);
+        assert_eq!(PortLabel::ClP2PQuic.transport(), PortTransport::Udp);
+        assert_eq!(PortLabel::Unknown.transport(), PortTransport::Any);
+    }
+
+    #[test]
     fn test_default_ports_geth() {
         let ports = default_ports(ClientType::Geth);
-        let map: HashMap<u16, PortLabel> = ports.iter().copied().collect();
-        assert_eq!(map.get(&8545), Some(&PortLabel::ElJsonRpc));
-        assert_eq!(map.get(&8546), Some(&PortLabel::ElWebSocket));
-        assert_eq!(map.get(&8551), Some(&PortLabel::ElEngineApi));
-        assert_eq!(map.get(&30303), Some(&PortLabel::ElP2PTcp));
+        assert_contains_label(ports, 8545, PortLabel::ElJsonRpc);
+        assert_contains_label(ports, 8546, PortLabel::ElWebSocket);
+        assert_contains_label(ports, 8551, PortLabel::ElEngineApi);
+        assert_contains_label(ports, 30303, PortLabel::ElP2PTcp);
         assert_eq!(ports.len(), 4);
     }
 
     #[test]
     fn test_default_ports_lighthouse() {
         let ports = default_ports(ClientType::Lighthouse);
-        let map: HashMap<u16, PortLabel> = ports.iter().copied().collect();
-        assert_eq!(map.get(&5052), Some(&PortLabel::ClBeaconApi));
-        assert_eq!(map.get(&9000), Some(&PortLabel::ClP2PTcp));
-        assert_eq!(map.get(&9001), Some(&PortLabel::ClP2PQuic));
+        assert_contains_label(ports, 5052, PortLabel::ClBeaconApi);
+        assert_contains_label(ports, 9000, PortLabel::ClP2PTcp);
+        assert_contains_label(ports, 9000, PortLabel::ClDiscovery);
+        assert_contains_label(ports, 9001, PortLabel::ClP2PQuic);
     }
 
     #[test]
     fn test_default_ports_prysm() {
         let ports = default_ports(ClientType::Prysm);
-        let map: HashMap<u16, PortLabel> = ports.iter().copied().collect();
-        assert_eq!(map.get(&3500), Some(&PortLabel::ClBeaconApi));
-        assert_eq!(map.get(&4000), Some(&PortLabel::ClGrpc));
-        assert_eq!(map.get(&13000), Some(&PortLabel::ClP2PTcp));
-        assert_eq!(map.get(&12000), Some(&PortLabel::ClDiscovery));
+        assert_contains_label(ports, 3500, PortLabel::ClBeaconApi);
+        assert_contains_label(ports, 4000, PortLabel::ClGrpc);
+        assert_contains_label(ports, 13000, PortLabel::ClP2PTcp);
+        assert_contains_label(ports, 12000, PortLabel::ClDiscovery);
+    }
+
+    #[test]
+    fn test_default_ports_grandine() {
+        let ports = default_ports(ClientType::Grandine);
+        assert_contains_label(ports, 5052, PortLabel::ClBeaconApi);
+        assert_contains_label(ports, 9000, PortLabel::ClP2PTcp);
+        assert_contains_label(ports, 9000, PortLabel::ClDiscovery);
     }
 
     #[test]
@@ -531,7 +811,8 @@ mod tests {
 
     #[test]
     fn test_parse_ports_prysm() {
-        let cmdline = "beacon-chain --grpc-gateway-port 3500 --rpc-port 4000 --p2p-tcp-port 13000";
+        let cmdline =
+            "beacon-chain --grpc-gateway-port 3500 --rpc-port 4000 --p2p-tcp-port 13000 --p2p-udp-port 13000";
         let ports = parse_ports_from_cmdline(cmdline, ClientType::Prysm);
         assert_eq!(
             ports,
@@ -539,8 +820,19 @@ mod tests {
                 (3500, PortLabel::ClBeaconApi),
                 (4000, PortLabel::ClGrpc),
                 (13000, PortLabel::ClP2PTcp),
+                (13000, PortLabel::ClDiscovery),
             ]
         );
+    }
+
+    #[test]
+    fn test_parse_ports_grandine() {
+        let cmdline =
+            "grandine --http-port=5052 --libp2p-port=9000 --discovery-port=9000 --enr-tcp-port=9000 --enr-udp-port=9000";
+        let ports = parse_ports_from_cmdline(cmdline, ClientType::Grandine);
+        assert_contains_label(&ports, 5052, PortLabel::ClBeaconApi);
+        assert_contains_label(&ports, 9000, PortLabel::ClP2PTcp);
+        assert_contains_label(&ports, 9000, PortLabel::ClDiscovery);
     }
 
     #[test]
@@ -566,37 +858,87 @@ mod tests {
     }
 
     #[test]
-    fn test_all_port_labels() {
+    fn test_all_port_labels_protocol_and_client_aware() {
         let mut infos = HashMap::new();
-        let mut ports1 = HashMap::new();
-        ports1.insert(8545, PortLabel::ElJsonRpc);
-        ports1.insert(30303, PortLabel::ElP2PTcp);
         infos.insert(
             1,
             PortInfo {
                 pid: 1,
-                client_type: ClientType::Geth,
-                ports: ports1,
+                client_type: ClientType::Prysm,
+                ports: vec![
+                    (3500, PortLabel::ClBeaconApi),
+                    (13000, PortLabel::ClP2PTcp),
+                    (13000, PortLabel::ClDiscovery),
+                ],
             },
         );
 
-        let mut ports2 = HashMap::new();
-        ports2.insert(5052, PortLabel::ClBeaconApi);
-        ports2.insert(9000, PortLabel::ClP2PTcp);
         infos.insert(
             2,
             PortInfo {
                 pid: 2,
-                client_type: ClientType::Lighthouse,
-                ports: ports2,
+                client_type: ClientType::Geth,
+                ports: vec![
+                    (30303, PortLabel::ElP2PTcp),
+                    (30303, PortLabel::ElDiscovery),
+                ],
             },
         );
 
         let all = all_port_labels(&infos);
-        assert_eq!(all.len(), 4);
-        assert_eq!(all.get(&8545), Some(&PortLabel::ElJsonRpc));
-        assert_eq!(all.get(&30303), Some(&PortLabel::ElP2PTcp));
-        assert_eq!(all.get(&5052), Some(&PortLabel::ClBeaconApi));
-        assert_eq!(all.get(&9000), Some(&PortLabel::ClP2PTcp));
+
+        assert_eq!(
+            all.resolve_tcp(ClientType::Prysm, 13000, 0),
+            PortLabel::ClP2PTcp
+        );
+        assert_eq!(
+            all.resolve_udp(ClientType::Prysm, 13000, 0),
+            PortLabel::ClDiscovery
+        );
+
+        assert_eq!(
+            all.resolve_tcp(ClientType::Geth, 30303, 0),
+            PortLabel::ElP2PTcp
+        );
+        assert_eq!(
+            all.resolve_udp(ClientType::Geth, 30303, 0),
+            PortLabel::ElDiscovery
+        );
+
+        // Client-specific lookups do not bleed across client types.
+        assert_eq!(
+            all.resolve_tcp(ClientType::Lighthouse, 13000, 0),
+            PortLabel::Unknown
+        );
+    }
+
+    #[test]
+    fn test_port_label_map_prefers_primary_then_secondary_port() {
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Prysm, 13000, PortLabel::ClP2PTcp);
+
+        assert_eq!(
+            map.resolve_tcp(ClientType::Prysm, 13000, 45000),
+            PortLabel::ClP2PTcp
+        );
+        assert_eq!(
+            map.resolve_tcp(ClientType::Prysm, 45000, 13000),
+            PortLabel::ClP2PTcp
+        );
+        assert_eq!(
+            map.resolve_tcp(ClientType::Prysm, 45000, 45001),
+            PortLabel::Unknown
+        );
+    }
+
+    #[test]
+    fn test_upsert_port_label_preserves_tcp_udp_pair() {
+        let mut ports = Vec::new();
+        upsert_port_label(&mut ports, 9000, PortLabel::ClP2PTcp);
+        upsert_port_label(&mut ports, 9000, PortLabel::ClDiscovery);
+
+        assert_eq!(ports.len(), 2);
+        assert_contains_label(&ports, 9000, PortLabel::ClP2PTcp);
+        assert_contains_label(&ports, 9000, PortLabel::ClDiscovery);
     }
 }

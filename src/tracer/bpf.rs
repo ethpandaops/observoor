@@ -523,6 +523,10 @@ fn attach_programs(ebpf: &mut Ebpf) -> Result<AttachmentStats> {
     attach_kprobe_required(ebpf, "kretprobe_tcp_sendmsg", "tcp_sendmsg", &mut stats)?;
     attach_kprobe_required(ebpf, "kprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
     attach_kprobe_required(ebpf, "kretprobe_tcp_recvmsg", "tcp_recvmsg", &mut stats)?;
+    attach_kprobe_required(ebpf, "kprobe_udp_sendmsg", "udp_sendmsg", &mut stats)?;
+    attach_kprobe_required(ebpf, "kretprobe_udp_sendmsg", "udp_sendmsg", &mut stats)?;
+    attach_kprobe_required(ebpf, "kprobe_udp_recvmsg", "udp_recvmsg", &mut stats)?;
+    attach_kprobe_required(ebpf, "kretprobe_udp_recvmsg", "udp_recvmsg", &mut stats)?;
 
     // ---------------------------------------------------------------
     // Required scheduler tracepoint

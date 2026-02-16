@@ -177,9 +177,17 @@ impl Agent {
         let port_infos = ports::discover_ports(&pids, &client_types);
         let port_label_map = ports::all_port_labels(&port_infos);
         if !port_label_map.is_empty() {
-            let mappings: Vec<(u16, &str)> = port_label_map
-                .iter()
-                .map(|(&port, label)| (port, label.as_str()))
+            let mappings: Vec<(String, u16, &str, &str)> = port_label_map
+                .mappings()
+                .into_iter()
+                .map(|(client, port, transport, label)| {
+                    (
+                        client.as_str().to_string(),
+                        port,
+                        transport.as_str(),
+                        label.as_str(),
+                    )
+                })
                 .collect();
             info!(mappings = ?mappings, "discovered port label mappings");
         }
