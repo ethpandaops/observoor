@@ -276,13 +276,14 @@ impl Tracer for BpfTracer {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("BPF objects not loaded"))?;
 
-        // Clear tracked_tids.
+        // Clear tracked_tids and wakeup_ts (explicitly managed HASH maps).
         clear_hash_map::<u32, BpfTrackedTidVal>(ebpf, "tracked_tids")?;
-
-        // Clear scheduler timestamp maps (u32 -> u64).
-        clear_hash_map::<u32, u64>(ebpf, "sched_on_ts")?;
         clear_hash_map::<u32, u64>(ebpf, "wakeup_ts")?;
-        clear_hash_map::<u32, u64>(ebpf, "offcpu_ts")?;
+
+        // NOTE: sched_on_ts and offcpu_ts are LRU maps that record timestamps
+        // unconditionally for all threads. Clearing them on TID refresh would
+        // lose timestamps for currently-running threads, creating on_cpu_ns=0
+        // holes. LRU eviction handles staleness automatically.
 
         // Insert new TID entries.
         {
@@ -300,6 +301,15 @@ impl Tracer for BpfTracer {
                 map.insert(tid, val, 0)
                     .with_context(|| format!("adding TID {tid} to BPF map"))?;
             }
+        }
+
+        const TRACKED_TIDS_CAPACITY: usize = 65536;
+        if tids.len() > TRACKED_TIDS_CAPACITY {
+            tracing::warn!(
+                count = tids.len(),
+                capacity = TRACKED_TIDS_CAPACITY,
+                "discovered TIDs exceed tracked_tids map capacity; some threads will not emit runqueue events"
+            );
         }
 
         tracing::debug!(count = tids.len(), "updated tracked TIDs");

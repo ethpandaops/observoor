@@ -136,7 +136,7 @@ struct sock_owner_val {
 
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, 65536);
     __type(key, __u32);
     __type(value, struct tracked_tid_val);
 } tracked_tids SEC(".maps");
@@ -150,9 +150,11 @@ struct {
 } sock_owner SEC(".maps");
 
 // sched_on_ts: Per-TID on-CPU timestamp (ktime_ns when scheduled on).
+// LRU so that stale entries from dead threads are auto-evicted without
+// userspace intervention. Sized to cover all threads across tracked processes.
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 131072);
     __type(key, __u32);
     __type(value, __u64);
 } sched_on_ts SEC(".maps");
@@ -160,15 +162,17 @@ struct {
 // wakeup_ts: Per-TID wakeup timestamp for runqueue latency.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(max_entries, 65536);
     __type(key, __u32);
     __type(value, __u64);
 } wakeup_ts SEC(".maps");
 
 // offcpu_ts: Per-TID timestamp when switched off-CPU.
+// LRU so that stale entries from dead threads are auto-evicted without
+// userspace intervention. Sized to cover all threads across tracked processes.
 struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
+    __uint(type, BPF_MAP_TYPE_LRU_HASH);
+    __uint(max_entries, 131072);
     __type(key, __u32);
     __type(value, __u64);
 } offcpu_ts SEC(".maps");

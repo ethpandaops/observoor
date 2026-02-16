@@ -1137,12 +1137,14 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     __u64 now = bpf_ktime_get_ns();
     __u8 ct;
 
-    // Path A: Record sched-ON timestamp for incoming thread.
+    // Path A: Record sched-ON timestamp for incoming thread unconditionally.
+    // We cannot filter by TGID here because ctx->next_pid is a TID and
+    // bpf_get_current_pid_tgid() returns the *outgoing* task's TGID.
+    // The LRU map auto-evicts stale entries from irrelevant threads.
     __u32 next_tid = ctx->next_pid;
+    bpf_map_update_elem(&sched_on_ts, &next_tid, &now, BPF_ANY);
+
     struct tracked_tid_val *next_info = lookup_tracked_tid(next_tid);
-    if (next_info) {
-        bpf_map_update_elem(&sched_on_ts, &next_tid, &now, BPF_ANY);
-    }
 
     // Emit runqueue/off-CPU latency event for incoming thread.
     if (next_info) {
@@ -1189,10 +1191,10 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
-    // Record off-CPU timestamp for outgoing thread.
-    if (lookup_tracked_tid(tid)) {
-        bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
-    }
+    // Record off-CPU timestamp unconditionally for all threads in tracked
+    // processes. The is_tracked(pid) check above already filters by TGID.
+    // The LRU map auto-evicts stale entries from dead threads.
+    bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
 
     if (!should_emit_event(EVENT_SCHED_SWITCH))
         return 0;
