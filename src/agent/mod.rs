@@ -274,7 +274,16 @@ impl Agent {
         #[cfg(feature = "bpf")]
         {
             let ring_buf_size = u32::try_from(self.cfg.ring_buffer_size).unwrap_or(u32::MAX);
-            let mut tracer = BpfTracer::new(ring_buf_size);
+            let disabled_probes = self
+                .cfg
+                .probes
+                .disabled_set()
+                .context("resolving disabled probe groups")?;
+            if !disabled_probes.is_empty() {
+                let names: Vec<&str> = disabled_probes.iter().map(|p| p.as_str()).collect();
+                info!(disabled = ?names, "probe groups disabled by config");
+            }
+            let mut tracer = BpfTracer::new(ring_buf_size, disabled_probes);
 
             // Register event handler.
             let health_ev = Arc::clone(&self.health);

@@ -28,6 +28,24 @@ pid:
 # BPF ring buffer size in bytes (default: 4MB)
 ring_buffer_size: 4194304
 
+# Per-probe-group enable/disable. Disabled probes are never loaded into the
+# kernel, so they incur zero CPU overhead. Probes not listed default to enabled.
+# Available groups: syscall_read, syscall_write, syscall_futex, syscall_mmap,
+#   syscall_epoll_wait, syscall_fsync, syscall_fdatasync, syscall_pwrite,
+#   fd_open, fd_close, disk_io, block_merge, tcp_send, tcp_recv, udp_send,
+#   udp_recv, tcp_retransmit, tcp_state, scheduler, scheduler_wakeup,
+#   page_fault, mem_reclaim, mem_compaction, swap_in, swap_out, oom_kill,
+#   process_exit
+# probes:
+#   syscall_futex:
+#     enabled: false
+#   syscall_epoll_wait:
+#     enabled: false
+#   scheduler:
+#     enabled: false
+#   page_fault:
+#     enabled: false
+
 # How often to poll beacon node for sync status (default: 30s)
 sync_poll_interval: 30s
 
