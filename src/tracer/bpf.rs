@@ -285,6 +285,15 @@ impl Tracer for BpfTracer {
         // lose timestamps for currently-running threads, creating on_cpu_ns=0
         // holes. LRU eviction handles staleness automatically.
 
+        const TRACKED_TIDS_CAPACITY: usize = 65536;
+        if tids.len() > TRACKED_TIDS_CAPACITY {
+            tracing::warn!(
+                count = tids.len(),
+                capacity = TRACKED_TIDS_CAPACITY,
+                "discovered TIDs exceed tracked_tids map capacity; some threads will not emit runqueue events"
+            );
+        }
+
         // Insert new TID entries.
         {
             let mut map: BpfHashMap<_, u32, BpfTrackedTidVal> = BpfHashMap::try_from(
@@ -301,15 +310,6 @@ impl Tracer for BpfTracer {
                 map.insert(tid, val, 0)
                     .with_context(|| format!("adding TID {tid} to BPF map"))?;
             }
-        }
-
-        const TRACKED_TIDS_CAPACITY: usize = 65536;
-        if tids.len() > TRACKED_TIDS_CAPACITY {
-            tracing::warn!(
-                count = tids.len(),
-                capacity = TRACKED_TIDS_CAPACITY,
-                "discovered TIDs exceed tracked_tids map capacity; some threads will not emit runqueue events"
-            );
         }
 
         tracing::debug!(count = tids.len(), "updated tracked TIDs");
@@ -660,6 +660,7 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // Optional tracepoints (with probe group gating)
     // ---------------------------------------------------------------
     let disk_io_enabled = !disabled.contains(&ProbeGroup::DiskIo);
+    let scheduler_enabled = !disabled.contains(&ProbeGroup::Scheduler);
     let optional_tracepoints: &[(ProbeGroup, &str, &str, &str)] = &[
         (
             ProbeGroup::BlockMerge,
@@ -709,6 +710,18 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     ];
 
     for (group, prog_name, tp_group, tp_name) in optional_tracepoints {
+        let scheduler_wakeup_has_no_effect =
+            *group == ProbeGroup::SchedulerWakeup && !scheduler_enabled;
+        if scheduler_wakeup_has_no_effect {
+            tracing::info!(
+                probe = %group,
+                program = prog_name,
+                "skipping (scheduler disabled)"
+            );
+            stats.tracepoints_skipped += 1;
+            continue;
+        }
+
         let block_merge_required_for_disk = *group == ProbeGroup::BlockMerge && disk_io_enabled;
         if disabled.contains(group) && !block_merge_required_for_disk {
             tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
