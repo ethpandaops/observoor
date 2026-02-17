@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::time::Duration;
 
 #[cfg(all(feature = "bpf", not(test)))]
@@ -777,13 +776,17 @@ impl Collector {
                 }
             }
 
+            #[inline(always)]
             fn update(
                 &mut self,
                 cpu_id: u32,
                 snap: super::aggregate::CounterSnapshot,
                 interval_ns: i64,
+                pct_scale: f32,
             ) {
-                self.active_cores = self.active_cores.saturating_add(1);
+                if self.active_cores < u16::MAX {
+                    self.active_cores += 1;
+                }
                 self.total_on_cpu_ns += snap.sum;
                 self.event_count = self.event_count.saturating_add(snap.count);
 
@@ -795,7 +798,7 @@ impl Collector {
                 // Keep raw on-CPU accounting for totals, but bound utilization
                 // percentages to one full window per core.
                 let bounded_on_cpu_ns = snap.sum.min(interval_ns);
-                let pct = ((bounded_on_cpu_ns as f64 / interval_ns as f64) * 100.0) as f32;
+                let pct = (bounded_on_cpu_ns as f32) * pct_scale;
                 self.sum_core_pct += pct;
                 if pct < self.min_core_pct {
                     self.min_core_pct = pct;
@@ -810,10 +813,11 @@ impl Collector {
         if interval_ns <= 0 {
             return;
         }
+        let pct_scale = 100.0f32 / interval_ns as f32;
         let sampling = self.sampling_for_event(EventType::SchedSwitch);
 
-        let mut grouped: HashMap<(u32, u8), CpuUtilAcc> =
-            HashMap::with_capacity(buf.cpu_on_core.len());
+        let mut grouped: hashbrown::HashMap<(u32, u8), CpuUtilAcc> =
+            hashbrown::HashMap::with_capacity(buf.cpu_on_core.len());
 
         for entry in buf.cpu_on_core.iter() {
             let dim = *entry.key();
@@ -824,7 +828,7 @@ impl Collector {
             grouped
                 .entry((dim.pid, dim.client_type))
                 .or_insert_with(CpuUtilAcc::new)
-                .update(dim.cpu_id, snap, interval_ns);
+                .update(dim.cpu_id, snap, interval_ns, pct_scale);
         }
 
         for ((pid, client_type), mut acc) in grouped {
