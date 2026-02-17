@@ -752,13 +752,67 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
+        struct CpuUtilAcc {
+            active_cores: u16,
+            total_on_cpu_ns: i64,
+            event_count: u32,
+            max_core_on_cpu_ns: i64,
+            max_core_id: u32,
+            min_core_pct: f32,
+            max_core_pct: f32,
+            sum_core_pct: f32,
+        }
+
+        impl CpuUtilAcc {
+            fn new() -> Self {
+                Self {
+                    active_cores: 0,
+                    total_on_cpu_ns: 0,
+                    event_count: 0,
+                    max_core_on_cpu_ns: i64::MIN,
+                    max_core_id: 0,
+                    min_core_pct: f32::MAX,
+                    max_core_pct: f32::MIN,
+                    sum_core_pct: 0.0,
+                }
+            }
+
+            fn update(
+                &mut self,
+                cpu_id: u32,
+                snap: super::aggregate::CounterSnapshot,
+                interval_ns: i64,
+            ) {
+                self.active_cores = self.active_cores.saturating_add(1);
+                self.total_on_cpu_ns += snap.sum;
+                self.event_count = self.event_count.saturating_add(snap.count);
+
+                if snap.sum > self.max_core_on_cpu_ns {
+                    self.max_core_on_cpu_ns = snap.sum;
+                    self.max_core_id = cpu_id;
+                }
+
+                // Keep raw on-CPU accounting for totals, but bound utilization
+                // percentages to one full window per core.
+                let bounded_on_cpu_ns = snap.sum.min(interval_ns);
+                let pct = ((bounded_on_cpu_ns as f64 / interval_ns as f64) * 100.0) as f32;
+                self.sum_core_pct += pct;
+                if pct < self.min_core_pct {
+                    self.min_core_pct = pct;
+                }
+                if pct > self.max_core_pct {
+                    self.max_core_pct = pct;
+                }
+            }
+        }
+
         let interval_ns = i64::from(self.interval_ms) * 1_000_000;
         if interval_ns <= 0 {
             return;
         }
         let sampling = self.sampling_for_event(EventType::SchedSwitch);
 
-        let mut grouped: HashMap<(u32, u8), Vec<(u32, super::aggregate::CounterSnapshot)>> =
+        let mut grouped: HashMap<(u32, u8), CpuUtilAcc> =
             HashMap::with_capacity(buf.cpu_on_core.len());
 
         for entry in buf.cpu_on_core.iter() {
@@ -769,59 +823,28 @@ impl Collector {
             }
             grouped
                 .entry((dim.pid, dim.client_type))
-                .or_default()
-                .push((dim.cpu_id, snap));
+                .or_insert_with(CpuUtilAcc::new)
+                .update(dim.cpu_id, snap, interval_ns);
         }
 
-        for ((pid, client_type), cores) in grouped {
-            if cores.is_empty() {
+        for ((pid, client_type), mut acc) in grouped {
+            if acc.active_cores == 0 {
                 continue;
             }
 
-            let active_cores = u16::try_from(cores.len()).unwrap_or(u16::MAX);
-            let mut total_on_cpu_ns = 0i64;
-            let mut event_count = 0u32;
-            let mut max_core_on_cpu_ns = i64::MIN;
-            let mut max_core_id = 0u32;
-            let mut min_core_pct = f32::MAX;
-            let mut max_core_pct = f32::MIN;
-            let mut sum_core_pct = 0.0f32;
-
-            for (cpu_id, snap) in cores {
-                total_on_cpu_ns += snap.sum;
-                event_count = event_count.saturating_add(snap.count);
-
-                if snap.sum > max_core_on_cpu_ns {
-                    max_core_on_cpu_ns = snap.sum;
-                    max_core_id = cpu_id;
-                }
-
-                // Keep raw on-CPU accounting for totals, but bound utilization
-                // percentages to one full window per core.
-                let bounded_on_cpu_ns = snap.sum.min(interval_ns);
-                let pct = ((bounded_on_cpu_ns as f64 / interval_ns as f64) * 100.0) as f32;
-                sum_core_pct += pct;
-                if pct < min_core_pct {
-                    min_core_pct = pct;
-                }
-                if pct > max_core_pct {
-                    max_core_pct = pct;
-                }
+            if acc.max_core_on_cpu_ns == i64::MIN {
+                acc.max_core_on_cpu_ns = 0;
             }
-
-            if max_core_on_cpu_ns == i64::MIN {
-                max_core_on_cpu_ns = 0;
+            if acc.min_core_pct == f32::MAX {
+                acc.min_core_pct = 0.0;
             }
-            if min_core_pct == f32::MAX {
-                min_core_pct = 0.0;
+            if acc.max_core_pct == f32::MIN {
+                acc.max_core_pct = 0.0;
             }
-            if max_core_pct == f32::MIN {
-                max_core_pct = 0.0;
-            }
-            let mean_core_pct = if active_cores == 0 {
+            let mean_core_pct = if acc.active_cores == 0 {
                 0.0
             } else {
-                sum_core_pct / f32::from(active_cores)
+                acc.sum_core_pct / f32::from(acc.active_cores)
             };
 
             batch.cpu_util.push(CpuUtilMetric {
@@ -832,15 +855,15 @@ impl Collector {
                 client_type: client_type_from_u8(client_type),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
-                total_on_cpu_ns,
-                event_count,
-                active_cores,
+                total_on_cpu_ns: acc.total_on_cpu_ns,
+                event_count: acc.event_count,
+                active_cores: acc.active_cores,
                 system_cores: buf.system_cores,
-                max_core_on_cpu_ns,
-                max_core_id,
+                max_core_on_cpu_ns: acc.max_core_on_cpu_ns,
+                max_core_id: acc.max_core_id,
                 mean_core_pct,
-                min_core_pct,
-                max_core_pct,
+                min_core_pct: acc.min_core_pct,
+                max_core_pct: acc.max_core_pct,
             });
 
             #[cfg(feature = "bpf")]
