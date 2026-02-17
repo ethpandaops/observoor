@@ -17,6 +17,11 @@ jobs:
         with:
           toolchain: "1.88.0"
 
+      - name: Install BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install clang llvm libbpf-dev
+
       - name: Cache cargo
         uses: actions/cache@v4
         with:
