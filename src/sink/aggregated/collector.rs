@@ -796,7 +796,10 @@ impl Collector {
                     max_core_id = cpu_id;
                 }
 
-                let pct = ((snap.sum as f64 / interval_ns as f64) * 100.0) as f32;
+                // Keep raw on-CPU accounting for totals, but bound utilization
+                // percentages to one full window per core.
+                let bounded_on_cpu_ns = snap.sum.min(interval_ns);
+                let pct = ((bounded_on_cpu_ns as f64 / interval_ns as f64) * 100.0) as f32;
                 sum_core_pct += pct;
                 if pct < min_core_pct {
                     min_core_pct = pct;
@@ -1654,6 +1657,36 @@ mod tests {
         let m = &batch.cpu_util[0];
         assert_eq!(m.total_on_cpu_ns, 2_000_000_000);
         assert_eq!(m.event_count, 1);
+        assert_eq!(m.max_core_on_cpu_ns, 2_000_000_000);
+        assert!((m.mean_core_pct - 100.0).abs() < 0.0001);
+        assert!((m.min_core_pct - 100.0).abs() < 0.0001);
+        assert!((m.max_core_pct - 100.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_collect_cpu_utilization_clamps_pct_per_core() {
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+
+        // Core 0 has a cross-window 2s slice in a 1s window, core 1 has 0.5s.
+        // Percentages are bounded per core while raw totals stay untrimmed.
+        buf.add_sched_switch(dim, 2_000_000_000, 0);
+        buf.add_sched_switch(dim, 500_000_000, 1);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.cpu_util.len(), 1);
+
+        let m = &batch.cpu_util[0];
+        assert_eq!(m.total_on_cpu_ns, 2_500_000_000);
+        assert_eq!(m.max_core_on_cpu_ns, 2_000_000_000);
+        assert_eq!(m.max_core_id, 0);
+        assert!((m.mean_core_pct - 75.0).abs() < 0.0001);
+        assert!((m.min_core_pct - 50.0).abs() < 0.0001);
+        assert!((m.max_core_pct - 100.0).abs() < 0.0001);
     }
 
     #[test]

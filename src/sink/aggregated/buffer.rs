@@ -199,14 +199,13 @@ impl Buffer {
             .add(i64::from(bytes));
     }
 
-    /// Adds a scheduler switch event (on-CPU time).
-    ///
-    /// Both the latency distribution (`sched_on_cpu`) and per-core utilization
-    /// (`cpu_on_core`) use the full `on_cpu_ns` duration. Cross-window events
-    /// are attributed entirely to the window where the event arrives, matching
-    /// the raw `sched_on_cpu` table behavior.
-    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
+    /// Records scheduler on-CPU latency distribution from sched_switch events.
+    pub fn add_sched_on_cpu(&self, dim: BasicDimension, on_cpu_ns: u64) {
         self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
+    }
+
+    /// Adds per-core on-CPU time used for utilization aggregation.
+    pub fn add_cpu_on_core(&self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
         self.cpu_on_core
             .entry(CpuCoreDimension {
                 pid: dim.pid,
@@ -215,6 +214,16 @@ impl Buffer {
             })
             .or_default()
             .add(on_cpu_ns as i64);
+    }
+
+    /// Adds a scheduler switch event (on-CPU time).
+    ///
+    /// This helper is kept for direct tests/benchmarks. Production code uses
+    /// carried scheduler state and calls `add_sched_on_cpu`/`add_cpu_on_core`
+    /// separately to keep window accounting exact across rotations.
+    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
+        self.add_sched_on_cpu(dim, on_cpu_ns);
+        self.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.

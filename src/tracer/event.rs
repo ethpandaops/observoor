@@ -410,6 +410,7 @@ pub struct SchedRunqueueEvent {
     pub event: Event,
     pub runqueue_ns: u64,
     pub off_cpu_ns: u64,
+    pub cpu_id: u32,
 }
 
 /// Page fault event.

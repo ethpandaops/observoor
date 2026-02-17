@@ -1,0 +1,35 @@
+name: metrics-correctness
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  metrics-correctness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-metrics-correctness-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Run metric correctness invariants
+        run: |
+          set -euo pipefail
+          cargo test --no-default-features cpu_utilization
+          cargo test --no-default-features scheduler_state
+          cargo test --no-default-features test_sched_runqueue
+          cargo test --no-default-features --test blackbox_pipeline pipeline_blackbox_correctness_and_invariants

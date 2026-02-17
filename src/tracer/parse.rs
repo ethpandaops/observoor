@@ -230,13 +230,14 @@ fn parse_sched(event: Event, data: &[u8]) -> Result<SchedEvent, ParseError> {
     })
 }
 
-/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 16 bytes.
+/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 24 bytes.
 fn parse_sched_runqueue(event: Event, data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
-    ensure_payload(data, 16, "sched runqueue event")?;
+    ensure_payload(data, 24, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
         event,
         runqueue_ns: read_u64_le(data, 0),
         off_cpu_ns: read_u64_le(data, 8),
+        cpu_id: read_u32_le(data, 16),
     })
 }
 
@@ -637,6 +638,8 @@ mod tests {
         let mut data = header(7_000_000, 106, 206, 16, 7); // SchedRunqueue, Lighthouse
         data.extend_from_slice(&50_000u64.to_le_bytes());
         data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.extend_from_slice(&4u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::SchedRunqueue(e) = &parsed.typed else {
@@ -644,6 +647,7 @@ mod tests {
         };
         assert_eq!(e.runqueue_ns, 50_000);
         assert_eq!(e.off_cpu_ns, 200_000);
+        assert_eq!(e.cpu_id, 4);
     }
 
     // -- Page fault --

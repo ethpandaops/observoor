@@ -1175,6 +1175,8 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
                 __builtin_memset(rq->hdr.pad, 0, sizeof(rq->hdr.pad));
                 rq->runqueue_ns = runqueue_ns;
                 rq->off_cpu_ns = offcpu_ns;
+                rq->cpu_id = bpf_get_smp_processor_id();
+                __builtin_memset(rq->pad, 0, sizeof(rq->pad));
                 bpf_ringbuf_submit(rq, 0);
             }
         }
