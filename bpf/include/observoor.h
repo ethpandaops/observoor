@@ -105,11 +105,13 @@ struct fd_event {
     char  filename[64];
 };
 
-// Scheduler runqueue event (40 bytes total).
+// Scheduler runqueue event (48 bytes total).
 struct sched_runqueue_event {
     struct event_header hdr;
     __u64 runqueue_ns;
     __u64 off_cpu_ns;
+    __u32 cpu_id;
+    __u8  pad[4];
 };
 
 // Block merge event (32 bytes total).

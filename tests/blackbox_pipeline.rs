@@ -44,10 +44,18 @@ fn sched_switch_payload(pid: u32, tid: u32, on_cpu_ns: u64, voluntary: bool) -> 
     data
 }
 
-fn sched_runqueue_payload(pid: u32, tid: u32, runqueue_ns: u64, off_cpu_ns: u64) -> Vec<u8> {
+fn sched_runqueue_payload(
+    pid: u32,
+    tid: u32,
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+    cpu_id: u32,
+) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, EventType::SchedRunqueue as u8, 1);
     data.extend_from_slice(&runqueue_ns.to_le_bytes());
     data.extend_from_slice(&off_cpu_ns.to_le_bytes());
+    data.extend_from_slice(&cpu_id.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
     data
 }
 
@@ -223,7 +231,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id, event.raw.timestamp_ns);
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
         }
         TypedEvent::SchedRunqueue(e) => {
             buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
@@ -301,7 +309,7 @@ fn gauge_totals(batch: &MetricBatch, metric_type: &str) -> (u32, i64) {
 fn pipeline_blackbox_correctness_and_invariants() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
-    let buffer = Buffer::new(now, 42, now, false, false, false, 16, 0);
+    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     let p1 = 2_001;
     let p2 = 2_002;
@@ -312,7 +320,7 @@ fn pipeline_blackbox_correctness_and_invariants() {
         syscall_payload(EventType::SyscallWrite, p2, p2, 400),
         syscall_payload(EventType::SyscallWrite, p2, p2, 100),
         sched_switch_payload(p1, p1, 5_000, true),
-        sched_runqueue_payload(p1, p1, 1_000, 2_000),
+        sched_runqueue_payload(p1, p1, 1_000, 2_000, 3),
         disk_payload(p1, p1, 40_000, 4_096, 1, 4, 259),
         disk_payload(p1, p1, 20_000, 8_192, 1, 8, 259),
         block_merge_payload(p1, p1, 4_096, 1),
@@ -397,6 +405,38 @@ fn pipeline_blackbox_correctness_and_invariants() {
     for metric in &batch.gauge {
         assert!(metric.count > 0, "gauge count must be positive");
         assert!(metric.min <= metric.max, "gauge min/max must be ordered");
+    }
+
+    for metric in &batch.cpu_util {
+        assert!(
+            metric.event_count > 0,
+            "cpu_util event_count must be positive"
+        );
+        assert!(
+            metric.active_cores > 0,
+            "cpu_util active_cores must be positive"
+        );
+        assert!(
+            metric.total_on_cpu_ns >= metric.max_core_on_cpu_ns,
+            "cpu_util total_on_cpu_ns must be >= max_core_on_cpu_ns"
+        );
+        assert!(
+            (0.0..=100.0).contains(&metric.min_core_pct),
+            "cpu_util min_core_pct out of range"
+        );
+        assert!(
+            (0.0..=100.0).contains(&metric.mean_core_pct),
+            "cpu_util mean_core_pct out of range"
+        );
+        assert!(
+            (0.0..=100.0).contains(&metric.max_core_pct),
+            "cpu_util max_core_pct out of range"
+        );
+        assert!(
+            metric.min_core_pct <= metric.mean_core_pct
+                && metric.mean_core_pct <= metric.max_core_pct,
+            "cpu_util pct ordering invariant violated"
+        );
     }
 
     assert_eq!(latency_totals(&batch, "syscall_read"), (3, 600));

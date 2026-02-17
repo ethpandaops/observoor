@@ -1540,6 +1540,7 @@ dependencies = [
  "dashmap",
  "flate2",
  "futures",
+ "hashbrown 0.15.5",
  "humantime",
  "humantime-serde",
  "libc",
