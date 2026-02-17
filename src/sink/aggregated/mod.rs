@@ -156,7 +156,6 @@ impl AggregatedSink {
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
             system_cores,
-            buffer::monotonic_ns(),
         )
     }
 
@@ -301,7 +300,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id, event.raw.timestamp_ns);
+                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
             }
 
             TypedEvent::SchedRunqueue(e) => {
@@ -985,7 +984,6 @@ mod tests {
             false,
             false,
             8,
-            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1026,7 +1024,6 @@ mod tests {
             false,
             false,
             8,
-            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1071,7 +1068,6 @@ mod tests {
             false,
             false,
             8,
-            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1110,7 +1106,6 @@ mod tests {
             false,
             false,
             8,
-            0,
         );
         let dims = DimensionsConfig::default();
 
@@ -1161,7 +1156,6 @@ mod tests {
             false,
             false,
             8,
-            0,
         );
         let dims = DimensionsConfig::default();
 

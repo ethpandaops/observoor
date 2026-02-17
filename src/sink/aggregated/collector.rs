@@ -1249,7 +1249,6 @@ mod tests {
             false,
             false,
             16,
-            0,
         )
     }
 
@@ -1614,9 +1613,9 @@ mod tests {
         };
 
         // 1.5ms on core 2, 0.5ms on core 4 over a 1s window.
-        buf.add_sched_switch(dim, 1_000_000, 2, 0);
-        buf.add_sched_switch(dim, 500_000, 2, 0);
-        buf.add_sched_switch(dim, 500_000, 4, 0);
+        buf.add_sched_switch(dim, 1_000_000, 2);
+        buf.add_sched_switch(dim, 500_000, 2);
+        buf.add_sched_switch(dim, 500_000, 4);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);
@@ -1637,38 +1636,24 @@ mod tests {
     }
 
     #[test]
-    fn test_collect_cpu_utilization_no_overflow() {
+    fn test_collect_cpu_utilization_cross_window_event() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        // Buffer starts at ktime=1B ns (1 second).
-        let buf = Buffer::new(
-            SystemTime::now(),
-            100,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            16,
-            1_000_000_000,
-        );
+        let buf = test_buffer();
         let dim = BasicDimension {
             pid: 123,
             client_type: 1,
         };
 
-        // Event at ktime=2s with on_cpu_ns=2s — started 1s before the window.
-        // Should be trimmed to 1s for cpu_on_core.
-        buf.add_sched_switch(dim, 2_000_000_000, 0, 2_000_000_000);
+        // Cross-window event: 2s on-CPU in a 1s window. The full duration
+        // is attributed to the arrival window (no trimming).
+        buf.add_sched_switch(dim, 2_000_000_000, 0);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);
 
         let m = &batch.cpu_util[0];
-        // max_core_pct should be <= 100% after trimming.
-        assert!(
-            m.max_core_pct <= 100.0,
-            "max_core_pct should be <= 100% but was {}",
-            m.max_core_pct
-        );
+        assert_eq!(m.total_on_cpu_ns, 2_000_000_000);
+        assert_eq!(m.event_count, 1);
     }
 
     #[test]
@@ -1719,7 +1704,7 @@ mod tests {
             pid: 123,
             client_type: 1,
         };
-        buf.add_sched_switch(dim, 1_000_000, 2, 0);
+        buf.add_sched_switch(dim, 1_000_000, 2);
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.cpu_util.len(), 1);

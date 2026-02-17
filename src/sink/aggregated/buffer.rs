@@ -9,23 +9,6 @@ use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
 
-/// Returns the current monotonic clock value in nanoseconds (CLOCK_MONOTONIC).
-/// This is the same clock domain as BPF's `bpf_ktime_get_ns()`.
-pub fn monotonic_ns() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: clock_gettime with CLOCK_MONOTONIC is safe and always succeeds on Linux/macOS.
-    if unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) } == 0 {
-        (ts.tv_sec as u64)
-            .saturating_mul(1_000_000_000)
-            .saturating_add(ts.tv_nsec as u64)
-    } else {
-        0
-    }
-}
-
 /// Thread-safe aggregation buffer that collects events and aggregates
 /// them by dimension over a time window.
 ///
@@ -47,9 +30,6 @@ pub struct Buffer {
     pub el_offline: bool,
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
-    /// Monotonic clock value (ns) captured when this buffer was created.
-    /// Used to trim sched_switch on_cpu_ns that spans prior windows.
-    pub ktime_start_ns: u64,
 
     // --- Syscalls (BasicDimension -> LatencyAggregate) ---
     pub syscall_read: DashMap<BasicDimension, LatencyAggregate>,
@@ -109,7 +89,6 @@ impl Buffer {
         el_optimistic: bool,
         el_offline: bool,
         system_cores: u16,
-        ktime_start_ns: u64,
     ) -> Self {
         Self {
             start_time,
@@ -119,7 +98,6 @@ impl Buffer {
             el_optimistic,
             el_offline,
             system_cores,
-            ktime_start_ns,
             // Syscalls.
             syscall_read: DashMap::with_capacity(16),
             syscall_write: DashMap::with_capacity(16),
@@ -223,33 +201,12 @@ impl Buffer {
 
     /// Adds a scheduler switch event (on-CPU time).
     ///
-    /// `event_ktime_ns` is the monotonic timestamp of the sched_switch event.
-    /// For per-core utilization (`cpu_on_core`), if the on-CPU slice started
-    /// before this buffer's window, trim it to only the portion within the
-    /// window. The latency distribution (`sched_on_cpu`) uses the original
-    /// duration since it represents actual scheduling slice durations.
-    pub fn add_sched_switch(
-        &self,
-        dim: BasicDimension,
-        on_cpu_ns: u64,
-        cpu_id: u32,
-        event_ktime_ns: u64,
-    ) {
-        // Record original duration for latency distribution.
+    /// Both the latency distribution (`sched_on_cpu`) and per-core utilization
+    /// (`cpu_on_core`) use the full `on_cpu_ns` duration. Cross-window events
+    /// are attributed entirely to the window where the event arrives, matching
+    /// the raw `sched_on_cpu` table behavior.
+    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
         self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
-
-        // For per-core utilization, trim to this window's boundary.
-        let effective_ns = if self.ktime_start_ns > 0 && event_ktime_ns > self.ktime_start_ns {
-            let switch_in = event_ktime_ns.saturating_sub(on_cpu_ns);
-            if switch_in < self.ktime_start_ns {
-                event_ktime_ns - self.ktime_start_ns
-            } else {
-                on_cpu_ns
-            }
-        } else {
-            on_cpu_ns
-        };
-
         self.cpu_on_core
             .entry(CpuCoreDimension {
                 pid: dim.pid,
@@ -257,7 +214,7 @@ impl Buffer {
                 cpu_id,
             })
             .or_default()
-            .add(effective_ns as i64);
+            .add(on_cpu_ns as i64);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.
@@ -347,7 +304,6 @@ mod tests {
             false,
             false,
             16,
-            0,
         )
     }
 
@@ -445,9 +401,9 @@ mod tests {
             client_type: 1,
         };
 
-        buf.add_sched_switch(dim, 1_000, 2, 0);
-        buf.add_sched_switch(dim, 2_000, 2, 0);
-        buf.add_sched_switch(dim, 500, 4, 0);
+        buf.add_sched_switch(dim, 1_000, 2);
+        buf.add_sched_switch(dim, 2_000, 2);
+        buf.add_sched_switch(dim, 500, 4);
 
         let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
         let on_cpu_snap = on_cpu.snapshot();
@@ -531,76 +487,6 @@ mod tests {
         assert_eq!(open.snapshot().count, 2);
         let close = buf.fd_close.get(&dim).expect("close exists");
         assert_eq!(close.snapshot().count, 1);
-    }
-
-    #[test]
-    fn test_add_sched_switch_trims_cross_window_event() {
-        let buf = Buffer::new(
-            SystemTime::now(),
-            100,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            16,
-            1_000_000_000, // window starts at 1s monotonic
-        );
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
-
-        // Event at ktime=2s with on_cpu_ns=1.5s → started at 0.5s, before window.
-        buf.add_sched_switch(dim, 1_500_000_000, 0, 2_000_000_000);
-
-        // sched_on_cpu gets the original untrimmed duration.
-        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
-        assert_eq!(on_cpu.snapshot().sum, 1_500_000_000);
-
-        // cpu_on_core gets trimmed to only the portion within the window (1s).
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 0,
-            })
-            .expect("core exists");
-        assert_eq!(core.snapshot().sum, 1_000_000_000);
-    }
-
-    #[test]
-    fn test_add_sched_switch_no_trim_within_window() {
-        let buf = Buffer::new(
-            SystemTime::now(),
-            100,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            16,
-            1_000_000_000, // window starts at 1s monotonic
-        );
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
-
-        // Event at ktime=2s with on_cpu_ns=500ms → started at 1.5s, fully within window.
-        buf.add_sched_switch(dim, 500_000_000, 0, 2_000_000_000);
-
-        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
-        assert_eq!(on_cpu.snapshot().sum, 500_000_000);
-
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 0,
-            })
-            .expect("core exists");
-        assert_eq!(core.snapshot().sum, 500_000_000);
     }
 
     #[test]
