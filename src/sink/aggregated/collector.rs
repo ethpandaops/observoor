@@ -784,9 +784,7 @@ impl Collector {
                 interval_ns: i64,
                 pct_scale: f32,
             ) {
-                if self.active_cores < u16::MAX {
-                    self.active_cores += 1;
-                }
+                self.active_cores = self.active_cores.saturating_add(1);
                 self.total_on_cpu_ns += snap.sum;
                 self.event_count = self.event_count.saturating_add(snap.count);
 
