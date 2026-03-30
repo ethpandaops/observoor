@@ -122,13 +122,15 @@ impl SchedulerWindowState {
         let tid = event.raw.tid;
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
+                let accounted_ns =
+                    (timestamp_ns - running.running_since_ns).min(sched.on_cpu_ns);
                 buf.add_cpu_on_core(
                     BasicDimension {
                         pid: running.pid,
                         client_type: running.client_type,
                     },
                     running.cpu_id,
-                    timestamp_ns - running.running_since_ns,
+                    accounted_ns,
                 );
                 self.running_by_tid.remove(&tid);
                 return;
@@ -165,13 +167,15 @@ impl SchedulerWindowState {
         let tid = event.raw.tid;
         if let Some(prev) = self.running_by_tid.get_mut(&tid) {
             if timestamp_ns > prev.running_since_ns {
+                let accounted_ns =
+                    (timestamp_ns - prev.running_since_ns).saturating_sub(rq.off_cpu_ns);
                 buf.add_cpu_on_core(
                     BasicDimension {
                         pid: prev.pid,
                         client_type: prev.client_type,
                     },
                     prev.cpu_id,
-                    timestamp_ns - prev.running_since_ns,
+                    accounted_ns,
                 );
             }
             // Only move state forward (or replace at same instant).
@@ -1932,7 +1936,84 @@ mod tests {
                 cpu_id: 1,
             })
             .expect("first core usage");
-        assert_eq!(core1.snapshot().sum, 300);
+        assert_eq!(core1.snapshot().sum, 299);
+
+        let core3 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 3,
+            })
+            .expect("second core usage");
+        assert_eq!(core3.snapshot().sum, 200);
+    }
+
+    #[test]
+    fn test_scheduler_state_duplicate_runqueue_subtracts_offcpu_gap() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let rq1 = make_event_at(
+            1_000,
+            123,
+            61,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 1_000,
+                    pid: 123,
+                    tid: 61,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 0,
+                off_cpu_ns: 0,
+                cpu_id: 1,
+            }),
+        );
+        let rq2 = make_event_at(
+            5_000,
+            123,
+            61,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 5_000,
+                    pid: 123,
+                    tid: 61,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 100,
+                off_cpu_ns: 3_500,
+                cpu_id: 3,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
+        AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&buf, 5_200);
+
+        let core1 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 1,
+            })
+            .expect("first core usage");
+        assert_eq!(core1.snapshot().sum, 500);
 
         let core3 = buf
             .cpu_on_core
