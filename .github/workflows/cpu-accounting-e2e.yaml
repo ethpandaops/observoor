@@ -12,12 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - el: nethermind
-            cl: lighthouse
-            params_file: e2e/cpu-accounting/network-params/lighthouse-nethermind.yaml
           - el: geth
-            cl: teku
-            params_file: e2e/cpu-accounting/network-params/teku-geth.yaml
+            cl: nimbus
+            params_file: e2e/cpu-accounting/network-params/nimbus-geth.yaml
+          - el: erigon
+            cl: nimbus
+            params_file: e2e/cpu-accounting/network-params/nimbus-erigon.yaml
 
     steps:
       - name: Checkout
