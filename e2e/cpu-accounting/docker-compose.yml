@@ -1,0 +1,31 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24-alpine
+    ports:
+      - "8123:8123"
+      - "9000:9000"
+    volumes:
+      - ../configs/clickhouse-init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - clickhouse-data:/var/lib/clickhouse
+
+  observoor:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    depends_on:
+      clickhouse:
+        condition: service_started
+    privileged: true
+    pid: "host"
+    command: ["--config", "/etc/observoor/config.yaml"]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./observoor.yaml:/etc/observoor/config.yaml:ro
+      - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /sys/fs/bpf:/sys/fs/bpf
+      - /proc:/proc:ro
+      - /sys/kernel/btf:/sys/kernel/btf:ro
+
+volumes:
+  clickhouse-data:

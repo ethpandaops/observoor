@@ -31,6 +31,7 @@ pub const DEFAULT_PROCESS_NAMES: &[&str] = &[
     "grandine",
     // Generic runtimes (client type resolved via cmdline)
     "java",
+    "dotnet",
     "node",
     "MainThread",
 ];
@@ -472,7 +473,7 @@ mod tests {
 
     #[test]
     fn test_default_process_names_count() {
-        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 18);
+        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 19);
     }
 
     #[test]

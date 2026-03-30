@@ -1,0 +1,8 @@
+participants:
+  - el_type: geth
+    cl_type: teku
+
+network_params:
+  seconds_per_slot: 12
+
+additional_services: []

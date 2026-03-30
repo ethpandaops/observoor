@@ -134,30 +134,40 @@ impl BpfTracer {
         )?;
 
         for event_type in EventType::all() {
-            let resolved = sampling
-                .resolved_rule_for_event(*event_type)
-                .with_context(|| format!("resolving sampling for {}", event_type.as_str()))?;
+            let bpf_value = if *event_type == EventType::ProcessExit
+                && self.disabled_probes.contains(&ProbeGroup::ProcessExit)
+            {
+                // Keep do_exit attached for scheduler-state cleanup even when
+                // process_exit is disabled, but suppress user-visible events.
+                BpfEventSamplingVal {
+                    mode: BPF_SAMPLING_MODE_PROBABILITY,
+                    _pad: [0; 3],
+                    value: 0,
+                }
+            } else {
+                let resolved = sampling
+                    .resolved_rule_for_event(*event_type)
+                    .with_context(|| format!("resolving sampling for {}", event_type.as_str()))?;
 
-            let (mode, value) = match resolved.mode {
-                EventSamplingMode::None => (BPF_SAMPLING_MODE_NONE, 1),
-                EventSamplingMode::Probability => (
-                    BPF_SAMPLING_MODE_PROBABILITY,
-                    ((resolved.rate * BPF_SAMPLING_PROBABILITY_SCALE as f32).round() as u32)
-                        .min(BPF_SAMPLING_PROBABILITY_SCALE),
-                ),
-                EventSamplingMode::Nth => (BPF_SAMPLING_MODE_NTH, resolved.nth),
-            };
+                let (mode, value) = match resolved.mode {
+                    EventSamplingMode::None => (BPF_SAMPLING_MODE_NONE, 1),
+                    EventSamplingMode::Probability => (
+                        BPF_SAMPLING_MODE_PROBABILITY,
+                        ((resolved.rate * BPF_SAMPLING_PROBABILITY_SCALE as f32).round() as u32)
+                            .min(BPF_SAMPLING_PROBABILITY_SCALE),
+                    ),
+                    EventSamplingMode::Nth => (BPF_SAMPLING_MODE_NTH, resolved.nth),
+                };
 
-            map.set(
-                u32::from(*event_type as u8),
                 BpfEventSamplingVal {
                     mode,
                     _pad: [0; 3],
                     value,
-                },
-                0,
-            )
-            .with_context(|| format!("updating event_sampling for {}", event_type.as_str()))?;
+                }
+            };
+
+            map.set(u32::from(*event_type as u8), bpf_value, 0)
+                .with_context(|| format!("updating event_sampling for {}", event_type.as_str()))?;
         }
 
         Ok(())
@@ -283,7 +293,8 @@ impl Tracer for BpfTracer {
         // NOTE: sched_on_ts and offcpu_ts are LRU maps that record timestamps
         // unconditionally for all threads. Clearing them on TID refresh would
         // lose timestamps for currently-running threads, creating on_cpu_ns=0
-        // holes. LRU eviction handles staleness automatically.
+        // holes. Thread exit cleanup in do_exit handles normal TID reuse; the
+        // LRU behavior is only a backstop for missed exits or long-idle tasks.
 
         const TRACKED_TIDS_CAPACITY: usize = 65536;
         if tids.len() > TRACKED_TIDS_CAPACITY {
@@ -752,7 +763,6 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             "kprobe_tcp_set_state",
             "tcp_set_state",
         ),
-        (ProbeGroup::ProcessExit, "kprobe_do_exit", "do_exit"),
     ];
 
     for (group, prog_name, symbol) in optional_kprobes {
@@ -762,6 +772,25 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             continue;
         }
         attach_kprobe_optional(ebpf, prog_name, symbol, &mut stats);
+    }
+
+    let process_exit_enabled = !disabled.contains(&ProbeGroup::ProcessExit);
+    if scheduler_enabled || process_exit_enabled {
+        if !process_exit_enabled && scheduler_enabled {
+            tracing::info!(
+                probe = %ProbeGroup::ProcessExit,
+                program = "kprobe_do_exit",
+                "attaching for scheduler TID cleanup; process_exit events suppressed"
+            );
+        }
+        attach_kprobe_optional(ebpf, "kprobe_do_exit", "do_exit", &mut stats);
+    } else {
+        tracing::info!(
+            probe = %ProbeGroup::ProcessExit,
+            program = "kprobe_do_exit",
+            "skipping (disabled)"
+        );
+        stats.kprobes_skipped += 1;
     }
 
     Ok(stats)

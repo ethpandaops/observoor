@@ -1473,7 +1473,13 @@ int BPF_KPROBE(kprobe_do_exit, long code)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
+    __u32 tid = (__u32)pid_tgid;
     __u8 ct;
+
+    // Always clean scheduler/TID state. sched_switch timestamps are tracked for
+    // all threads, and fast TID reuse can otherwise turn stale entries into
+    // impossible on/off-CPU durations for the next thread owner.
+    cleanup_tid_scheduler_state(tid);
 
     if (!is_tracked(pid, &ct))
         return 0;
