@@ -23,6 +23,8 @@ services:
     depends_on:
       clickhouse:
         condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     privileged: true
     pid: "host"
     command: ["--config", "/etc/observoor/config.yaml"]
