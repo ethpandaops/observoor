@@ -57,7 +57,7 @@ jobs:
 
       - name: Start ClickHouse
         run: |
-          docker compose -f e2e/cpu-accounting/docker-compose.yml up -d clickhouse
+          docker compose -f e2e/cpu-accounting/docker-compose.yml up -d --build clickhouse
 
       - name: Wait for ClickHouse
         run: |

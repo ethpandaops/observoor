@@ -1,6 +1,8 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:24-alpine
+    build:
+      context: ../..
+      dockerfile: Dockerfile.clickhouse
     ports:
       - "8123:8123"
       - "9000:9000"
