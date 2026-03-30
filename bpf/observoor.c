@@ -1183,19 +1183,34 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     }
 
     // Path B: Emit event for outgoing (prev) thread.
-    // The tracepoint's prev_pid is a TID (thread ID), not the TGID
-    // (thread group ID) we store in tracked_pids. Use the current
-    // task's TGID for the PID filter check.
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u32 tid = (__u32)pid_tgid;
+    //
+    // The tracepoint already provides prev_pid (the outgoing TID). Prefer the
+    // tracked_tids map for PID/client resolution instead of assuming
+    // bpf_get_current_pid_tgid() still refers to the outgoing task on every
+    // kernel. That assumption can drift across kernels and lead to stale
+    // sched_on_ts lookups being charged to the wrong process.
+    __u32 tid = ctx->prev_pid;
+    __u32 pid = 0;
 
-    if (!is_tracked(pid, &ct))
-        return 0;
+    struct tracked_tid_val *prev_info = lookup_tracked_tid(tid);
+    if (prev_info) {
+        pid = prev_info->pid;
+        ct = prev_info->client_type;
+    } else {
+        // Fallback for threads created between userspace TID refreshes: only
+        // trust current_pid_tgid when the kernel still reports the outgoing TID
+        // as current. Otherwise skip rather than risk misattributing CPU time.
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        if ((__u32)pid_tgid != tid)
+            return 0;
 
-    // Record off-CPU timestamp unconditionally for all threads in tracked
-    // processes. The is_tracked(pid) check above already filters by TGID.
-    // The LRU map auto-evicts stale entries from dead threads.
+        pid = pid_tgid >> 32;
+        if (!is_tracked(pid, &ct))
+            return 0;
+    }
+
+    // Record off-CPU timestamp for the outgoing tracked thread. The LRU map
+    // auto-evicts stale entries from dead threads.
     bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
 
     if (!should_emit_event(EVENT_SCHED_SWITCH))
