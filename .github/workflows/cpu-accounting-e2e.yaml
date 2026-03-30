@@ -1,8 +1,9 @@
 name: CPU Accounting E2E
 
 on:
-  pull_request:
   workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * *"
 
 jobs:
   cpu-accounting:
