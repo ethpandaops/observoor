@@ -122,8 +122,7 @@ impl SchedulerWindowState {
         let tid = event.raw.tid;
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
-                let accounted_ns =
-                    (timestamp_ns - running.running_since_ns).min(sched.on_cpu_ns);
+                let accounted_ns = (timestamp_ns - running.running_since_ns).min(sched.on_cpu_ns);
                 buf.add_cpu_on_core(
                     BasicDimension {
                         pid: running.pid,
