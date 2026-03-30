@@ -1213,6 +1213,16 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     // auto-evicts stale entries from dead threads.
     bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
 
+    // Consume sched_on_ts exactly once even if the event is sampled out or the
+    // ring buffer is temporarily full. Leaving the old start timestamp behind
+    // would make the next switch-out accumulate multiple slices into one
+    // impossible on_cpu_ns value.
+    __u64 on_cpu_ns = 0;
+    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
+    if (on_ts && *on_ts > 0 && now > *on_ts)
+        on_cpu_ns = now - *on_ts;
+    bpf_map_delete_elem(&sched_on_ts, &tid);
+
     if (!should_emit_event(EVENT_SCHED_SWITCH))
         return 0;
 
@@ -1226,15 +1236,7 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     e->hdr.event_type = EVENT_SCHED_SWITCH;
     e->hdr.client_type = ct;
     __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
-
-    // Compute on-CPU duration from sched_on_ts entry.
-    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
-    if (on_ts && *on_ts > 0 && now > *on_ts) {
-        e->on_cpu_ns = now - *on_ts;
-    } else {
-        e->on_cpu_ns = 0;
-    }
-    bpf_map_delete_elem(&sched_on_ts, &tid);
+    e->on_cpu_ns = on_cpu_ns;
 
     // prev_state > 0 means the task was preempted (involuntary),
     // prev_state == 0 means the task voluntarily yielded.
