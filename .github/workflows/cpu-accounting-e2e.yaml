@@ -55,9 +55,24 @@ jobs:
           sed "s|\${BEACON_ENDPOINT}|${{ steps.beacon.outputs.endpoint }}|g" \
             e2e/cpu-accounting/observoor.yaml.tmpl > e2e/cpu-accounting/observoor.yaml
 
-      - name: Start ClickHouse + observoor
+      - name: Start ClickHouse
         run: |
-          docker compose -f e2e/cpu-accounting/docker-compose.yml up -d --build
+          docker compose -f e2e/cpu-accounting/docker-compose.yml up -d clickhouse
+
+      - name: Wait for ClickHouse
+        run: |
+          for i in $(seq 1 60); do
+            if curl -sf "http://localhost:8123/?query=SELECT%201" >/dev/null && timeout 1 bash -lc '</dev/tcp/127.0.0.1/9000' >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "clickhouse did not become ready" >&2
+          exit 1
+
+      - name: Start observoor
+        run: |
+          docker compose -f e2e/cpu-accounting/docker-compose.yml up -d --build observoor
 
       - name: Wait for observoor health
         run: |
