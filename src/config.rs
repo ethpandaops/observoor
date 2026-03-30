@@ -300,6 +300,11 @@ pub struct AggregatedSinkConfig {
     #[serde(default)]
     pub enabled: bool,
 
+    /// Whether to collect per-process /proc snapshot tables on each flush.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub collect_process_snapshots: bool,
+
     /// Aggregation time window configuration.
     #[serde(default)]
     pub resolution: ResolutionConfig,

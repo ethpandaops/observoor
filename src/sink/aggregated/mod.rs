@@ -86,9 +86,27 @@ struct RunningThread {
 #[derive(Default)]
 struct SchedulerWindowState {
     running_by_tid: HashMap<u32, RunningThread>,
+    running_tid_by_core: HashMap<u32, u32>,
 }
 
 impl SchedulerWindowState {
+    fn remove_running_tid(&mut self, tid: u32) -> Option<RunningThread> {
+        let running = self.running_by_tid.remove(&tid)?;
+        if self.running_tid_by_core.get(&running.cpu_id) == Some(&tid) {
+            self.running_tid_by_core.remove(&running.cpu_id);
+        }
+        Some(running)
+    }
+
+    fn set_running_tid(&mut self, tid: u32, running: RunningThread) {
+        if let Some(prev) = self.running_by_tid.insert(tid, running) {
+            if self.running_tid_by_core.get(&prev.cpu_id) == Some(&tid) {
+                self.running_tid_by_core.remove(&prev.cpu_id);
+            }
+        }
+        self.running_tid_by_core.insert(running.cpu_id, tid);
+    }
+
     fn flush_running_to_boundary(&mut self, buf: &Buffer, boundary_ns: u64) {
         for running in self.running_by_tid.values_mut() {
             if boundary_ns <= running.running_since_ns {
@@ -122,6 +140,7 @@ impl SchedulerWindowState {
         let tid = event.raw.tid;
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
+                self.remove_running_tid(tid);
                 let accounted_ns = (timestamp_ns - running.running_since_ns).min(sched.on_cpu_ns);
                 buf.add_cpu_on_core(
                     BasicDimension {
@@ -131,13 +150,12 @@ impl SchedulerWindowState {
                     running.cpu_id,
                     accounted_ns,
                 );
-                self.running_by_tid.remove(&tid);
                 return;
             }
 
             // Zero-length runtime for this slice; consume the running state.
             if timestamp_ns == running.running_since_ns {
-                self.running_by_tid.remove(&tid);
+                self.remove_running_tid(tid);
                 return;
             }
 
@@ -164,7 +182,28 @@ impl SchedulerWindowState {
 
         let timestamp_ns = event.raw.timestamp_ns;
         let tid = event.raw.tid;
-        if let Some(prev) = self.running_by_tid.get_mut(&tid) {
+
+        // A core can only have one running thread at a time. If another TID is
+        // still marked on this CPU, we missed its switch-out and must evict it
+        // before tracking the new occupant.
+        if let Some(other_tid) = self.running_tid_by_core.get(&rq.cpu_id).copied() {
+            if other_tid != tid {
+                if let Some(other) = self.remove_running_tid(other_tid) {
+                    if timestamp_ns > other.running_since_ns {
+                        buf.add_cpu_on_core(
+                            BasicDimension {
+                                pid: other.pid,
+                                client_type: other.client_type,
+                            },
+                            other.cpu_id,
+                            timestamp_ns - other.running_since_ns,
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some(prev) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > prev.running_since_ns {
                 let accounted_ns =
                     (timestamp_ns - prev.running_since_ns).saturating_sub(rq.off_cpu_ns);
@@ -177,19 +216,23 @@ impl SchedulerWindowState {
                     accounted_ns,
                 );
             }
-            // Only move state forward (or replace at same instant).
+
+            // Only move state forward (or replace at the same instant).
             if timestamp_ns >= prev.running_since_ns {
-                *prev = RunningThread {
-                    pid: event.raw.pid,
-                    client_type: event.raw.client_type as u8,
-                    cpu_id: rq.cpu_id,
-                    running_since_ns: timestamp_ns,
-                };
+                self.set_running_tid(
+                    tid,
+                    RunningThread {
+                        pid: event.raw.pid,
+                        client_type: event.raw.client_type as u8,
+                        cpu_id: rq.cpu_id,
+                        running_since_ns: timestamp_ns,
+                    },
+                );
             }
             return;
         }
 
-        self.running_by_tid.insert(
+        self.set_running_tid(
             tid,
             RunningThread {
                 pid: event.raw.pid,
@@ -205,6 +248,7 @@ impl SchedulerWindowState {
         let timestamp_ns = event.raw.timestamp_ns;
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
+                self.remove_running_tid(tid);
                 buf.add_cpu_on_core(
                     BasicDimension {
                         pid: running.pid,
@@ -213,10 +257,8 @@ impl SchedulerWindowState {
                     running.cpu_id,
                     timestamp_ns - running.running_since_ns,
                 );
-            }
-
-            if timestamp_ns >= running.running_since_ns {
-                self.running_by_tid.remove(&tid);
+            } else if timestamp_ns == running.running_since_ns {
+                self.remove_running_tid(tid);
             }
         }
     }
@@ -586,7 +628,12 @@ impl Sink for AggregatedSink {
         let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collector = Collector::new_with_process_snapshots(interval, &sampling_cfg, true);
+        let collect_process_snapshots = self.cfg.collect_process_snapshots;
+        let collector = Collector::new_with_process_snapshots(
+            interval,
+            &sampling_cfg,
+            collect_process_snapshots,
+        );
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
@@ -669,7 +716,9 @@ impl Sink for AggregatedSink {
 
                         // Final flush.
                         if let Some(final_buf) = buffer.take() {
-                            scheduler_state.flush_running_to_boundary(&final_buf, monotonic_ns());
+                            let boundary_ns = monotonic_ns();
+                            scheduler_state.flush_running_to_boundary(&final_buf, boundary_ns);
+                            final_buf.mark_flushed(boundary_ns);
                             reusable_batch.metadata.updated_time = SystemTime::now();
                             collector.collect_into(&final_buf, &mut reusable_batch);
                             flush_controller.force_flush_all(&mut reusable_batch);
@@ -771,7 +820,9 @@ impl Sink for AggregatedSink {
                                 SystemTime::now(),
                                 rotation.new_slot,
                             )) {
-                                scheduler_state.flush_running_to_boundary(&old_buf, monotonic_ns());
+                                let boundary_ns = monotonic_ns();
+                                scheduler_state.flush_running_to_boundary(&old_buf, boundary_ns);
+                                old_buf.mark_flushed(boundary_ns);
                                 if rotation_tx.send(old_buf).is_err() {
                                     warn!(
                                         slot = rotation.new_slot,
@@ -836,7 +887,9 @@ impl Sink for AggregatedSink {
                         );
 
                         if let Some(old_buf) = buffer.swap(new_buf) {
-                            scheduler_state.flush_running_to_boundary(&old_buf, monotonic_ns());
+                            let boundary_ns = monotonic_ns();
+                            scheduler_state.flush_running_to_boundary(&old_buf, boundary_ns);
+                            old_buf.mark_flushed(boundary_ns);
                             reusable_batch.metadata.updated_time = SystemTime::now();
                             collector.collect_into(&old_buf, &mut reusable_batch);
                             flush_controller.process_tick(&mut reusable_batch);
@@ -2023,6 +2076,74 @@ mod tests {
             })
             .expect("second core usage");
         assert_eq!(core3.snapshot().sum, 200);
+    }
+
+    #[test]
+    fn test_scheduler_state_same_core_switch_in_evicts_stale_occupant() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        let buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let rq1 = make_event_at(
+            1_000,
+            123,
+            61,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 1_000,
+                    pid: 123,
+                    tid: 61,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 0,
+                off_cpu_ns: 0,
+                cpu_id: 2,
+            }),
+        );
+        let rq2 = make_event_at(
+            1_600,
+            123,
+            62,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 1_600,
+                    pid: 123,
+                    tid: 62,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 50,
+                off_cpu_ns: 25,
+                cpu_id: 2,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
+        AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&buf, 2_000);
+
+        let core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 2,
+            })
+            .expect("shared core usage");
+        assert_eq!(core.snapshot().sum, 1_000);
+        assert_eq!(scheduler_state.running_tid_by_core.get(&2), Some(&62));
     }
 
     #[test]

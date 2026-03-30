@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 
 use dashmap::DashMap;
@@ -18,6 +19,10 @@ use super::dimension::{
 pub struct Buffer {
     /// Start of this aggregation window.
     pub start_time: SystemTime,
+    /// Monotonic timestamp when this buffer became active.
+    start_monotonic_ns: u64,
+    /// Actual elapsed window duration, fixed when the buffer is flushed.
+    interval_ns: AtomicU64,
     /// Current wallclock slot number.
     pub wallclock_slot: u64,
     /// Start time of the current wallclock slot.
@@ -92,6 +97,8 @@ impl Buffer {
     ) -> Self {
         Self {
             start_time,
+            start_monotonic_ns: super::monotonic_ns(),
+            interval_ns: AtomicU64::new(0),
             wallclock_slot,
             wallclock_slot_start,
             cl_syncing,
@@ -138,6 +145,29 @@ impl Buffer {
             process_exit: DashMap::with_capacity(8),
             tcp_state_change: DashMap::with_capacity(8),
         }
+    }
+
+    /// Records the actual elapsed duration for this buffer at flush time.
+    pub fn mark_flushed(&self, boundary_ns: u64) {
+        let interval_ns = boundary_ns.saturating_sub(self.start_monotonic_ns);
+        if interval_ns > 0 {
+            self.interval_ns.store(interval_ns, Ordering::Relaxed);
+        }
+    }
+
+    /// Returns the flushed interval in nanoseconds, or the configured default.
+    pub fn interval_ns_or(&self, default_interval_ns: u64) -> u64 {
+        let actual = self.interval_ns.load(Ordering::Relaxed);
+        if actual > 0 {
+            actual
+        } else {
+            default_interval_ns
+        }
+    }
+
+    #[cfg(test)]
+    pub fn set_interval_ns_for_test(&self, interval_ns: u64) {
+        self.interval_ns.store(interval_ns, Ordering::Relaxed);
     }
 
     /// Adds a syscall latency event to the appropriate map.
