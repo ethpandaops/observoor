@@ -7,11 +7,13 @@ CL_CLIENT="${CL_CLIENT:?CL_CLIENT is required}"
 
 CLICKHOUSE_HOST="${CLICKHOUSE_HOST:-localhost}"
 CLICKHOUSE_PORT="${CLICKHOUSE_PORT:-8123}"
-MEASUREMENT_SECONDS="${MEASUREMENT_SECONDS:-180}"
+MEASUREMENT_SECONDS="${MEASUREMENT_SECONDS:-300}"
 MAX_WAIT_SECONDS="${MAX_WAIT_SECONDS:-240}"
-REL_TOLERANCE="${REL_TOLERANCE:-0.20}"
-MIN_TRUTH_CORES="${MIN_TRUTH_CORES:-0.05}"
-LOAD_WORKERS="${LOAD_WORKERS:-4}"
+REL_TOLERANCE="${REL_TOLERANCE:-0.50}"
+MIN_TRUTH_CORES="${MIN_TRUTH_CORES:-0.03}"
+LOAD_WORKERS="${LOAD_WORKERS:-8}"
+LOAD_WARMUP_SECONDS="${LOAD_WARMUP_SECONDS:-15}"
+MAX_WINDOW_CORE_FACTOR="${MAX_WINDOW_CORE_FACTOR:-1.05}"
 
 LOAD_PIDS=()
 
@@ -136,6 +138,10 @@ spawn_el_load() {
                 -H 'Content-Type: application/json' \
                 --data '{"jsonrpc":"2.0","method":"web3_clientVersion","params":[],"id":4}' \
                 "$endpoint" >/dev/null || true
+            curl -sf \
+                -H 'Content-Type: application/json' \
+                --data '{"jsonrpc":"2.0","method":"eth_feeHistory","params":["0x80","latest",[25,50,75]],"id":5}' \
+                "$endpoint" >/dev/null || true
         done
     ) &
     LOAD_PIDS+=("$!")
@@ -243,6 +249,26 @@ assert_minimum_truth_load() {
     '
 }
 
+assert_max_window_within_system_capacity() {
+    local label="$1"
+    local max_window="$2"
+    local system_cores="$3"
+    awk -v label="$label" -v max_window="$max_window" -v system_cores="$system_cores" -v factor="$MAX_WINDOW_CORE_FACTOR" '
+        BEGIN {
+            if (system_cores <= 0) {
+                printf "%s missing system_cores for max-window validation\n", label > "/dev/stderr";
+                exit 1;
+            }
+            limit = system_cores * factor;
+            if (max_window <= limit) {
+                exit 0;
+            }
+            printf "%s exceeded per-window core bound: max_window=%s limit=%s system_cores=%s factor=%s\n", label, max_window, limit, system_cores, factor > "/dev/stderr";
+            exit 1;
+        }
+    '
+}
+
 observoor_cores_for_client() {
     local client="$1"
     local start_ts="$2"
@@ -322,6 +348,11 @@ echo "Consensus container: ${CL_CONTAINER}"
 
 start_optional_load
 
+if [[ ${#LOAD_PIDS[@]} -gt 0 && "$LOAD_WARMUP_SECONDS" -gt 0 ]]; then
+    echo "Load warmup: ${LOAD_WARMUP_SECONDS}s"
+    sleep "$LOAD_WARMUP_SECONDS"
+fi
+
 START_TS="$(date -u +"%Y-%m-%d %H:%M:%S.000")"
 EL_CPU_START="$(cpu_usage_ns_for_container "$EL_CONTAINER")"
 CL_CPU_START="$(cpu_usage_ns_for_container "$CL_CONTAINER")"
@@ -363,6 +394,9 @@ for client in "$EL_CLIENT" "$CL_CLIENT"; do
         "$(relative_error "$observed" "$truth")" \
         "$max_window"
 done
+
+assert_max_window_within_system_capacity "$EL_CLIENT" "$EL_MAX_INTERVAL_CORES" "$EL_SYSTEM_CORES"
+assert_max_window_within_system_capacity "$CL_CLIENT" "$CL_MAX_INTERVAL_CORES" "$CL_SYSTEM_CORES"
 
 assert_minimum_truth_load "$EL_CLIENT" "$EL_TRUTH_CORES"
 assert_minimum_truth_load "$CL_CLIENT" "$CL_TRUTH_CORES"

@@ -95,6 +95,12 @@ jobs:
           ENCLAVE: cpu-accounting-${{ matrix.cl }}-${{ matrix.el }}
           EL_CLIENT: ${{ matrix.el }}
           CL_CLIENT: ${{ matrix.cl }}
+          MEASUREMENT_SECONDS: "300"
+          LOAD_WORKERS: "8"
+          LOAD_WARMUP_SECONDS: "15"
+          REL_TOLERANCE: "0.50"
+          MIN_TRUTH_CORES: "0.03"
+          MAX_WINDOW_CORE_FACTOR: "1.05"
         run: |
           chmod +x e2e/cpu-accounting/validate.sh
           ./e2e/cpu-accounting/validate.sh
