@@ -19,6 +19,18 @@ jobs:
           - el: erigon
             cl: nimbus
             params_file: e2e/cpu-accounting/network-params/nimbus-erigon.yaml
+          - el: geth
+            cl: teku
+            params_file: e2e/cpu-accounting/network-params/teku-geth.yaml
+          - el: nethermind
+            cl: lighthouse
+            params_file: e2e/cpu-accounting/network-params/lighthouse-nethermind.yaml
+          - el: besu
+            cl: nimbus
+            params_file: e2e/cpu-accounting/network-params/nimbus-besu.yaml
+          - el: reth
+            cl: nimbus
+            params_file: e2e/cpu-accounting/network-params/nimbus-reth.yaml
 
     steps:
       - name: Checkout
