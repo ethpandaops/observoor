@@ -161,12 +161,22 @@ impl SchedulerWindowState {
 
             // Out-of-order switch-out for an older slice. Keep newer running state
             // and still account this event via raw fallback.
-            buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+            buf.add_cpu_on_core(
+                dim,
+                sched.cpu_id,
+                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+            );
             return;
         }
 
-        // Fallback for missing switch-in state (startup, drops): use kernel-reported slice.
-        buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+        // Fallback for missing switch-in state (startup, drops): use the
+        // kernel-reported slice, but do not let it spill across this window's
+        // start boundary.
+        buf.add_cpu_on_core(
+            dim,
+            sched.cpu_id,
+            buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+        );
     }
 
     fn handle_sched_runqueue(&mut self, buf: &Buffer, event: &ParsedEvent) {
@@ -1801,7 +1811,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1810,6 +1820,7 @@ mod tests {
             false,
             8,
         );
+        buf.set_start_monotonic_ns_for_test(1_000);
         let switch_event = make_event_at(
             2_000,
             123,
@@ -1844,6 +1855,59 @@ mod tests {
             })
             .expect("fallback core usage");
         assert_eq!(core.snapshot().sum, 700);
+    }
+
+    #[test]
+    fn test_scheduler_state_fallback_caps_raw_slice_to_window_elapsed() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        buf.set_start_monotonic_ns_for_test(1_000);
+
+        let switch_event = make_event_at(
+            1_050,
+            123,
+            100,
+            EventType::SchedSwitch,
+            TypedEvent::Sched(SchedEvent {
+                event: Event {
+                    timestamp_ns: 1_050,
+                    pid: 123,
+                    tid: 100,
+                    event_type: EventType::SchedSwitch,
+                    client_type: ClientType::Geth,
+                },
+                on_cpu_ns: 700,
+                voluntary: true,
+                cpu_id: 1,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(
+            &buf,
+            &switch_event,
+            &dims,
+            &mut scheduler_state,
+        );
+
+        let core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 1,
+            })
+            .expect("capped fallback core usage");
+        assert_eq!(core.snapshot().sum, 50);
     }
 
     #[test]

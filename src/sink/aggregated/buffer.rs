@@ -165,9 +165,23 @@ impl Buffer {
         }
     }
 
+    /// Caps raw runtime to the time that could have elapsed inside this window.
+    pub fn cap_on_cpu_ns_to_window(&self, timestamp_ns: u64, on_cpu_ns: u64) -> u64 {
+        if timestamp_ns < self.start_monotonic_ns {
+            return on_cpu_ns;
+        }
+
+        on_cpu_ns.min(timestamp_ns.saturating_sub(self.start_monotonic_ns))
+    }
+
     #[cfg(test)]
     pub fn set_interval_ns_for_test(&self, interval_ns: u64) {
         self.interval_ns.store(interval_ns, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub fn set_start_monotonic_ns_for_test(&mut self, start_monotonic_ns: u64) {
+        self.start_monotonic_ns = start_monotonic_ns;
     }
 
     /// Adds a syscall latency event to the appropriate map.
