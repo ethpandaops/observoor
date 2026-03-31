@@ -280,9 +280,13 @@ pub struct PidConfig {
     #[serde(default)]
     pub process_names: Vec<String>,
 
-    /// Cgroup v2 path containing target processes.
+    /// Legacy single cgroup v2 path containing target processes.
     #[serde(default)]
     pub cgroup_path: String,
+
+    /// Additional cgroup v2 paths containing target processes.
+    #[serde(default)]
+    pub cgroup_paths: Vec<String>,
 }
 
 /// Data export sink configuration.
@@ -299,6 +303,11 @@ pub struct AggregatedSinkConfig {
     /// Enable the aggregated metrics sink.
     #[serde(default)]
     pub enabled: bool,
+
+    /// Whether to collect per-process /proc snapshot tables on each flush.
+    /// Default: true.
+    #[serde(default = "default_true")]
+    pub collect_process_snapshots: bool,
 
     /// Aggregation time window configuration.
     #[serde(default)]

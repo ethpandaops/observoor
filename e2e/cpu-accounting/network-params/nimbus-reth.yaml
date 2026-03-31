@@ -1,0 +1,8 @@
+participants:
+  - el_type: reth
+    cl_type: nimbus
+
+network_params:
+  seconds_per_slot: 12
+
+additional_services: []

@@ -270,6 +270,19 @@ static __always_inline struct tracked_tid_val *lookup_tracked_tid(
     return bpf_map_lookup_elem(&tracked_tids, &tid);
 }
 
+// Helper: Drop per-TID scheduler state on thread exit.
+//
+// Linux can reuse TIDs quickly under thread-heavy runtimes. Removing this
+// state eagerly prevents a newly-created thread from inheriting old scheduler
+// timestamps or stale tracked-thread metadata.
+static __always_inline void cleanup_tid_scheduler_state(__u32 tid)
+{
+    bpf_map_delete_elem(&tracked_tids, &tid);
+    bpf_map_delete_elem(&wakeup_ts, &tid);
+    bpf_map_delete_elem(&sched_on_ts, &tid);
+    bpf_map_delete_elem(&offcpu_ts, &tid);
+}
+
 // Helper: Fill common event header.
 static __always_inline void fill_header(
     struct event_header *hdr,

@@ -1183,20 +1183,45 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     }
 
     // Path B: Emit event for outgoing (prev) thread.
-    // The tracepoint's prev_pid is a TID (thread ID), not the TGID
-    // (thread group ID) we store in tracked_pids. Use the current
-    // task's TGID for the PID filter check.
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u32 tid = (__u32)pid_tgid;
+    //
+    // The tracepoint already provides prev_pid (the outgoing TID). Prefer the
+    // tracked_tids map for PID/client resolution instead of assuming
+    // bpf_get_current_pid_tgid() still refers to the outgoing task on every
+    // kernel. That assumption can drift across kernels and lead to stale
+    // sched_on_ts lookups being charged to the wrong process.
+    __u32 tid = ctx->prev_pid;
+    __u32 pid = 0;
 
-    if (!is_tracked(pid, &ct))
-        return 0;
+    struct tracked_tid_val *prev_info = lookup_tracked_tid(tid);
+    if (prev_info) {
+        pid = prev_info->pid;
+        ct = prev_info->client_type;
+    } else {
+        // Fallback for threads created between userspace TID refreshes: only
+        // trust current_pid_tgid when the kernel still reports the outgoing TID
+        // as current. Otherwise skip rather than risk misattributing CPU time.
+        __u64 pid_tgid = bpf_get_current_pid_tgid();
+        if ((__u32)pid_tgid != tid)
+            return 0;
 
-    // Record off-CPU timestamp unconditionally for all threads in tracked
-    // processes. The is_tracked(pid) check above already filters by TGID.
-    // The LRU map auto-evicts stale entries from dead threads.
+        pid = pid_tgid >> 32;
+        if (!is_tracked(pid, &ct))
+            return 0;
+    }
+
+    // Record off-CPU timestamp for the outgoing tracked thread. The LRU map
+    // auto-evicts stale entries from dead threads.
     bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
+
+    // Consume sched_on_ts exactly once even if the event is sampled out or the
+    // ring buffer is temporarily full. Leaving the old start timestamp behind
+    // would make the next switch-out accumulate multiple slices into one
+    // impossible on_cpu_ns value.
+    __u64 on_cpu_ns = 0;
+    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
+    if (on_ts && *on_ts > 0 && now > *on_ts)
+        on_cpu_ns = now - *on_ts;
+    bpf_map_delete_elem(&sched_on_ts, &tid);
 
     if (!should_emit_event(EVENT_SCHED_SWITCH))
         return 0;
@@ -1211,15 +1236,7 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     e->hdr.event_type = EVENT_SCHED_SWITCH;
     e->hdr.client_type = ct;
     __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
-
-    // Compute on-CPU duration from sched_on_ts entry.
-    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
-    if (on_ts && *on_ts > 0 && now > *on_ts) {
-        e->on_cpu_ns = now - *on_ts;
-    } else {
-        e->on_cpu_ns = 0;
-    }
-    bpf_map_delete_elem(&sched_on_ts, &tid);
+    e->on_cpu_ns = on_cpu_ns;
 
     // prev_state > 0 means the task was preempted (involuntary),
     // prev_state == 0 means the task voluntarily yielded.
@@ -1473,7 +1490,13 @@ int BPF_KPROBE(kprobe_do_exit, long code)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
+    __u32 tid = (__u32)pid_tgid;
     __u8 ct;
+
+    // Always clean scheduler/TID state. sched_switch timestamps are tracked for
+    // all threads, and fast TID reuse can otherwise turn stale entries into
+    // impossible on/off-CPU durations for the next thread owner.
+    cleanup_tid_scheduler_state(tid);
 
     if (!is_tracked(pid, &ct))
         return 0;

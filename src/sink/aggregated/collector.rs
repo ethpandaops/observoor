@@ -191,6 +191,19 @@ impl Collector {
             })
     }
 
+    fn configured_interval_ns(&self) -> u64 {
+        u64::from(self.interval_ms) * 1_000_000
+    }
+
+    fn resolved_interval_ns(&self, buf: &Buffer) -> u64 {
+        buf.interval_ns_or(self.configured_interval_ns())
+    }
+
+    fn interval_ms_from_ns(interval_ns: u64) -> u16 {
+        let interval_ms = interval_ns.div_ceil(1_000_000);
+        interval_ms.clamp(1, u64::from(u16::MAX)) as u16
+    }
+
     /// Iterates the buffer once and returns all metrics.
     pub fn collect(&self, buf: &Buffer, meta: BatchMetadata) -> MetricBatch {
         let latency_capacity = self.estimate_latency_capacity(buf);
@@ -245,9 +258,10 @@ impl Collector {
     ///
     /// Reuses existing vector allocations when capacities are sufficient.
     pub fn collect_into(&self, buf: &Buffer, batch: &mut MetricBatch) {
+        let interval_ns = self.resolved_interval_ns(buf);
         let window = WindowInfo {
             start: buf.start_time,
-            interval_ms: self.interval_ms,
+            interval_ms: Self::interval_ms_from_ns(interval_ns),
         };
 
         let slot = SlotInfo {
@@ -314,7 +328,7 @@ impl Collector {
         self.collect_disk_counters(batch, buf, window, slot);
         self.collect_tcp_gauges(batch, buf, window, slot);
         self.collect_disk_gauges(batch, buf, window, slot);
-        self.collect_cpu_utilization(batch, buf, window, slot);
+        self.collect_cpu_utilization(batch, buf, window, slot, interval_ns);
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
@@ -750,6 +764,7 @@ impl Collector {
         buf: &Buffer,
         window: WindowInfo,
         slot: SlotInfo,
+        interval_ns: u64,
     ) {
         struct CpuUtilAcc {
             active_cores: u16,
@@ -807,7 +822,7 @@ impl Collector {
             }
         }
 
-        let interval_ns = i64::from(self.interval_ms) * 1_000_000;
+        let interval_ns = i64::try_from(interval_ns).unwrap_or(i64::MAX);
         if interval_ns <= 0 {
             return;
         }
@@ -1711,6 +1726,25 @@ mod tests {
         assert_eq!(m.max_core_id, 0);
         assert!((m.mean_core_pct - 75.0).abs() < 0.0001);
         assert!((m.min_core_pct - 50.0).abs() < 0.0001);
+        assert!((m.max_core_pct - 100.0).abs() < 0.0001);
+    }
+
+    #[test]
+    fn test_collect_cpu_utilization_uses_flushed_interval() {
+        let collector = Collector::new(Duration::from_millis(100), &SamplingConfig::default());
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 123,
+            client_type: 1,
+        };
+
+        buf.add_sched_switch(dim, 300_000_000, 0);
+        buf.set_interval_ns_for_test(300_000_000);
+
+        let batch = collector.collect(&buf, test_meta());
+        let m = &batch.cpu_util[0];
+        assert_eq!(m.window.interval_ms, 300);
+        assert!((m.mean_core_pct - 100.0).abs() < 0.0001);
         assert!((m.max_core_pct - 100.0).abs() < 0.0001);
     }
 

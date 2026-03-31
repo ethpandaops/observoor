@@ -31,6 +31,7 @@ pub const DEFAULT_PROCESS_NAMES: &[&str] = &[
     "grandine",
     // Generic runtimes (client type resolved via cmdline)
     "java",
+    "dotnet",
     "node",
     "MainThread",
 ];
@@ -46,13 +47,18 @@ pub trait Discovery: Send + Sync {
 /// Composite PID discovery combining process-name and cgroup scanning.
 pub struct CompositeDiscovery {
     process_names: Vec<String>,
-    cgroup_path: String,
+    cgroup_paths: Vec<String>,
 }
 
 impl CompositeDiscovery {
     /// Create a new composite discovery from config.
     pub fn new(cfg: &PidConfig) -> Self {
-        let process_names = if cfg.process_names.is_empty() && cfg.cgroup_path.is_empty() {
+        let mut cgroup_paths = cfg.cgroup_paths.clone();
+        if !cfg.cgroup_path.is_empty() && !cgroup_paths.iter().any(|p| p == &cfg.cgroup_path) {
+            cgroup_paths.push(cfg.cgroup_path.clone());
+        }
+
+        let process_names = if cfg.process_names.is_empty() && cgroup_paths.is_empty() {
             DEFAULT_PROCESS_NAMES
                 .iter()
                 .map(|s| (*s).to_string())
@@ -63,7 +69,7 @@ impl CompositeDiscovery {
 
         Self {
             process_names,
-            cgroup_path: cfg.cgroup_path.clone(),
+            cgroup_paths,
         }
     }
 }
@@ -91,8 +97,8 @@ impl Discovery for CompositeDiscovery {
             }
         }
 
-        if !self.cgroup_path.is_empty() {
-            match discover_by_cgroup(&self.cgroup_path) {
+        for cgroup_path in &self.cgroup_paths {
+            match discover_by_cgroup(cgroup_path) {
                 Ok(pids) => {
                     for pid in pids {
                         if seen.insert(pid) {
@@ -472,7 +478,7 @@ mod tests {
 
     #[test]
     fn test_default_process_names_count() {
-        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 18);
+        assert_eq!(DEFAULT_PROCESS_NAMES.len(), 19);
     }
 
     #[test]
@@ -480,9 +486,11 @@ mod tests {
         let cfg = PidConfig {
             process_names: Vec::new(),
             cgroup_path: String::new(),
+            cgroup_paths: Vec::new(),
         };
         let disc = CompositeDiscovery::new(&cfg);
         assert_eq!(disc.process_names.len(), DEFAULT_PROCESS_NAMES.len());
+        assert!(disc.cgroup_paths.is_empty());
     }
 
     #[test]
@@ -490,10 +498,25 @@ mod tests {
         let cfg = PidConfig {
             process_names: vec!["geth".to_string(), "reth".to_string()],
             cgroup_path: String::new(),
+            cgroup_paths: Vec::new(),
         };
         let disc = CompositeDiscovery::new(&cfg);
         assert_eq!(disc.process_names.len(), 2);
         assert_eq!(disc.process_names[0], "geth");
         assert_eq!(disc.process_names[1], "reth");
+    }
+
+    #[test]
+    fn test_composite_discovery_preserves_explicit_cgroup_paths() {
+        let cfg = PidConfig {
+            process_names: Vec::new(),
+            cgroup_path: "/sys/fs/cgroup/legacy".to_string(),
+            cgroup_paths: vec!["/sys/fs/cgroup/current".to_string()],
+        };
+        let disc = CompositeDiscovery::new(&cfg);
+        assert!(disc.process_names.is_empty());
+        assert_eq!(disc.cgroup_paths.len(), 2);
+        assert_eq!(disc.cgroup_paths[0], "/sys/fs/cgroup/current");
+        assert_eq!(disc.cgroup_paths[1], "/sys/fs/cgroup/legacy");
     }
 }

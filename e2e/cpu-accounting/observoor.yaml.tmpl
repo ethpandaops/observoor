@@ -1,0 +1,85 @@
+log_level: debug
+
+meta_client_name: "cpu-accounting-e2e"
+meta_network_name: "cpu-accounting-devnet"
+
+beacon:
+  endpoint: ${BEACON_ENDPOINT}
+  timeout: 30s
+
+pid:
+  cgroup_paths:
+${TARGET_CGROUP_PATHS}
+
+ring_buffer_size: 8388608
+sync_poll_interval: 10s
+
+probes:
+  syscall_read:
+    enabled: false
+  syscall_write:
+    enabled: false
+  syscall_futex:
+    enabled: false
+  syscall_mmap:
+    enabled: false
+  syscall_epoll_wait:
+    enabled: false
+  syscall_fsync:
+    enabled: false
+  syscall_fdatasync:
+    enabled: false
+  syscall_pwrite:
+    enabled: false
+  fd_open:
+    enabled: false
+  fd_close:
+    enabled: false
+  disk_io:
+    enabled: false
+  block_merge:
+    enabled: false
+  tcp_send:
+    enabled: false
+  tcp_recv:
+    enabled: false
+  udp_send:
+    enabled: false
+  udp_recv:
+    enabled: false
+  tcp_retransmit:
+    enabled: false
+  tcp_state:
+    enabled: false
+  page_fault:
+    enabled: false
+  mem_reclaim:
+    enabled: false
+  mem_compaction:
+    enabled: false
+  swap_in:
+    enabled: false
+  swap_out:
+    enabled: false
+  oom_kill:
+    enabled: false
+
+sinks:
+  aggregated:
+    enabled: true
+    collect_process_snapshots: false
+    resolution:
+      interval: 100ms
+      slot_aligned: true
+    clickhouse:
+      enabled: true
+      endpoint: clickhouse:9000
+      database: default
+      table: aggregated_metrics
+      batch_size: 5000
+      flush_interval: 500ms
+      migrations:
+        enabled: true
+
+health:
+  addr: ":9090"
