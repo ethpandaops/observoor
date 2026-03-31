@@ -138,6 +138,7 @@ impl SchedulerWindowState {
 
         let timestamp_ns = event.raw.timestamp_ns;
         let tid = event.raw.tid;
+        let in_window = buf.contains_monotonic_timestamp(timestamp_ns);
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
                 self.remove_running_tid(tid);
@@ -160,23 +161,27 @@ impl SchedulerWindowState {
             }
 
             // Out-of-order switch-out for an older slice. Keep newer running state
-            // and still account this event via raw fallback.
-            buf.add_cpu_on_core(
-                dim,
-                sched.cpu_id,
-                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-            );
+            // only if it still belongs to this buffer's window.
+            if in_window {
+                buf.add_cpu_on_core(
+                    dim,
+                    sched.cpu_id,
+                    buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+                );
+            }
             return;
         }
 
         // Fallback for missing switch-in state (startup, drops): use the
         // kernel-reported slice, but do not let it spill across this window's
         // start boundary.
-        buf.add_cpu_on_core(
-            dim,
-            sched.cpu_id,
-            buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-        );
+        if in_window {
+            buf.add_cpu_on_core(
+                dim,
+                sched.cpu_id,
+                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+            );
+        }
     }
 
     fn handle_sched_runqueue(&mut self, buf: &Buffer, event: &ParsedEvent) {
@@ -198,6 +203,12 @@ impl SchedulerWindowState {
         // before tracking the new occupant.
         if let Some(other_tid) = self.running_tid_by_core.get(&rq.cpu_id).copied() {
             if other_tid != tid {
+                if let Some(other) = self.running_by_tid.get(&other_tid).copied() {
+                    if timestamp_ns < other.running_since_ns {
+                        return;
+                    }
+                }
+
                 if let Some(other) = self.remove_running_tid(other_tid) {
                     if timestamp_ns > other.running_since_ns {
                         buf.add_cpu_on_core(
@@ -1314,6 +1325,20 @@ mod tests {
         }
     }
 
+    fn test_buffer() -> Buffer {
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        buf.set_start_monotonic_ns_for_test(0);
+        buf
+    }
+
     #[test]
     fn test_process_event_syscall() {
         let buf = Buffer::new(
@@ -1631,15 +1656,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf1 = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf1 = test_buffer();
 
         let rq_event = make_event_at(
             1_000,
@@ -1687,15 +1704,7 @@ mod tests {
             .expect("runqueue metric");
         assert_eq!(rq.snapshot().sum, 50);
 
-        let buf2 = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf2 = test_buffer();
         scheduler_state.flush_running_to_boundary(&buf2, 1_900);
 
         let core2 = buf2
@@ -1714,15 +1723,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf1 = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf1 = test_buffer();
 
         let rq_event = make_event_at(
             10_000,
@@ -1750,15 +1751,7 @@ mod tests {
         );
         scheduler_state.flush_running_to_boundary(&buf1, 10_500);
 
-        let buf2 = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf2 = test_buffer();
         let switch_event = make_event_at(
             11_000,
             123,
@@ -1811,15 +1804,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let mut buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let mut buf = test_buffer();
         buf.set_start_monotonic_ns_for_test(1_000);
         let switch_event = make_event_at(
             2_000,
@@ -1862,15 +1847,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let mut buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let mut buf = test_buffer();
         buf.set_start_monotonic_ns_for_test(1_000);
 
         let switch_event = make_event_at(
@@ -1915,15 +1892,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf = test_buffer();
 
         let rq_event = make_event_at(
             1_000,
@@ -1993,15 +1962,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf = test_buffer();
 
         let rq1 = make_event_at(
             1_000,
@@ -2070,15 +2031,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf = test_buffer();
 
         let rq1 = make_event_at(
             1_000,
@@ -2147,15 +2100,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf = test_buffer();
 
         let rq1 = make_event_at(
             1_000,
@@ -2215,15 +2160,7 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
-        );
+        let buf = test_buffer();
 
         let rq = make_event_at(
             1_000,
@@ -2337,6 +2274,77 @@ mod tests {
             .expect("stale switch fallback usage");
         assert_eq!(fallback_core.snapshot().sum, 50);
         assert!(scheduler_state.running_by_tid.contains_key(&70));
+    }
+
+    #[test]
+    fn test_scheduler_state_stale_same_core_runqueue_does_not_evict_newer_runner() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        let buf = test_buffer();
+
+        let current_rq = make_event_at(
+            1_000,
+            123,
+            80,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 1_000,
+                    pid: 123,
+                    tid: 80,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 10,
+                off_cpu_ns: 5,
+                cpu_id: 3,
+            }),
+        );
+        let stale_other_rq = make_event_at(
+            900,
+            123,
+            81,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 900,
+                    pid: 123,
+                    tid: 81,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 1,
+                off_cpu_ns: 1,
+                cpu_id: 3,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(
+            &buf,
+            &current_rq,
+            &dims,
+            &mut scheduler_state,
+        );
+        AggregatedSink::process_event_with_scheduler_state(
+            &buf,
+            &stale_other_rq,
+            &dims,
+            &mut scheduler_state,
+        );
+        scheduler_state.flush_running_to_boundary(&buf, 1_200);
+
+        let core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 3,
+            })
+            .expect("newer runner retained");
+        assert_eq!(core.snapshot().sum, 200);
+        assert_eq!(scheduler_state.running_tid_by_core.get(&3), Some(&80));
+        assert!(scheduler_state.running_by_tid.contains_key(&80));
     }
 
     #[test]

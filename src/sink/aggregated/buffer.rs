@@ -165,12 +165,13 @@ impl Buffer {
         }
     }
 
+    /// Returns whether a timestamp belongs to this buffer's active window.
+    pub fn contains_monotonic_timestamp(&self, timestamp_ns: u64) -> bool {
+        timestamp_ns >= self.start_monotonic_ns
+    }
+
     /// Caps raw runtime to the time that could have elapsed inside this window.
     pub fn cap_on_cpu_ns_to_window(&self, timestamp_ns: u64, on_cpu_ns: u64) -> u64 {
-        if timestamp_ns < self.start_monotonic_ns {
-            return on_cpu_ns;
-        }
-
         on_cpu_ns.min(timestamp_ns.saturating_sub(self.start_monotonic_ns))
     }
 
