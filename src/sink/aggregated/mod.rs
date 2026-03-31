@@ -87,6 +87,7 @@ struct RunningThread {
 struct SchedulerWindowState {
     running_by_tid: HashMap<u32, RunningThread>,
     running_tid_by_core: HashMap<u32, u32>,
+    recovered_switch_out_by_tid: HashMap<u32, u64>,
 }
 
 impl SchedulerWindowState {
@@ -99,6 +100,7 @@ impl SchedulerWindowState {
     }
 
     fn set_running_tid(&mut self, tid: u32, running: RunningThread) {
+        self.recovered_switch_out_by_tid.remove(&tid);
         if let Some(prev) = self.running_by_tid.insert(tid, running) {
             if self.running_tid_by_core.get(&prev.cpu_id) == Some(&tid) {
                 self.running_tid_by_core.remove(&prev.cpu_id);
@@ -171,6 +173,12 @@ impl SchedulerWindowState {
             return;
         }
 
+        if let Some(recovered_ts) = self.recovered_switch_out_by_tid.remove(&tid) {
+            if timestamp_ns <= recovered_ts {
+                return;
+            }
+        }
+
         // Fallback for missing switch-in state (startup, drops): use the
         // kernel-reported slice, but do not let it spill across this window's
         // start boundary.
@@ -211,6 +219,8 @@ impl SchedulerWindowState {
                 }
 
                 if let Some(other) = self.remove_running_tid(other_tid) {
+                    self.recovered_switch_out_by_tid
+                        .insert(other_tid, timestamp_ns);
                     if timestamp_ns > other.running_since_ns {
                         buf.add_cpu_on_core(
                             BasicDimension {
@@ -272,6 +282,7 @@ impl SchedulerWindowState {
         }
 
         let tid = event.raw.tid;
+        self.recovered_switch_out_by_tid.remove(&tid);
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
                 self.remove_running_tid(tid);
@@ -2143,9 +2154,33 @@ mod tests {
                 cpu_id: 2,
             }),
         );
+        let switch1 = make_event_at(
+            1_600,
+            123,
+            61,
+            EventType::SchedSwitch,
+            TypedEvent::Sched(SchedEvent {
+                event: Event {
+                    timestamp_ns: 1_600,
+                    pid: 123,
+                    tid: 61,
+                    event_type: EventType::SchedSwitch,
+                    client_type: ClientType::Geth,
+                },
+                on_cpu_ns: 600,
+                voluntary: false,
+                cpu_id: 2,
+            }),
+        );
 
         AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
         AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
+        AggregatedSink::process_event_with_scheduler_state(
+            &buf,
+            &switch1,
+            &dims,
+            &mut scheduler_state,
+        );
         scheduler_state.flush_running_to_boundary(&buf, 2_000);
 
         let core = buf
@@ -2158,6 +2193,7 @@ mod tests {
             .expect("shared core usage");
         assert_eq!(core.snapshot().sum, 1_000);
         assert_eq!(scheduler_state.running_tid_by_core.get(&2), Some(&62));
+        assert!(scheduler_state.recovered_switch_out_by_tid.is_empty());
     }
 
     #[test]
