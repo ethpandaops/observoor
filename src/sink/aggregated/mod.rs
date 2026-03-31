@@ -130,15 +130,18 @@ impl SchedulerWindowState {
             return;
         };
 
+        let timestamp_ns = event.raw.timestamp_ns;
+        if !buf.contains_monotonic_timestamp(timestamp_ns) {
+            return;
+        }
+
         let dim = BasicDimension {
             pid: event.raw.pid,
             client_type: event.raw.client_type as u8,
         };
         buf.add_sched_on_cpu(dim, sched.on_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
         let tid = event.raw.tid;
-        let in_window = buf.contains_monotonic_timestamp(timestamp_ns);
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
                 self.remove_running_tid(tid);
@@ -161,27 +164,23 @@ impl SchedulerWindowState {
             }
 
             // Out-of-order switch-out for an older slice. Keep newer running state
-            // only if it still belongs to this buffer's window.
-            if in_window {
-                buf.add_cpu_on_core(
-                    dim,
-                    sched.cpu_id,
-                    buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-                );
-            }
+            // and still account this event via raw fallback.
+            buf.add_cpu_on_core(
+                dim,
+                sched.cpu_id,
+                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+            );
             return;
         }
 
         // Fallback for missing switch-in state (startup, drops): use the
         // kernel-reported slice, but do not let it spill across this window's
         // start boundary.
-        if in_window {
-            buf.add_cpu_on_core(
-                dim,
-                sched.cpu_id,
-                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-            );
-        }
+        buf.add_cpu_on_core(
+            dim,
+            sched.cpu_id,
+            buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
+        );
     }
 
     fn handle_sched_runqueue(&mut self, buf: &Buffer, event: &ParsedEvent) {
@@ -189,13 +188,17 @@ impl SchedulerWindowState {
             return;
         };
 
+        let timestamp_ns = event.raw.timestamp_ns;
+        if !buf.contains_monotonic_timestamp(timestamp_ns) {
+            return;
+        }
+
         let dim = BasicDimension {
             pid: event.raw.pid,
             client_type: event.raw.client_type as u8,
         };
         buf.add_sched_runqueue(dim, rq.runqueue_ns, rq.off_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
         let tid = event.raw.tid;
 
         // A core can only have one running thread at a time. If another TID is
@@ -265,8 +268,12 @@ impl SchedulerWindowState {
     }
 
     fn handle_process_exit(&mut self, buf: &Buffer, event: &ParsedEvent) {
-        let tid = event.raw.tid;
         let timestamp_ns = event.raw.timestamp_ns;
+        if !buf.contains_monotonic_timestamp(timestamp_ns) {
+            return;
+        }
+
+        let tid = event.raw.tid;
         if let Some(running) = self.running_by_tid.get(&tid).copied() {
             if timestamp_ns > running.running_since_ns {
                 self.remove_running_tid(tid);
@@ -2345,6 +2352,73 @@ mod tests {
         assert_eq!(core.snapshot().sum, 200);
         assert_eq!(scheduler_state.running_tid_by_core.get(&3), Some(&80));
         assert!(scheduler_state.running_by_tid.contains_key(&80));
+    }
+
+    #[test]
+    fn test_scheduler_state_out_of_window_switch_is_dropped() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        let mut buf = test_buffer();
+        buf.set_start_monotonic_ns_for_test(1_000);
+
+        let rq = make_event_at(
+            1_000,
+            123,
+            90,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                event: Event {
+                    timestamp_ns: 1_000,
+                    pid: 123,
+                    tid: 90,
+                    event_type: EventType::SchedRunqueue,
+                    client_type: ClientType::Geth,
+                },
+                runqueue_ns: 0,
+                off_cpu_ns: 0,
+                cpu_id: 2,
+            }),
+        );
+        let stale_switch = make_event_at(
+            950,
+            123,
+            90,
+            EventType::SchedSwitch,
+            TypedEvent::Sched(SchedEvent {
+                event: Event {
+                    timestamp_ns: 950,
+                    pid: 123,
+                    tid: 90,
+                    event_type: EventType::SchedSwitch,
+                    client_type: ClientType::Geth,
+                },
+                on_cpu_ns: 500,
+                voluntary: false,
+                cpu_id: 2,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(&buf, &rq, &dims, &mut scheduler_state);
+        AggregatedSink::process_event_with_scheduler_state(
+            &buf,
+            &stale_switch,
+            &dims,
+            &mut scheduler_state,
+        );
+        scheduler_state.flush_running_to_boundary(&buf, 1_200);
+
+        let core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension {
+                pid: 123,
+                client_type: 1,
+                cpu_id: 2,
+            })
+            .expect("current window runtime");
+        assert_eq!(core.snapshot().sum, 200);
+        assert!(buf.sched_on_cpu.is_empty());
+        assert!(scheduler_state.running_by_tid.contains_key(&90));
     }
 
     #[test]

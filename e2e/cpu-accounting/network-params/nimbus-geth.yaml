@@ -1,6 +1,7 @@
 participants:
   - el_type: geth
     cl_type: nimbus
+    validator_count: 0
 
 network_params:
   seconds_per_slot: 12

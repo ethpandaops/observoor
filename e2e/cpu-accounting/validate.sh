@@ -29,6 +29,35 @@ cleanup() {
         echo "=== Failure Context ==="
         docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}' || true
         echo ""
+        echo "Worst cpu_utilization rows by cores:"
+        query "
+            SELECT
+                window_start,
+                client_type,
+                pid,
+                round(total_on_cpu_ns / (interval_ms * 1000000.0), 6) AS window_cores,
+                total_on_cpu_ns,
+                interval_ms,
+                active_cores,
+                system_cores
+            FROM (
+                SELECT
+                    window_start,
+                    client_type,
+                    pid,
+                    argMax(total_on_cpu_ns, updated_date_time) AS total_on_cpu_ns,
+                    argMax(interval_ms, updated_date_time) AS interval_ms,
+                    argMax(active_cores, updated_date_time) AS active_cores,
+                    argMax(system_cores, updated_date_time) AS system_cores
+                FROM cpu_utilization
+                WHERE client_type IN ('$EL_CLIENT', '$CL_CLIENT')
+                GROUP BY window_start, client_type, pid
+            )
+            ORDER BY window_cores DESC
+            LIMIT 20
+            FORMAT PrettyCompact
+        " || true
+        echo ""
         echo "Recent cpu_utilization rows:"
         query "
             SELECT window_start, client_type, pid, total_on_cpu_ns, interval_ms, active_cores, system_cores

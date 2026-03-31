@@ -1,6 +1,7 @@
 participants:
   - el_type: nethermind
     cl_type: lighthouse
+    validator_count: 0
 
 network_params:
   seconds_per_slot: 12
