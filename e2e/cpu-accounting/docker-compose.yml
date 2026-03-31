@@ -33,6 +33,7 @@ services:
     volumes:
       - ./observoor.yaml:/etc/observoor/config.yaml:ro
       - /sys/kernel/debug:/sys/kernel/debug:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /sys/fs/bpf:/sys/fs/bpf
       - /proc:/proc:ro
       - /sys/kernel/btf:/sys/kernel/btf:ro

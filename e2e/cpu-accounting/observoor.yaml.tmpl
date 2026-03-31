@@ -8,28 +8,8 @@ beacon:
   timeout: 30s
 
 pid:
-  process_names:
-    # Execution layer clients
-    - geth
-    - reth
-    - besu
-    - nethermind
-    - erigon
-    - ethrex
-    # Consensus layer clients
-    - lighthouse
-    - prysm
-    - beacon-chain
-    - teku
-    - lodestar
-    - nimbus
-    - nimbus_beacon_node
-    - nimbus_beacon_n
-    # Generic runtimes resolved via cmdline
-    - java
-    - dotnet
-    - node
-    - MainThread
+  cgroup_paths:
+${TARGET_CGROUP_PATHS}
 
 ring_buffer_size: 8388608
 sync_poll_interval: 10s

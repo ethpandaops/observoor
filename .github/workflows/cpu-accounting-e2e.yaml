@@ -65,12 +65,51 @@ jobs:
 
       - name: Generate config
         run: |
+          resolve_container_name() {
+            local logical_name="$1"
+            docker ps --format '{{.Names}}' | grep "$logical_name" | head -1
+          }
+
+          resolve_cgroup_path() {
+            local container_name="$1"
+            local container_pid
+            container_pid="$(docker inspect --format '{{.State.Pid}}' "$container_name")"
+            awk -F: '$1 == "0" { print "/sys/fs/cgroup" $3; found = 1 } END { exit found ? 0 : 1 }' "/proc/${container_pid}/cgroup"
+          }
+
           BEACON_ENDPOINT_FOR_CONTAINER="${{ steps.beacon.outputs.endpoint }}"
           BEACON_ENDPOINT_FOR_CONTAINER="${BEACON_ENDPOINT_FOR_CONTAINER/127.0.0.1/host.docker.internal}"
           BEACON_ENDPOINT_FOR_CONTAINER="${BEACON_ENDPOINT_FOR_CONTAINER/localhost/host.docker.internal}"
 
-          sed "s|\${BEACON_ENDPOINT}|${BEACON_ENDPOINT_FOR_CONTAINER}|g" \
-            e2e/cpu-accounting/observoor.yaml.tmpl > e2e/cpu-accounting/observoor.yaml
+          EL_CONTAINER="$(resolve_container_name "el-1-${{ matrix.el }}-${{ matrix.cl }}")"
+          CL_CONTAINER="$(resolve_container_name "cl-1-${{ matrix.cl }}-${{ matrix.el }}")"
+          EL_CGROUP_PATH="$(resolve_cgroup_path "$EL_CONTAINER")"
+          CL_CGROUP_PATH="$(resolve_cgroup_path "$CL_CONTAINER")"
+
+          echo "EL container: ${EL_CONTAINER}"
+          echo "CL container: ${CL_CONTAINER}"
+          echo "EL cgroup: ${EL_CGROUP_PATH}"
+          echo "CL cgroup: ${CL_CGROUP_PATH}"
+
+          export BEACON_ENDPOINT_FOR_CONTAINER EL_CGROUP_PATH CL_CGROUP_PATH
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          template = Path("e2e/cpu-accounting/observoor.yaml.tmpl").read_text()
+          cgroup_lines = "\n".join(
+              f"    - {path}"
+              for path in (
+                  os.environ["EL_CGROUP_PATH"],
+                  os.environ["CL_CGROUP_PATH"],
+              )
+          )
+          rendered = (
+              template.replace("${BEACON_ENDPOINT}", os.environ["BEACON_ENDPOINT_FOR_CONTAINER"])
+              .replace("${TARGET_CGROUP_PATHS}", cgroup_lines)
+          )
+          Path("e2e/cpu-accounting/observoor.yaml").write_text(rendered)
+          PY
 
       - name: Start ClickHouse
         run: |
