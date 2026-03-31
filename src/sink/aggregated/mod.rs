@@ -163,13 +163,11 @@ impl SchedulerWindowState {
                 return;
             }
 
-            // Out-of-order switch-out for an older slice. Keep newer running state
-            // and still account this event via raw fallback.
-            buf.add_cpu_on_core(
-                dim,
-                sched.cpu_id,
-                buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-            );
+            // Out-of-order switch-out for an older slice. Keep the newer
+            // running state and drop this on-CPU contribution: the later
+            // sched_runqueue event already recovered the old slice via
+            // off_cpu_ns, so falling back to the raw payload here would count
+            // it twice.
             return;
         }
 
@@ -2271,15 +2269,14 @@ mod tests {
             .expect("carried running core usage");
         assert_eq!(carried_core.snapshot().sum, 200);
 
-        let fallback_core = buf
+        assert!(buf
             .cpu_on_core
             .get(&CpuCoreDimension {
                 pid: 123,
                 client_type: 1,
                 cpu_id: 1,
             })
-            .expect("stale switch fallback usage");
-        assert_eq!(fallback_core.snapshot().sum, 50);
+            .is_none());
         assert!(scheduler_state.running_by_tid.contains_key(&70));
     }
 
