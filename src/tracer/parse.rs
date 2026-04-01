@@ -1,8 +1,10 @@
 //! Event parsing for raw BPF ring buffer samples.
 //!
 //! Decodes byte slices from the ring buffer into typed [`ParsedEvent`] values.
-//! Length checks happen once per event payload, then fixed-width reads use
-//! unchecked unaligned loads to minimize parser overhead.
+//! Length checks happen once per event payload, then fixed-width records are
+//! decoded with single unaligned struct loads to minimize parser overhead.
+
+use std::mem::size_of;
 
 use thiserror::Error;
 
@@ -13,8 +15,128 @@ use super::event::{
     MAX_CLIENT_TYPE,
 };
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawEventHeader {
+    timestamp_ns: u64,
+    pid: u32,
+    tid: u32,
+    event_type: u8,
+    client_type: u8,
+    _pad: [u8; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSyscallPayload {
+    latency_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawDiskIOPayload {
+    latency_ns: u64,
+    bytes: u32,
+    rw: u8,
+    _pad: [u8; 3],
+    queue_depth: u32,
+    device_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawNetIOPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    direction: u8,
+    has_metrics: u8,
+    transport: u8,
+    _pad: [u8; 1],
+    srtt_us: u32,
+    cwnd: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedPayload {
+    on_cpu_ns: u64,
+    voluntary: u8,
+    _pad: [u8; 3],
+    cpu_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedRunqueuePayload {
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+    cpu_id: u32,
+    _pad: [u8; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawPageFaultPayload {
+    major: u8,
+    _pad: [u8; 7],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawBlockMergePayload {
+    bytes: u32,
+    rw: u8,
+    _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawTcpRetransmitPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    _pad: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawTcpStatePayload {
+    src_port: u16,
+    dst_port: u16,
+    new_state: u8,
+    old_state: u8,
+    _pad: [u8; 10],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawMemLatencyPayload {
+    duration_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSwapPayload {
+    pages: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawOOMKillPayload {
+    target_pid: u32,
+    _pad: [u8; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawProcessExitPayload {
+    exit_code: u32,
+    _pad: [u8; 4],
+}
+
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
-const HEADER_SIZE: usize = 24;
+const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -44,8 +166,11 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         return Err(ParseError::Truncated { size: data.len() });
     }
 
-    let event_type_raw = read_u8(data, 16);
-    let client_type_raw = read_u8(data, 17);
+    // Safety: `data.len() >= HEADER_SIZE` is checked above and the raw header
+    // layout matches the BPF event header exactly.
+    let header = unsafe { read_unaligned_struct::<RawEventHeader>(data) };
+    let event_type_raw = header.event_type;
+    let client_type_raw = header.client_type;
 
     if client_type_raw > MAX_CLIENT_TYPE as u8 {
         return Err(ParseError::UnknownClientType {
@@ -151,9 +276,9 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
     };
 
     let event = Event {
-        timestamp_ns: read_u64_le(data, 0),
-        pid: read_u32_le(data, 8),
-        tid: read_u32_le(data, 12),
+        timestamp_ns: u64::from_le(header.timestamp_ns),
+        pid: u32::from_le(header.pid),
+        tid: u32::from_le(header.tid),
         event_type,
         client_type: client_type_raw,
     };
@@ -162,44 +287,29 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
 }
 
 // ---------------------------------------------------------------------------
-// Safe byte-reading helpers (no indexing, no panics)
+// Safe fixed-record helpers (no indexing, no panics)
 // ---------------------------------------------------------------------------
 
 #[inline(always)]
-fn read_u8(data: &[u8], offset: usize) -> u8 {
-    debug_assert!(offset < data.len());
-    // Safety: callers verify payload lengths before reading fixed offsets.
-    unsafe { *data.as_ptr().add(offset) }
-}
-
-#[inline(always)]
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(read_fixed::<2>(data, offset))
-}
-
-#[inline(always)]
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(read_fixed::<4>(data, offset))
-}
-
-#[inline(always)]
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(read_fixed::<8>(data, offset))
-}
-
-#[inline(always)]
-fn read_fixed<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
-    debug_assert!(offset + N <= data.len());
-    // Safety: callers ensure `offset + N <= data.len()` via upfront payload checks.
-    unsafe { (data.as_ptr().add(offset) as *const [u8; N]).read_unaligned() }
-}
-
 fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), ParseError> {
     if data.len() < need {
         Err(ParseError::PayloadTruncated { event_name: name })
     } else {
         Ok(())
     }
+}
+
+#[inline(always)]
+unsafe fn read_unaligned_struct<T: Copy>(data: &[u8]) -> T {
+    debug_assert!(size_of::<T>() <= data.len());
+    (data.as_ptr() as *const T).read_unaligned()
+}
+
+#[inline(always)]
+fn read_payload<T: Copy>(data: &[u8], name: &'static str) -> Result<T, ParseError> {
+    ensure_payload(data, size_of::<T>(), name)?;
+    // Safety: `ensure_payload` guarantees the payload is large enough for `T`.
+    Ok(unsafe { read_unaligned_struct::<T>(data) })
 }
 
 // ---------------------------------------------------------------------------
@@ -211,36 +321,35 @@ fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), Pa
 /// The kernel emits latency-only syscall payloads so the hottest event family
 /// stays small on the ring buffer and in tracer batch handoff.
 fn parse_syscall(data: &[u8]) -> Result<SyscallEvent, ParseError> {
-    ensure_payload(data, 8, "syscall event")?;
+    let raw = read_payload::<RawSyscallPayload>(data, "syscall event")?;
     Ok(SyscallEvent {
-        latency_ns: read_u64_le(data, 0),
+        latency_ns: u64::from_le(raw.latency_ns),
     })
 }
 
 /// Disk I/O event: type 6. Payload: 24 bytes.
 fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
-    ensure_payload(data, 24, "disk IO event")?;
+    let raw = read_payload::<RawDiskIOPayload>(data, "disk IO event")?;
     Ok(DiskIOEvent {
-        latency_ns: read_u64_le(data, 0),
-        bytes: read_u32_le(data, 8),
-        rw: read_u8(data, 12),
-        // pad[3] at 13-15
-        queue_depth: read_u32_le(data, 16),
-        device_id: read_u32_le(data, 20),
+        latency_ns: u64::from_le(raw.latency_ns),
+        bytes: u32::from_le(raw.bytes),
+        rw: raw.rw,
+        queue_depth: u32::from_le(raw.queue_depth),
+        device_id: u32::from_le(raw.device_id),
     })
 }
 
 /// Net I/O event: types 7-8. Payload: 20 bytes minimum.
 fn parse_net_io(data: &[u8]) -> Result<NetIOEvent, ParseError> {
-    ensure_payload(data, 20, "net IO event")?;
-    let direction_raw = read_u8(data, 8);
+    let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
+    let direction_raw = raw.direction;
     if direction_raw > Direction::RX as u8 {
         return Err(ParseError::InvalidDirection {
             event_name: "net IO event",
             raw: direction_raw,
         });
     }
-    let transport_raw = read_u8(data, 10);
+    let transport_raw = raw.transport;
     if transport_raw > NetTransport::Udp as u8 {
         return Err(ParseError::InvalidNetTransport {
             event_name: "net IO event",
@@ -248,105 +357,104 @@ fn parse_net_io(data: &[u8]) -> Result<NetIOEvent, ParseError> {
         });
     }
     Ok(NetIOEvent {
-        bytes: read_u32_le(data, 0),
-        src_port: read_u16_le(data, 4),
-        dst_port: read_u16_le(data, 6),
+        bytes: u32::from_le(raw.bytes),
+        src_port: u16::from_le(raw.src_port),
+        dst_port: u16::from_le(raw.dst_port),
         direction: direction_raw,
         transport: transport_raw,
-        has_metrics: read_u8(data, 9) != 0,
-        // pad[1] at 11
-        srtt_us: read_u32_le(data, 12),
-        cwnd: read_u32_le(data, 16),
+        has_metrics: raw.has_metrics != 0,
+        srtt_us: u32::from_le(raw.srtt_us),
+        cwnd: u32::from_le(raw.cwnd),
     })
 }
 
 /// Scheduler context-switch event: type 9. Payload: 16 bytes.
 fn parse_sched(data: &[u8]) -> Result<SchedEvent, ParseError> {
-    ensure_payload(data, 16, "sched event")?;
+    let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
     Ok(SchedEvent {
-        on_cpu_ns: read_u64_le(data, 0),
-        voluntary: read_u8(data, 8) != 0,
-        cpu_id: read_u32_le(data, 12),
+        on_cpu_ns: u64::from_le(raw.on_cpu_ns),
+        voluntary: raw.voluntary != 0,
+        cpu_id: u32::from_le(raw.cpu_id),
     })
 }
 
 /// Scheduler runqueue/off-CPU latency event: type 16. Payload: 24 bytes.
 fn parse_sched_runqueue(data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
-    ensure_payload(data, 24, "sched runqueue event")?;
+    let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
-        runqueue_ns: read_u64_le(data, 0),
-        off_cpu_ns: read_u64_le(data, 8),
-        cpu_id: read_u32_le(data, 16),
+        runqueue_ns: u64::from_le(raw.runqueue_ns),
+        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
+        cpu_id: u32::from_le(raw.cpu_id),
     })
 }
 
 /// Page fault event: type 10. Payload: 8 bytes.
 fn parse_page_fault(data: &[u8]) -> Result<PageFaultEvent, ParseError> {
-    ensure_payload(data, 8, "page fault event")?;
+    let raw = read_payload::<RawPageFaultPayload>(data, "page fault event")?;
     Ok(PageFaultEvent {
-        major: read_u8(data, 0) != 0,
+        major: raw.major != 0,
     })
 }
 
 /// Block merge event: type 17. Payload: 8 bytes.
 fn parse_block_merge(data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
-    ensure_payload(data, 8, "block merge event")?;
+    let raw = read_payload::<RawBlockMergePayload>(data, "block merge event")?;
     Ok(BlockMergeEvent {
-        bytes: read_u32_le(data, 0),
-        rw: read_u8(data, 4),
+        bytes: u32::from_le(raw.bytes),
+        rw: raw.rw,
     })
 }
 
 /// TCP retransmit event: type 18. Payload: 16 bytes (8 meaningful + 8 pad).
 fn parse_tcp_retransmit(data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
-    ensure_payload(data, 16, "tcp retransmit event")?;
+    let raw = read_payload::<RawTcpRetransmitPayload>(data, "tcp retransmit event")?;
     Ok(TcpRetransmitEvent {
-        bytes: read_u32_le(data, 0),
-        src_port: read_u16_le(data, 4),
-        dst_port: read_u16_le(data, 6),
+        bytes: u32::from_le(raw.bytes),
+        src_port: u16::from_le(raw.src_port),
+        dst_port: u16::from_le(raw.dst_port),
     })
 }
 
 /// TCP state change event: type 19. Payload: 16 bytes (6 meaningful + 10 pad).
 fn parse_tcp_state(data: &[u8]) -> Result<TcpStateEvent, ParseError> {
-    ensure_payload(data, 16, "tcp state event")?;
+    let raw = read_payload::<RawTcpStatePayload>(data, "tcp state event")?;
     Ok(TcpStateEvent {
-        src_port: read_u16_le(data, 0),
-        dst_port: read_u16_le(data, 2),
-        new_state: read_u8(data, 4),
-        old_state: read_u8(data, 5),
+        src_port: u16::from_le(raw.src_port),
+        dst_port: u16::from_le(raw.dst_port),
+        new_state: raw.new_state,
+        old_state: raw.old_state,
     })
 }
 
 /// Memory reclaim/compaction latency event: types 20-21. Payload: 8 bytes.
 fn parse_mem_latency(data: &[u8]) -> Result<MemLatencyEvent, ParseError> {
-    ensure_payload(data, 8, "mem latency event")?;
+    let raw = read_payload::<RawMemLatencyPayload>(data, "mem latency event")?;
     Ok(MemLatencyEvent {
-        duration_ns: read_u64_le(data, 0),
+        duration_ns: u64::from_le(raw.duration_ns),
     })
 }
 
 /// Swap in/out event: types 22-23. Payload: 8 bytes.
 fn parse_swap(data: &[u8]) -> Result<SwapEvent, ParseError> {
-    ensure_payload(data, 8, "swap event")?;
+    let raw = read_payload::<RawSwapPayload>(data, "swap event")?;
     Ok(SwapEvent {
-        pages: read_u64_le(data, 0),
+        pages: u64::from_le(raw.pages),
     })
 }
 
 /// OOM kill event: type 24. Payload: 8 bytes.
 fn parse_oom_kill(data: &[u8]) -> Result<OOMKillEvent, ParseError> {
-    ensure_payload(data, 8, "oom kill event")?;
+    let raw = read_payload::<RawOOMKillPayload>(data, "oom kill event")?;
     Ok(OOMKillEvent {
-        target_pid: read_u32_le(data, 0),
+        target_pid: u32::from_le(raw.target_pid),
     })
 }
 
 /// Process exit event: type 25. Payload: 8 bytes.
 fn parse_process_exit(data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
-    ensure_payload(data, 8, "process exit event")?;
+    let raw = read_payload::<RawProcessExitPayload>(data, "process exit event")?;
     Ok(ProcessExitEvent {
-        exit_code: read_u32_le(data, 0),
+        exit_code: u32::from_le(raw.exit_code),
     })
 }
 
