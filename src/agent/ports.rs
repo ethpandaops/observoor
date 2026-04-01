@@ -1,10 +1,65 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use anyhow::Result;
+use hashbrown::HashMap as FastHashMap;
 use tracing::debug;
 
 use crate::tracer::event::{ClientType, CLIENT_TYPE_CARDINALITY};
+
+#[derive(Default)]
+struct PortKeyHasher {
+    hash: u64,
+}
+
+#[inline(always)]
+fn mix_port_key(value: u64) -> u64 {
+    value ^ value.rotate_left(25)
+}
+
+impl Hasher for PortKeyHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut folded = 0u64;
+        for (idx, byte) in bytes.iter().take(8).enumerate() {
+            folded |= u64::from(*byte) << (idx * 8);
+        }
+        self.hash = mix_port_key(folded);
+    }
+
+    #[inline(always)]
+    fn write_u16(&mut self, value: u16) {
+        self.hash = mix_port_key(u64::from(value));
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, value: u32) {
+        self.hash = mix_port_key(u64::from(value));
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, value: u64) {
+        self.hash = mix_port_key(value);
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, value: usize) {
+        self.hash = mix_port_key(value as u64);
+    }
+}
+
+type PortHashBuilder = BuildHasherDefault<PortKeyHasher>;
+type PortMap<V> = FastHashMap<u16, V, PortHashBuilder>;
+
+fn new_port_map<V>() -> PortMap<V> {
+    FastHashMap::with_hasher(PortHashBuilder::default())
+}
 
 /// Transport for a labeled service port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -172,15 +227,15 @@ fn upsert_port_label(port_labels: &mut Vec<(u16, PortLabel)>, port: u16, label: 
 /// Client-aware runtime map for semantic port labels.
 #[derive(Debug, Clone)]
 pub struct PortLabelMap {
-    by_client: [HashMap<u16, PortTransportLabels>; CLIENT_TYPE_CARDINALITY],
-    global: HashMap<u16, PortTransportLabels>,
+    by_client: [PortMap<PortTransportLabels>; CLIENT_TYPE_CARDINALITY],
+    global: PortMap<PortTransportLabels>,
 }
 
 impl Default for PortLabelMap {
     fn default() -> Self {
         Self {
-            by_client: std::array::from_fn(|_| HashMap::new()),
-            global: HashMap::new(),
+            by_client: std::array::from_fn(|_| new_port_map()),
+            global: new_port_map(),
         }
     }
 }
