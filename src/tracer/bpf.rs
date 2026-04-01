@@ -361,6 +361,7 @@ async fn read_loop(
 
     let mut event_count: u32 = 0;
     let mut parsed_batch = ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE);
+    let single_batch_handler_only = event_handlers.is_empty() && event_batch_handlers.len() == 1;
 
     loop {
         tokio::select! {
@@ -377,54 +378,97 @@ async fn read_loop(
 
                 // Drain all available events.
                 let rb = guard.get_inner_mut();
-                while let Some(item) = rb.next() {
-                    let data: &[u8] = &item;
+                if single_batch_handler_only {
+                    let handler = event_batch_handlers
+                        .first_mut()
+                        .expect("single_batch_handler_only requires exactly one batch handler");
 
-                    // Empty record indicates ring buffer overflow.
-                    if data.is_empty() {
-                        tracing::warn!("ring buffer overflow detected");
-                        continue;
-                    }
+                    while let Some(item) = rb.next() {
+                        let data: &[u8] = &item;
 
-                    event_count += 1;
-                    if event_count >= STATS_INTERVAL {
-                        let stats = RingbufStats {
-                            used_bytes: 0, // aya does not expose remaining/capacity
-                            size_bytes: ring_buf_size as usize,
-                        };
-                        for handler in stats_handlers.iter() {
-                            handler(stats);
+                        // Empty record indicates ring buffer overflow.
+                        if data.is_empty() {
+                            tracing::warn!("ring buffer overflow detected");
+                            continue;
                         }
-                        event_count = 0;
-                    }
 
-                    match parse_event(data) {
-                        Ok(event) => {
-                            if event_batch_handlers.is_empty() {
-                                dispatch_event(event, &mut event_handlers);
-                            } else {
+                        event_count += 1;
+                        if event_count >= STATS_INTERVAL {
+                            let stats = RingbufStats {
+                                used_bytes: 0, // aya does not expose remaining/capacity
+                                size_bytes: ring_buf_size as usize,
+                            };
+                            for stats_handler in stats_handlers.iter() {
+                                stats_handler(stats);
+                            }
+                            event_count = 0;
+                        }
+
+                        match parse_event(data) {
+                            Ok(event) => {
                                 parsed_batch.push(event);
                                 if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
-                                    dispatch_event_batch(
-                                        &mut parsed_batch,
-                                        &mut event_handlers,
-                                        &mut event_batch_handlers,
-                                    );
+                                    dispatch_single_event_batch_handler(&mut parsed_batch, handler);
                                 }
                             }
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "event parse error");
-                            report_parse_error(&error_handlers, &e);
+                            Err(e) => {
+                                tracing::debug!(error = %e, "event parse error");
+                                report_parse_error(&error_handlers, &e);
+                            }
                         }
                     }
-                }
 
-                dispatch_event_batch(
-                    &mut parsed_batch,
-                    &mut event_handlers,
-                    &mut event_batch_handlers,
-                );
+                    dispatch_single_event_batch_handler(&mut parsed_batch, handler);
+                } else {
+                    while let Some(item) = rb.next() {
+                        let data: &[u8] = &item;
+
+                        // Empty record indicates ring buffer overflow.
+                        if data.is_empty() {
+                            tracing::warn!("ring buffer overflow detected");
+                            continue;
+                        }
+
+                        event_count += 1;
+                        if event_count >= STATS_INTERVAL {
+                            let stats = RingbufStats {
+                                used_bytes: 0, // aya does not expose remaining/capacity
+                                size_bytes: ring_buf_size as usize,
+                            };
+                            for stats_handler in stats_handlers.iter() {
+                                stats_handler(stats);
+                            }
+                            event_count = 0;
+                        }
+
+                        match parse_event(data) {
+                            Ok(event) => {
+                                if event_batch_handlers.is_empty() {
+                                    dispatch_event(event, &mut event_handlers);
+                                } else {
+                                    parsed_batch.push(event);
+                                    if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
+                                        dispatch_event_batch(
+                                            &mut parsed_batch,
+                                            &mut event_handlers,
+                                            &mut event_batch_handlers,
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "event parse error");
+                                report_parse_error(&error_handlers, &e);
+                            }
+                        }
+                    }
+
+                    dispatch_event_batch(
+                        &mut parsed_batch,
+                        &mut event_handlers,
+                        &mut event_batch_handlers,
+                    );
+                }
                 guard.clear_ready();
             }
         }
@@ -489,6 +533,21 @@ fn dispatch_event_batch(
             }
         }
     }
+}
+
+#[inline(always)]
+fn dispatch_single_event_batch_handler(
+    parsed_batch: &mut ParsedEventBatch,
+    handler: &mut EventBatchHandler,
+) {
+    if parsed_batch.is_empty() {
+        return;
+    }
+
+    handler(std::mem::replace(
+        parsed_batch,
+        ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE),
+    ));
 }
 
 fn report_error(handlers: &[ErrorHandler], err: &std::io::Error) {
