@@ -51,6 +51,7 @@ static __always_inline __u32 sectors_to_bytes(__u32 nr_sector)
 SEC("tracepoint/syscalls/sys_enter_read")
 int trace_sys_enter_read(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -61,7 +62,7 @@ int trace_sys_enter_read(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -71,12 +72,6 @@ SEC("tracepoint/syscalls/sys_exit_read")
 int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -90,7 +85,7 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_READ, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_READ, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -104,6 +99,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_write")
 int trace_sys_enter_write(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -114,7 +110,7 @@ int trace_sys_enter_write(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -124,12 +120,6 @@ SEC("tracepoint/syscalls/sys_exit_write")
 int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -143,7 +133,7 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_WRITE, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_WRITE, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -157,6 +147,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_futex")
 int trace_sys_enter_futex(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -167,7 +158,7 @@ int trace_sys_enter_futex(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = 0,
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -177,12 +168,6 @@ SEC("tracepoint/syscalls/sys_exit_futex")
 int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -196,7 +181,7 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -210,6 +195,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_mmap")
 int trace_sys_enter_mmap(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -220,7 +206,7 @@ int trace_sys_enter_mmap(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = 0,
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -230,12 +216,6 @@ SEC("tracepoint/syscalls/sys_exit_mmap")
 int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -249,7 +229,7 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_MMAP, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_MMAP, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -263,6 +243,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_epoll_wait")
 int trace_sys_enter_epoll_wait(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -273,7 +254,7 @@ int trace_sys_enter_epoll_wait(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -283,12 +264,6 @@ SEC("tracepoint/syscalls/sys_exit_epoll_wait")
 int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -302,7 +277,7 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -316,6 +291,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_fsync")
 int trace_sys_enter_fsync(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -326,7 +302,7 @@ int trace_sys_enter_fsync(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -336,12 +312,6 @@ SEC("tracepoint/syscalls/sys_exit_fsync")
 int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -355,7 +325,7 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -369,6 +339,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_fdatasync")
 int trace_sys_enter_fdatasync(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -379,7 +350,7 @@ int trace_sys_enter_fdatasync(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -389,12 +360,6 @@ SEC("tracepoint/syscalls/sys_exit_fdatasync")
 int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -408,7 +373,7 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);
@@ -422,6 +387,7 @@ cleanup:
 SEC("tracepoint/syscalls/sys_enter_pwrite64")
 int trace_sys_enter_pwrite64(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -432,7 +398,7 @@ int trace_sys_enter_pwrite64(struct trace_event_raw_sys_enter *ctx)
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val val = {
         .ts = bpf_ktime_get_ns(),
-        .fd = (int)ctx->args[0],
+        .client_type = ct,
     };
     bpf_map_update_elem(&syscall_start, &key, &val, BPF_ANY);
     return 0;
@@ -442,12 +408,6 @@ SEC("tracepoint/syscalls/sys_exit_pwrite64")
 int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
@@ -461,7 +421,7 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         goto cleanup;
 
-    fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, ct);
+    fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, val->client_type);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
 
     bpf_ringbuf_submit(e, 0);

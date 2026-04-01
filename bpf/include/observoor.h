@@ -168,8 +168,8 @@ struct syscall_key {
 // Syscall entry value.
 struct syscall_val {
     __u64 ts;
-    __s32 fd;
-    __u32 pad;
+    __u8  client_type;
+    __u8  pad[7];
 };
 
 // Block I/O request tracking.
