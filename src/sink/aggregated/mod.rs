@@ -88,8 +88,7 @@ struct SlotRotation {
 
 #[derive(Clone, Copy, Debug)]
 struct RunningThread {
-    pid: u32,
-    client_type: u8,
+    dim: BasicDimension,
     cpu_id: u32,
     running_since_ns: u64,
 }
@@ -113,30 +112,27 @@ impl SchedulerWindowState {
                 continue;
             }
             let delta_ns = boundary_ns - running.running_since_ns;
-            buf.add_cpu_on_core(
-                BasicDimension::new(running.pid, running.client_type),
-                running.cpu_id,
-                delta_ns,
-            );
+            buf.add_cpu_on_core(running.dim, running.cpu_id, delta_ns);
             running.running_since_ns = boundary_ns;
         }
     }
 
-    fn handle_sched_switch(&mut self, buf: &mut Buffer, event: &ParsedEvent) {
-        let TypedEvent::Sched(sched) = &event.typed else {
-            return;
-        };
-
-        let dim = BasicDimension::new(event.raw.pid, event.raw.client_type);
+    fn handle_sched_switch(
+        &mut self,
+        buf: &mut Buffer,
+        tid: u32,
+        timestamp_ns: u64,
+        dim: BasicDimension,
+        sched: &crate::tracer::event::SchedEvent,
+    ) {
         buf.add_sched_on_cpu(dim, sched.on_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
-        match self.running_by_tid.entry(event.raw.tid) {
+        match self.running_by_tid.entry(tid) {
             Entry::Occupied(entry) => {
                 let running = *entry.get();
                 if timestamp_ns > running.running_since_ns {
                     buf.add_cpu_on_core(
-                        BasicDimension::new(running.pid, running.client_type),
+                        running.dim,
                         running.cpu_id,
                         timestamp_ns - running.running_since_ns,
                     );
@@ -162,28 +158,28 @@ impl SchedulerWindowState {
         }
     }
 
-    fn handle_sched_runqueue(&mut self, buf: &mut Buffer, event: &ParsedEvent) {
-        let TypedEvent::SchedRunqueue(rq) = &event.typed else {
-            return;
-        };
-
-        let dim = BasicDimension::new(event.raw.pid, event.raw.client_type);
+    fn handle_sched_runqueue(
+        &mut self,
+        buf: &mut Buffer,
+        tid: u32,
+        timestamp_ns: u64,
+        dim: BasicDimension,
+        rq: &crate::tracer::event::SchedRunqueueEvent,
+    ) {
         buf.add_sched_runqueue(dim, rq.runqueue_ns, rq.off_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
         let next_running = RunningThread {
-            pid: event.raw.pid,
-            client_type: event.raw.client_type,
+            dim,
             cpu_id: rq.cpu_id,
             running_since_ns: timestamp_ns,
         };
 
-        match self.running_by_tid.entry(event.raw.tid) {
+        match self.running_by_tid.entry(tid) {
             Entry::Occupied(mut entry) => {
                 let prev = entry.get_mut();
                 if timestamp_ns > prev.running_since_ns {
                     buf.add_cpu_on_core(
-                        BasicDimension::new(prev.pid, prev.client_type),
+                        prev.dim,
                         prev.cpu_id,
                         timestamp_ns - prev.running_since_ns,
                     );
@@ -199,14 +195,13 @@ impl SchedulerWindowState {
         }
     }
 
-    fn handle_process_exit(&mut self, buf: &mut Buffer, event: &ParsedEvent) {
-        let timestamp_ns = event.raw.timestamp_ns;
-        match self.running_by_tid.entry(event.raw.tid) {
+    fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
+        match self.running_by_tid.entry(tid) {
             Entry::Occupied(entry) => {
                 let running = *entry.get();
                 if timestamp_ns > running.running_since_ns {
                     buf.add_cpu_on_core(
-                        BasicDimension::new(running.pid, running.client_type),
+                        running.dim,
                         running.cpu_id,
                         timestamp_ns - running.running_since_ns,
                     );
@@ -502,26 +497,32 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
+                let dim = BasicDimension::new(pid, client_type);
                 if let Some(scheduler_state) = scheduler_state {
-                    scheduler_state.handle_sched_switch(buf, event);
-                } else {
-                    buf.add_sched_switch(
-                        BasicDimension::new(pid, client_type),
-                        e.on_cpu_ns,
-                        e.cpu_id,
+                    scheduler_state.handle_sched_switch(
+                        buf,
+                        event.raw.tid,
+                        event.raw.timestamp_ns,
+                        dim,
+                        e,
                     );
+                } else {
+                    buf.add_sched_switch(dim, e.on_cpu_ns, e.cpu_id);
                 }
             }
 
             TypedEvent::SchedRunqueue(e) => {
+                let dim = BasicDimension::new(pid, client_type);
                 if let Some(scheduler_state) = scheduler_state {
-                    scheduler_state.handle_sched_runqueue(buf, event);
-                } else {
-                    buf.add_sched_runqueue(
-                        BasicDimension::new(pid, client_type),
-                        e.runqueue_ns,
-                        e.off_cpu_ns,
+                    scheduler_state.handle_sched_runqueue(
+                        buf,
+                        event.raw.tid,
+                        event.raw.timestamp_ns,
+                        dim,
+                        e,
                     );
+                } else {
+                    buf.add_sched_runqueue(dim, e.runqueue_ns, e.off_cpu_ns);
                 }
             }
 
@@ -558,9 +559,10 @@ impl AggregatedSink {
             }
 
             TypedEvent::ProcessExit(_) => {
-                buf.add_process_exit(BasicDimension::new(pid, client_type));
+                let dim = BasicDimension::new(pid, client_type);
+                buf.add_process_exit(dim);
                 if let Some(scheduler_state) = scheduler_state {
-                    scheduler_state.handle_process_exit(buf, event);
+                    scheduler_state.handle_process_exit(buf, event.raw.tid, event.raw.timestamp_ns);
                 }
             }
         }
