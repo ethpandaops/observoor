@@ -53,6 +53,11 @@ impl CpuCoreDimension {
     }
 
     #[inline(always)]
+    pub fn from_basic(basic: BasicDimension, cpu_id: u32) -> Self {
+        Self(u128::from(basic.0) | (u128::from(cpu_id) << 40))
+    }
+
+    #[inline(always)]
     pub fn pid(self) -> u32 {
         self.0 as u32
     }
@@ -255,6 +260,15 @@ mod tests {
         assert_eq!(dim.pid(), 100);
         assert_eq!(dim.client_type(), 1);
         assert_eq!(dim.cpu_id(), 7);
+    }
+
+    #[test]
+    fn test_cpu_core_dimension_from_basic_matches_new() {
+        let basic = BasicDimension::new(100, 1);
+        assert_eq!(
+            CpuCoreDimension::from_basic(basic, 7),
+            CpuCoreDimension::new(100, 1, 7)
+        );
     }
 
     #[test]

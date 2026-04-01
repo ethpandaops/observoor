@@ -252,7 +252,7 @@ impl Buffer {
     /// Adds per-core on-CPU time used for utilization aggregation.
     pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
         self.cpu_on_core
-            .entry(CpuCoreDimension::new(dim.pid(), dim.client_type(), cpu_id))
+            .entry(CpuCoreDimension::from_basic(dim, cpu_id))
             .or_default()
             .add(on_cpu_ns as i64);
     }
