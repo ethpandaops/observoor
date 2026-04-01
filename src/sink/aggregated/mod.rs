@@ -687,7 +687,14 @@ impl Sink for AggregatedSink {
         let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collector = Collector::new_with_process_snapshots(interval, &sampling_cfg, true);
+        // Keep parse + aggregate collection running even with no exporters, but
+        // avoid /proc snapshot reads when nothing can consume those metrics.
+        let collect_process_snapshots = !exporters.is_empty();
+        let collector = Collector::new_with_process_snapshots(
+            interval,
+            &sampling_cfg,
+            collect_process_snapshots,
+        );
         let mut flush_controller = TieredFlushController::new(interval, &resolution_overrides);
         let meta_client_name = Arc::clone(&self.meta_client_name);
         let meta_network_name = Arc::clone(&self.meta_network_name);
