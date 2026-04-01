@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use hashbrown::hash_map::Entry;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -27,7 +26,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
 use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
-use self::buffer::{fast_map_with_capacity, Buffer, FastMap};
+use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
@@ -92,21 +91,61 @@ struct RunningThread {
     running_since_ns: u64,
 }
 
+#[derive(Default)]
+struct RunningThreadStore {
+    entries: Vec<(u32, RunningThread)>,
+}
+
+impl RunningThreadStore {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: Vec::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    fn find_index(&self, tid: u32) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|(running_tid, _)| *running_tid == tid)
+    }
+
+    #[inline(always)]
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut RunningThread> {
+        self.entries.iter_mut().map(|(_, running)| running)
+    }
+
+    #[cfg(test)]
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    #[cfg(test)]
+    #[inline(always)]
+    fn contains_tid(&self, tid: u32) -> bool {
+        self.find_index(tid).is_some()
+    }
+}
+
 struct SchedulerWindowState {
-    running_by_tid: FastMap<u32, RunningThread>,
+    running_by_tid: RunningThreadStore,
 }
 
 impl Default for SchedulerWindowState {
     fn default() -> Self {
         Self {
-            running_by_tid: fast_map_with_capacity(256),
+            // This state only tracks currently running threads, so cardinality
+            // stays bounded by the number of active cores rather than total TIDs.
+            running_by_tid: RunningThreadStore::with_capacity(64),
         }
     }
 }
 
 impl SchedulerWindowState {
     fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
-        for running in self.running_by_tid.values_mut() {
+        for running in self.running_by_tid.iter_mut() {
             if boundary_ns <= running.running_since_ns {
                 continue;
             }
@@ -126,34 +165,31 @@ impl SchedulerWindowState {
     ) {
         buf.add_sched_on_cpu(dim, sched.on_cpu_ns);
 
-        match self.running_by_tid.entry(tid) {
-            Entry::Occupied(entry) => {
-                let running = *entry.get();
-                if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core(
-                        running.dim,
-                        running.cpu_id,
-                        timestamp_ns - running.running_since_ns,
-                    );
-                    entry.remove();
-                    return;
-                }
-
-                // Zero-length runtime for this slice; consume the running state.
-                if timestamp_ns == running.running_since_ns {
-                    entry.remove();
-                    return;
-                }
-
-                // Out-of-order switch-out for an older slice. Keep newer running state
-                // and still account this event via raw fallback.
-                buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+        if let Some(idx) = self.running_by_tid.find_index(tid) {
+            let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
+            if timestamp_ns > running.running_since_ns {
+                buf.add_cpu_on_core(
+                    running.dim,
+                    running.cpu_id,
+                    timestamp_ns - running.running_since_ns,
+                );
+                self.running_by_tid.entries.swap_remove(idx);
+                return;
             }
-            Entry::Vacant(_) => {
-                // Fallback for missing switch-in state (startup, drops): use
-                // kernel-reported slice.
-                buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+
+            // Zero-length runtime for this slice; consume the running state.
+            if timestamp_ns == running.running_since_ns {
+                self.running_by_tid.entries.swap_remove(idx);
+                return;
             }
+
+            // Out-of-order switch-out for an older slice. Keep newer running state
+            // and still account this event via raw fallback.
+            buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+        } else {
+            // Fallback for missing switch-in state (startup, drops): use
+            // kernel-reported slice.
+            buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
         }
     }
 
@@ -173,44 +209,36 @@ impl SchedulerWindowState {
             running_since_ns: timestamp_ns,
         };
 
-        match self.running_by_tid.entry(tid) {
-            Entry::Occupied(mut entry) => {
-                let prev = entry.get_mut();
-                if timestamp_ns > prev.running_since_ns {
-                    buf.add_cpu_on_core(
-                        prev.dim,
-                        prev.cpu_id,
-                        timestamp_ns - prev.running_since_ns,
-                    );
-                }
-                // Only move state forward (or replace at same instant).
-                if timestamp_ns >= prev.running_since_ns {
-                    *prev = next_running;
+        if let Some(idx) = self.running_by_tid.find_index(tid) {
+            let prev = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
+            if timestamp_ns > prev.running_since_ns {
+                buf.add_cpu_on_core(prev.dim, prev.cpu_id, timestamp_ns - prev.running_since_ns);
+            }
+            // Only move state forward (or replace at same instant).
+            if timestamp_ns >= prev.running_since_ns {
+                unsafe {
+                    self.running_by_tid.entries.get_unchecked_mut(idx).1 = next_running;
                 }
             }
-            Entry::Vacant(entry) => {
-                entry.insert(next_running);
-            }
+        } else {
+            self.running_by_tid.entries.push((tid, next_running));
         }
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
-        match self.running_by_tid.entry(tid) {
-            Entry::Occupied(entry) => {
-                let running = *entry.get();
-                if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core(
-                        running.dim,
-                        running.cpu_id,
-                        timestamp_ns - running.running_since_ns,
-                    );
-                }
-
-                if timestamp_ns >= running.running_since_ns {
-                    entry.remove();
-                }
+        if let Some(idx) = self.running_by_tid.find_index(tid) {
+            let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
+            if timestamp_ns > running.running_since_ns {
+                buf.add_cpu_on_core(
+                    running.dim,
+                    running.cpu_id,
+                    timestamp_ns - running.running_since_ns,
+                );
             }
-            Entry::Vacant(_) => {}
+
+            if timestamp_ns >= running.running_since_ns {
+                self.running_by_tid.entries.swap_remove(idx);
+            }
         }
     }
 }
@@ -1992,7 +2020,7 @@ mod tests {
             .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("stale switch fallback usage");
         assert_eq!(fallback_core.snapshot().sum, 50);
-        assert!(scheduler_state.running_by_tid.contains_key(&70));
+        assert!(scheduler_state.running_by_tid.contains_tid(70));
     }
 
     #[test]
