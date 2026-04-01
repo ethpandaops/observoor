@@ -29,9 +29,9 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          # workflow_dispatch fallback: compare against previous commit.
+          # Always compare against master (the PR base or origin/master for manual runs).
           if [ -z "${BASE_SHA:-}" ]; then
-            BASE_SHA="$(git rev-parse "${HEAD_SHA}~1")"
+            BASE_SHA="$(git rev-parse origin/master)"
           fi
           echo "base=${BASE_SHA}" >> "$GITHUB_OUTPUT"
           echo "head=${HEAD_SHA}" >> "$GITHUB_OUTPUT"

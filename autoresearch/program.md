@@ -416,8 +416,24 @@ Key cost centers (from Criterion benchmarks):
 
 ---
 
-**True cumulative (multiplicative): ~73.7% reduction. ~26.3% of original CPU.**
-**42 kept iterations.**
+### Iteration 45: Pre-pack all remaining dimension keys (2026-04-01)
+- **Hypothesis**: CpuCoreDimension, NetworkDimension, etc still recomputed packing.
+- **Change**: All dimension types now store pre-packed integers.
+- **Result**: 12.51s vs 13.19s baseline = **-5.16% improvement**
+- **Verdict**: KEPT
+- **Commit**: 7e677d2
+
+---
+
+**NOTE**: Per-iteration deltas above were measured on different CI runners with
+different CPU hardware, so the multiplicative cumulative is unreliable. The
+benchmark now always compares HEAD against master on the same runner.
+
+**Last measured total vs master (same runner): -4.09%**
+This is the real end-to-end number. Individual iterations showed real improvements
+but the absolute magnitude varies significantly by runner hardware.
+
+**43 kept iterations.**
 
 ## Rules
 
