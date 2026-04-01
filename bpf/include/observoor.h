@@ -85,13 +85,11 @@ struct net_io_metrics_event {
     __u32 snd_cwnd;     // Congestion window
 };
 
-// Scheduler event (40 bytes total).
+// Scheduler event (32 bytes total).
+// voluntary is stored in hdr.pad[0], cpu_id in hdr.pad[1..4] (little-endian).
 struct sched_event {
     struct event_header hdr;
     __u64 on_cpu_ns;
-    __u8  voluntary;
-    __u8  pad[3];
-    __u32 cpu_id;
 };
 
 // Page fault event (24 bytes total).
@@ -105,13 +103,12 @@ struct fd_event {
     struct event_header hdr;
 };
 
-// Scheduler runqueue event (48 bytes total).
+// Scheduler runqueue event (40 bytes total).
+// cpu_id is stored in hdr.pad[0..3] (little-endian).
 struct sched_runqueue_event {
     struct event_header hdr;
     __u64 runqueue_ns;
     __u64 off_cpu_ns;
-    __u32 cpu_id;
-    __u8  pad[4];
 };
 
 // Block merge event (32 bytes total).

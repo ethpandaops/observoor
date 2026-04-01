@@ -64,9 +64,6 @@ struct RawNetIOMetricsPayload {
 #[derive(Clone, Copy)]
 struct RawSchedPayload {
     on_cpu_ns: u64,
-    voluntary: u8,
-    _pad: [u8; 3],
-    cpu_id: u32,
 }
 
 #[repr(C)]
@@ -74,8 +71,6 @@ struct RawSchedPayload {
 struct RawSchedRunqueuePayload {
     runqueue_ns: u64,
     off_cpu_ns: u64,
-    cpu_id: u32,
-    _pad: [u8; 4],
 }
 
 #[repr(C)]
@@ -210,7 +205,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         ),
         9 => (
             EventType::SchedSwitch,
-            TypedEvent::Sched(parse_sched(payload)?),
+            TypedEvent::Sched(parse_sched(&header, payload)?),
         ),
         10 => (
             EventType::PageFault,
@@ -232,7 +227,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         ),
         16 => (
             EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(parse_sched_runqueue(payload)?),
+            TypedEvent::SchedRunqueue(parse_sched_runqueue(&header, payload)?),
         ),
         17 => (
             EventType::BlockMerge,
@@ -311,6 +306,17 @@ fn read_payload<T: Copy>(data: &[u8], name: &'static str) -> Result<T, ParseErro
     Ok(unsafe { read_unaligned_struct::<T>(data) })
 }
 
+#[inline(always)]
+fn decode_u32_from_pad(pad: &[u8; 6], offset: usize) -> u32 {
+    debug_assert!(offset <= 2);
+    u32::from_le_bytes([
+        pad[offset],
+        pad[offset + 1],
+        pad[offset + 2],
+        pad[offset + 3],
+    ])
+}
+
 // ---------------------------------------------------------------------------
 // Per-event-type parsers
 // ---------------------------------------------------------------------------
@@ -376,23 +382,28 @@ fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
     })
 }
 
-/// Scheduler context-switch event: type 9. Payload: 16 bytes.
-fn parse_sched(data: &[u8]) -> Result<SchedEvent, ParseError> {
+/// Scheduler context-switch event: type 9. Payload: 8 bytes.
+/// voluntary is stored in `hdr.pad[0]`, cpu_id in `hdr.pad[1..4]`.
+fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, ParseError> {
     let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
     Ok(SchedEvent {
         on_cpu_ns: u64::from_le(raw.on_cpu_ns),
-        voluntary: raw.voluntary != 0,
-        cpu_id: u32::from_le(raw.cpu_id),
+        voluntary: header.pad[0] != 0,
+        cpu_id: decode_u32_from_pad(&header.pad, 1),
     })
 }
 
-/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 24 bytes.
-fn parse_sched_runqueue(data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
+/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 16 bytes.
+/// cpu_id is stored in `hdr.pad[0..3]`.
+fn parse_sched_runqueue(
+    header: &RawEventHeader,
+    data: &[u8],
+) -> Result<SchedRunqueueEvent, ParseError> {
     let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
         runqueue_ns: u64::from_le(raw.runqueue_ns),
         off_cpu_ns: u64::from_le(raw.off_cpu_ns),
-        cpu_id: u32::from_le(raw.cpu_id),
+        cpu_id: decode_u32_from_pad(&header.pad, 0),
     })
 }
 
@@ -474,6 +485,8 @@ fn parse_process_exit(data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
 mod tests {
     use super::*;
 
+    const HEADER_PAD_OFFSET: usize = HEADER_SIZE - 6;
+
     /// Build a 24-byte event header.
     fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u8> {
         let mut buf = Vec::with_capacity(HEADER_SIZE);
@@ -484,6 +497,11 @@ mod tests {
         buf.push(client_type);
         buf.extend_from_slice(&[0u8; 6]); // pad
         buf
+    }
+
+    fn set_header_pad_u32(data: &mut [u8], offset: usize, value: u32) {
+        data[HEADER_PAD_OFFSET + offset..HEADER_PAD_OFFSET + offset + 4]
+            .copy_from_slice(&value.to_le_bytes());
     }
 
     fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
@@ -698,9 +716,8 @@ mod tests {
     fn test_sched_switch_voluntary() {
         let mut data = header(6_000_000, 105, 205, 9, 6); // SchedSwitch, Prysm
         data.extend_from_slice(&100_000u64.to_le_bytes());
-        data.push(1); // voluntary
-        data.extend_from_slice(&[0u8; 3]);
-        data.extend_from_slice(&9u32.to_le_bytes());
+        data[HEADER_PAD_OFFSET] = 1; // voluntary
+        set_header_pad_u32(&mut data, 1, 9);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
@@ -715,9 +732,7 @@ mod tests {
     fn test_sched_switch_involuntary() {
         let mut data = header(6_000_000, 105, 205, 9, 6);
         data.extend_from_slice(&200_000u64.to_le_bytes());
-        data.push(0); // involuntary
-        data.extend_from_slice(&[0u8; 3]);
-        data.extend_from_slice(&15u32.to_le_bytes());
+        set_header_pad_u32(&mut data, 1, 15);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
@@ -733,8 +748,7 @@ mod tests {
         let mut data = header(7_000_000, 106, 206, 16, 7); // SchedRunqueue, Lighthouse
         data.extend_from_slice(&50_000u64.to_le_bytes());
         data.extend_from_slice(&200_000u64.to_le_bytes());
-        data.extend_from_slice(&4u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
+        set_header_pad_u32(&mut data, 0, 4);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::SchedRunqueue(e) = &parsed.typed else {

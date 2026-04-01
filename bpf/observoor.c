@@ -44,6 +44,14 @@ static __always_inline __u32 sectors_to_bytes(__u32 nr_sector)
     return (__u32)bytes;
 }
 
+static __always_inline void encode_u32_le(__u8 *dst, __u32 value)
+{
+    dst[0] = value & 0xff;
+    dst[1] = (value >> 8) & 0xff;
+    dst[2] = (value >> 16) & 0xff;
+    dst[3] = (value >> 24) & 0xff;
+}
+
 // =========================================================
 // Syscall tracers: read, write, futex, mmap, epoll_wait
 // =========================================================
@@ -1067,16 +1075,16 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             struct sched_runqueue_event *rq =
                 bpf_ringbuf_reserve(&events, sizeof(*rq), 0);
             if (rq) {
+                __u32 cpu_id = bpf_get_smp_processor_id();
                 rq->hdr.timestamp_ns = now;
                 rq->hdr.pid = next_info->pid;
                 rq->hdr.tid = next_tid;
                 rq->hdr.event_type = EVENT_SCHED_RUNQUEUE;
                 rq->hdr.client_type = next_info->client_type;
                 __builtin_memset(rq->hdr.pad, 0, sizeof(rq->hdr.pad));
+                encode_u32_le(&rq->hdr.pad[0], cpu_id);
                 rq->runqueue_ns = runqueue_ns;
                 rq->off_cpu_ns = offcpu_ns;
-                rq->cpu_id = bpf_get_smp_processor_id();
-                __builtin_memset(rq->pad, 0, sizeof(rq->pad));
                 bpf_ringbuf_submit(rq, 0);
             }
         }
@@ -1105,12 +1113,15 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     if (!e)
         return 0;
 
+    __u32 cpu_id = bpf_get_smp_processor_id();
     e->hdr.timestamp_ns = now;
     e->hdr.pid = pid;
     e->hdr.tid = tid;
     e->hdr.event_type = EVENT_SCHED_SWITCH;
     e->hdr.client_type = ct;
     __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
+    e->hdr.pad[0] = (ctx->prev_state == 0) ? 1 : 0;
+    encode_u32_le(&e->hdr.pad[1], cpu_id);
 
     // Compute on-CPU duration from sched_on_ts entry.
     __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
@@ -1123,10 +1134,6 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
 
     // prev_state > 0 means the task was preempted (involuntary),
     // prev_state == 0 means the task voluntarily yielded.
-    e->voluntary = (ctx->prev_state == 0) ? 1 : 0;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
-    e->cpu_id = bpf_get_smp_processor_id();
-
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
