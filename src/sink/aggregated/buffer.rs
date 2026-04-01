@@ -1,5 +1,4 @@
 use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::slice::Iter as SliceIter;
 use std::time::SystemTime;
 
 use hashbrown::hash_map::Iter as HashMapIter;
@@ -67,18 +66,17 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
     HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default())
 }
 
-/// Stores a small number of common keys inline and spills to a hash map only
-/// when cardinality exceeds the inline capacity.
+/// Stores the common single-key case inline and spills to a hash map only
+/// when a second distinct dimension appears.
 #[doc(hidden)]
-pub struct InlineOrMap<K, V, const INLINE_CAP: usize = 1> {
-    inline: [Option<(K, V)>; INLINE_CAP],
-    inline_len: usize,
+pub struct InlineOrMap<K, V> {
+    inline: Option<(K, V)>,
     spill: FastMap<K, V>,
 }
 
 #[doc(hidden)]
 pub struct InlineOrMapIter<'a, K, V> {
-    inline: SliceIter<'a, Option<(K, V)>>,
+    inline: Option<(&'a K, &'a V)>,
     spill: HashMapIter<'a, K, V>,
 }
 
@@ -86,81 +84,53 @@ impl<'a, K, V> Iterator for InlineOrMapIter<'a, K, V> {
     type Item = (&'a K, &'a V);
 
     fn next(&mut self) -> Option<Self::Item> {
-        for slot in self.inline.by_ref() {
-            if let Some((key, value)) = slot.as_ref() {
-                return Some((key, value));
-            }
-        }
-
-        self.spill.next()
+        self.inline.take().or_else(|| self.spill.next())
     }
 }
 
-impl<K, V, const INLINE_CAP: usize> InlineOrMap<K, V, INLINE_CAP>
+impl<K, V> InlineOrMap<K, V>
 where
     K: Copy + Eq + Hash,
 {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
-            inline: std::array::from_fn(|_| None),
-            inline_len: 0,
+            inline: None,
             spill: fast_map_with_capacity(capacity),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inline_len == 0 && self.spill.is_empty()
+        self.inline.is_none() && self.spill.is_empty()
     }
 
     pub fn len(&self) -> usize {
-        self.spill.len() + self.inline_len
+        self.spill.len() + usize::from(self.inline.is_some())
     }
 
     pub fn get(&self, key: &K) -> Option<&V> {
         self.inline
-            .iter()
-            .find_map(|slot| match slot.as_ref() {
-                Some((inline_key, value)) if inline_key == key => Some(value),
-                _ => None,
-            })
+            .as_ref()
+            .and_then(|(inline_key, value)| (inline_key == key).then_some(value))
             .or_else(|| self.spill.get(key))
     }
 
-    pub fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
-    }
-
-    fn spill_inline_entries(&mut self) {
-        for slot in &mut self.inline {
-            if let Some((key, value)) = slot.take() {
-                self.spill.insert(key, value);
-            }
-        }
-        self.inline_len = 0;
-    }
-
     pub(crate) fn get_or_insert_with(&mut self, key: K, default: impl FnOnce() -> V) -> &mut V {
-        let mut empty_slot = None;
-        for idx in 0..INLINE_CAP {
-            match self.inline[idx].as_ref() {
-                Some((inline_key, _)) if *inline_key == key => {
-                    return &mut self.inline[idx].as_mut().expect("inline entry exists").1;
-                }
-                None if empty_slot.is_none() => {
-                    empty_slot = Some(idx);
-                }
-                _ => {}
-            }
+        if self
+            .inline
+            .as_ref()
+            .is_some_and(|(inline_key, _)| *inline_key == key)
+        {
+            return &mut self.inline.as_mut().expect("inline entry exists").1;
         }
 
         if self.spill.is_empty() {
-            if let Some(idx) = empty_slot {
-                self.inline[idx] = Some((key, default()));
-                self.inline_len += 1;
-                return &mut self.inline[idx].as_mut().expect("inline entry inserted").1;
+            if self.inline.is_none() {
+                self.inline = Some((key, default()));
+                return &mut self.inline.as_mut().expect("inline entry inserted").1;
             }
 
-            self.spill_inline_entries();
+            let (inline_key, inline_value) = self.inline.take().expect("inline entry exists");
+            self.spill.insert(inline_key, inline_value);
         }
 
         self.spill.entry(key).or_insert_with(default)
@@ -175,7 +145,7 @@ where
 
     pub fn iter(&self) -> InlineOrMapIter<'_, K, V> {
         InlineOrMapIter {
-            inline: self.inline.iter(),
+            inline: self.inline.as_ref().map(|(key, value)| (key, value)),
             spill: self.spill.iter(),
         }
     }
@@ -184,20 +154,12 @@ where
 pub(crate) type BasicLatencyMap = InlineOrMap<BasicDimension, LatencyAggregate>;
 pub(crate) type BasicCounterMap = InlineOrMap<BasicDimension, CounterAggregate>;
 pub(crate) type SchedWaitMap = InlineOrMap<BasicDimension, SchedWaitAggregate>;
-// These event families usually stay at very low cardinality per process
-// (direction, rw, port label, or a handful of active cores), so a small inline
-// set avoids hashing on the common path and spills only for wider fan-out.
-pub(crate) type NetworkCounterMap = InlineOrMap<NetworkDimension, CounterAggregate, 4>;
-pub(crate) type TcpMetricsMap = InlineOrMap<TCPMetricsDimension, TcpMetricsAggregate, 4>;
-pub(crate) type DiskAggregateMap = InlineOrMap<DiskDimension, DiskAggregate, 4>;
-pub(crate) type DiskCounterMap = InlineOrMap<DiskDimension, CounterAggregate, 4>;
-pub(crate) type CpuCoreCounterMap = InlineOrMap<CpuCoreDimension, CounterAggregate, 4>;
 
 /// Aggregation buffer that collects events and aggregates them by dimension
 /// over a time window.
 ///
 /// Ingestion is serialized through the aggregated sink run loop, so these maps
-/// stay unsynchronized and can optimize for the common low-cardinality case.
+/// stay as plain hash maps with no per-event synchronization.
 #[allow(dead_code)]
 pub struct Buffer {
     /// Start of this aggregation window.
@@ -226,19 +188,19 @@ pub struct Buffer {
     pub syscall_pwrite: BasicLatencyMap,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
-    pub net_io: NetworkCounterMap,
-    pub tcp_retransmit: NetworkCounterMap,
+    pub net_io: FastMap<NetworkDimension, CounterAggregate>,
+    pub tcp_retransmit: FastMap<NetworkDimension, CounterAggregate>,
 
     // --- TCP metrics (TCPMetricsDimension -> TcpMetricsAggregate) ---
-    pub tcp_metrics: TcpMetricsMap,
+    pub tcp_metrics: FastMap<TCPMetricsDimension, TcpMetricsAggregate>,
 
     // --- Disk (DiskDimension) ---
-    pub disk_io: DiskAggregateMap,
-    pub block_merge: DiskCounterMap,
+    pub disk_io: FastMap<DiskDimension, DiskAggregate>,
+    pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
     // --- Scheduler (BasicDimension -> LatencyAggregate) ---
     pub sched_on_cpu: BasicLatencyMap,
-    pub cpu_on_core: CpuCoreCounterMap,
+    pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
     pub sched_wait: SchedWaitMap,
 
     // --- Page faults (BasicDimension -> CounterAggregate) ---
@@ -288,16 +250,16 @@ impl Buffer {
             syscall_fdatasync: InlineOrMap::with_capacity(16),
             syscall_pwrite: InlineOrMap::with_capacity(16),
             // Network.
-            net_io: InlineOrMap::with_capacity(64),
-            tcp_retransmit: InlineOrMap::with_capacity(32),
+            net_io: fast_map_with_capacity(64),
+            tcp_retransmit: fast_map_with_capacity(32),
             // TCP metrics.
-            tcp_metrics: InlineOrMap::with_capacity(32),
+            tcp_metrics: fast_map_with_capacity(32),
             // Disk.
-            disk_io: InlineOrMap::with_capacity(16),
-            block_merge: InlineOrMap::with_capacity(16),
+            disk_io: fast_map_with_capacity(16),
+            block_merge: fast_map_with_capacity(16),
             // Scheduler.
             sched_on_cpu: InlineOrMap::with_capacity(16),
-            cpu_on_core: InlineOrMap::with_capacity(64),
+            cpu_on_core: fast_map_with_capacity(64),
             sched_wait: InlineOrMap::with_capacity(16),
             // Page faults.
             page_fault_major: InlineOrMap::with_capacity(16),
@@ -334,18 +296,19 @@ impl Buffer {
 
     /// Adds a network I/O event.
     pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
-        self.net_io.get_or_default_mut(dim).add(bytes);
+        self.net_io.entry(dim).or_default().add(bytes);
     }
 
     /// Adds a TCP retransmit event.
     pub fn add_tcp_retransmit(&mut self, dim: NetworkDimension, bytes: i64) {
-        self.tcp_retransmit.get_or_default_mut(dim).add(bytes);
+        self.tcp_retransmit.entry(dim).or_default().add(bytes);
     }
 
     /// Adds TCP metrics (RTT and CWND).
     pub fn add_tcp_metrics(&mut self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
         self.tcp_metrics
-            .get_or_default_mut(dim)
+            .entry(dim)
+            .or_default()
             .record(rtt_us, cwnd);
     }
 
@@ -358,14 +321,16 @@ impl Buffer {
         queue_depth: u32,
     ) {
         self.disk_io
-            .get_or_default_mut(dim)
+            .entry(dim)
+            .or_default()
             .record(latency_ns, bytes, queue_depth);
     }
 
     /// Adds a block merge event.
     pub fn add_block_merge(&mut self, dim: DiskDimension, bytes: u32) {
         self.block_merge
-            .get_or_default_mut(dim)
+            .entry(dim)
+            .or_default()
             .add(i64::from(bytes));
     }
 
@@ -377,7 +342,8 @@ impl Buffer {
     /// Adds per-core on-CPU time used for utilization aggregation.
     pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
         self.cpu_on_core
-            .get_or_default_mut(CpuCoreDimension::from_basic(dim, cpu_id))
+            .entry(CpuCoreDimension::from_basic(dim, cpu_id))
+            .or_default()
             .add(on_cpu_ns as i64);
     }
 
@@ -626,20 +592,5 @@ mod tests {
         assert_eq!(map.len(), 2);
         assert_eq!(map.get(&first).expect("first exists").snapshot().count, 2);
         assert_eq!(map.get(&second).expect("second exists").snapshot().count, 1);
-    }
-
-    #[test]
-    fn test_inline_or_map_keeps_multiple_dimensions_without_spilling() {
-        let mut map: InlineOrMap<NetworkDimension, CounterAggregate, 4> =
-            InlineOrMap::with_capacity(4);
-
-        for idx in 0..4u32 {
-            let dim = NetworkDimension::new(10 + idx, 1, idx as u8, (idx % 2) as u8);
-            map.get_or_default_mut(dim).add_count(1);
-        }
-
-        assert_eq!(map.len(), 4);
-        assert!(map.contains_key(&NetworkDimension::new(10, 1, 0, 0)));
-        assert!(map.contains_key(&NetworkDimension::new(13, 1, 3, 1)));
     }
 }
