@@ -66,12 +66,17 @@ impl ParsedEventBatch {
 
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
-        self.event_type_totals[event.raw.event_type as usize] += 1;
-        if let Some(total) = self
-            .client_totals
-            .get_mut(usize::from(event.raw.client_type))
-        {
-            *total += 1;
+        let event_type_idx = event.raw.event_type as usize;
+        let client_idx = usize::from(event.raw.client_type);
+
+        debug_assert!(event_type_idx <= MAX_EVENT_TYPE);
+        debug_assert!(client_idx < CLIENT_TYPE_CARDINALITY);
+
+        // Safety: the parser rejects out-of-range client types, and EventType is
+        // always constructed from a validated discriminant before reaching this hot path.
+        unsafe {
+            *self.event_type_totals.get_unchecked_mut(event_type_idx) += 1;
+            *self.client_totals.get_unchecked_mut(client_idx) += 1;
         }
         self.events.push(event);
     }
