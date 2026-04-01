@@ -49,10 +49,13 @@ struct RawNetIOPayload {
     bytes: u32,
     src_port: u16,
     dst_port: u16,
-    direction: u8,
-    has_metrics: u8,
     transport: u8,
-    _pad: [u8; 1],
+    _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawNetIOMetricsPayload {
     srtt_us: u32,
     cwnd: u32,
 }
@@ -146,9 +149,6 @@ pub enum ParseError {
     #[error("reading {event_name}: unexpected end of data")]
     PayloadTruncated { event_name: &'static str },
 
-    #[error("reading {event_name}: invalid direction byte {raw}")]
-    InvalidDirection { event_name: &'static str, raw: u8 },
-
     #[error("reading {event_name}: invalid transport byte {raw}")]
     InvalidNetTransport { event_name: &'static str, raw: u8 },
 }
@@ -200,8 +200,14 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
             EventType::DiskIO,
             TypedEvent::DiskIO(parse_disk_io(payload)?),
         ),
-        7 => (EventType::NetTX, TypedEvent::NetIO(parse_net_io(payload)?)),
-        8 => (EventType::NetRX, TypedEvent::NetIO(parse_net_io(payload)?)),
+        7 => (
+            EventType::NetTX,
+            TypedEvent::NetIO(parse_net_io(payload, Direction::TX as u8)?),
+        ),
+        8 => (
+            EventType::NetRX,
+            TypedEvent::NetIO(parse_net_io(payload, Direction::RX as u8)?),
+        ),
         9 => (
             EventType::SchedSwitch,
             TypedEvent::Sched(parse_sched(payload)?),
@@ -332,16 +338,9 @@ fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     })
 }
 
-/// Net I/O event: types 7-8. Payload: 20 bytes minimum.
-fn parse_net_io(data: &[u8]) -> Result<NetIOEvent, ParseError> {
+/// Net I/O event: types 7-8. Common payload: 12 bytes, TCP-TX metrics tail: 8 bytes.
+fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
-    let direction_raw = raw.direction;
-    if direction_raw > Direction::RX as u8 {
-        return Err(ParseError::InvalidDirection {
-            event_name: "net IO event",
-            raw: direction_raw,
-        });
-    }
     let transport_raw = raw.transport;
     if transport_raw > NetTransport::Udp as u8 {
         return Err(ParseError::InvalidNetTransport {
@@ -349,15 +348,31 @@ fn parse_net_io(data: &[u8]) -> Result<NetIOEvent, ParseError> {
             raw: transport_raw,
         });
     }
+    let (has_metrics, srtt_us, cwnd) =
+        if data.len() >= size_of::<RawNetIOPayload>() + size_of::<RawNetIOMetricsPayload>() {
+            let metrics = read_payload::<RawNetIOMetricsPayload>(
+                // Safety: length check above guarantees the metrics tail exists.
+                unsafe { data.get_unchecked(size_of::<RawNetIOPayload>()..) },
+                "net IO event",
+            )?;
+            (
+                true,
+                u32::from_le(metrics.srtt_us),
+                u32::from_le(metrics.cwnd),
+            )
+        } else {
+            (false, 0, 0)
+        };
+
     Ok(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
         src_port: u16::from_le(raw.src_port),
         dst_port: u16::from_le(raw.dst_port),
-        direction: direction_raw,
+        direction,
         transport: transport_raw,
-        has_metrics: raw.has_metrics != 0,
-        srtt_us: u32::from_le(raw.srtt_us),
-        cwnd: u32::from_le(raw.cwnd),
+        has_metrics,
+        srtt_us,
+        cwnd,
     })
 }
 
@@ -540,30 +555,13 @@ mod tests {
     }
 
     #[test]
-    fn test_net_io_invalid_direction() {
-        let mut data = header(1000, 42, 43, 7, 1);
-        data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
-        data.extend_from_slice(&80u16.to_le_bytes()); // sport
-        data.extend_from_slice(&90u16.to_le_bytes()); // dport
-        data.push(5); // invalid direction
-        data.push(0);
-        data.extend_from_slice(&[0u8; 10]); // rest of payload
-        assert!(matches!(
-            parse_event(&data).unwrap_err(),
-            ParseError::InvalidDirection { raw: 5, .. }
-        ));
-    }
-
-    #[test]
     fn test_net_io_invalid_transport() {
         let mut data = header(1000, 42, 43, 7, 1);
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&80u16.to_le_bytes()); // sport
         data.extend_from_slice(&90u16.to_le_bytes()); // dport
-        data.push(0); // TX
-        data.push(0); // no metrics
         data.push(7); // invalid transport
-        data.extend_from_slice(&[0u8; 9]); // rest of payload
+        data.extend_from_slice(&[0u8; 3]); // pad
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidNetTransport { raw: 7, .. }
@@ -654,10 +652,8 @@ mod tests {
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&8080u16.to_le_bytes()); // sport
         data.extend_from_slice(&9090u16.to_le_bytes()); // dport
-        data.push(0); // TX
-        data.push(1); // has_metrics
         data.push(0); // TCP
-        data.push(0); // pad
+        data.extend_from_slice(&[0u8; 3]); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
 
@@ -681,12 +677,8 @@ mod tests {
         data.extend_from_slice(&2048u32.to_le_bytes());
         data.extend_from_slice(&443u16.to_le_bytes());
         data.extend_from_slice(&12345u16.to_le_bytes());
-        data.push(1); // RX
-        data.push(0); // no metrics
         data.push(1); // UDP
-        data.push(0); // pad
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 3]); // pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
@@ -696,6 +688,8 @@ mod tests {
         assert_eq!(e.transport, NetTransport::Udp as u8);
         assert!(!e.has_metrics);
         assert_eq!(e.bytes, 2048);
+        assert_eq!(e.srtt_us, 0);
+        assert_eq!(e.cwnd, 0);
     }
 
     // -- Scheduler --

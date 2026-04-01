@@ -21,6 +21,7 @@ char LICENSE[] SEC("license") = "GPL";
 const struct syscall_event    *__unused_syscall_ev    __attribute__((unused));
 const struct disk_io_event    *__unused_disk_io_ev    __attribute__((unused));
 const struct net_io_event     *__unused_net_io_ev     __attribute__((unused));
+const struct net_io_metrics_event *__unused_net_io_metrics_ev __attribute__((unused));
 const struct sched_event      *__unused_sched_ev      __attribute__((unused));
 const struct page_fault_event *__unused_page_fault_ev __attribute__((unused));
 const struct fd_event         *__unused_fd_ev         __attribute__((unused));
@@ -713,7 +714,8 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     if (!should_emit_event(EVENT_NET_TX))
         goto cleanup;
 
-    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    struct net_io_metrics_event *e =
+        bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         goto cleanup;
 
@@ -722,10 +724,8 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->direction = 0; // TX
-    e->has_metrics = 1;
     e->transport = val->transport;
-    e->pad[0] = 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
     e->srtt_us = val->srtt_us;
     e->snd_cwnd = val->snd_cwnd;
 
@@ -793,12 +793,8 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->direction = 1; // RX
-    e->has_metrics = 0;
     e->transport = val->transport;
-    e->pad[0] = 0;
-    e->srtt_us = 0;
-    e->snd_cwnd = 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -858,12 +854,8 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->direction = 0; // TX
-    e->has_metrics = 0;
     e->transport = val->transport;
-    e->pad[0] = 0;
-    e->srtt_us = 0;
-    e->snd_cwnd = 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -920,12 +912,8 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->direction = 1; // RX
-    e->has_metrics = 0;
     e->transport = val->transport;
-    e->pad[0] = 0;
-    e->srtt_us = 0;
-    e->snd_cwnd = 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 
