@@ -1,4 +1,4 @@
-.PHONY: all build test lint fmt clean docker-build bench bench-smoke perf-suite e2e-up e2e-down e2e-test e2e-k8s-up e2e-k8s-test e2e-k8s-down
+.PHONY: all build test lint fmt clean docker-build bench bench-smoke perf-suite bench-cpu e2e-up e2e-down e2e-test e2e-k8s-up e2e-k8s-test e2e-k8s-down
 
 BINARY := observoor
 PERF_CARGO_ARGS ?= --no-default-features
@@ -34,6 +34,9 @@ perf-suite:
 	cargo test $(PERF_CARGO_ARGS) --test blackbox_pipeline
 	cargo test $(PERF_CARGO_ARGS) --test perf_alloc
 	cargo bench $(PERF_CARGO_ARGS) --bench hot_paths -- --warm-up-time 0.2 --measurement-time 0.4
+
+bench-cpu:
+	sudo bash bench-cpu/run-bench.sh 50000 ./target/release/observoor
 
 e2e-up:
 	docker compose -f e2e/docker-compose.yml up -d

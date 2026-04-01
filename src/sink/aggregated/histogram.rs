@@ -1,5 +1,3 @@
-use std::sync::atomic::{AtomicU64, Ordering};
-
 /// Number of histogram buckets.
 pub const NUM_BUCKETS: usize = 10;
 
@@ -19,35 +17,31 @@ const BOUNDARIES: [u64; 9] = [
 ];
 
 /// Exponential histogram with 10 buckets for latency values.
-/// All operations are atomic and safe for concurrent use.
 pub struct Histogram {
-    buckets: [AtomicU64; NUM_BUCKETS],
+    buckets: [u32; NUM_BUCKETS],
 }
 
 impl Histogram {
     /// Creates a new histogram with all buckets at zero.
     pub fn new() -> Self {
         Self {
-            buckets: std::array::from_fn(|_| AtomicU64::new(0)),
+            buckets: [0; NUM_BUCKETS],
         }
     }
 
     /// Records a value (in nanoseconds) to the appropriate bucket.
-    pub fn record(&self, value_ns: u64) {
+    #[inline(always)]
+    pub fn record(&mut self, value_ns: u64) {
         let idx = bucket_index(value_ns);
-        if let Some(bucket) = self.buckets.get(idx) {
-            bucket.fetch_add(1, Ordering::Relaxed);
-        }
+        debug_assert!(idx < NUM_BUCKETS);
+        // Safety: `bucket_index` only returns values in `0..NUM_BUCKETS`.
+        unsafe { *self.buckets.get_unchecked_mut(idx) += 1 };
     }
 
     /// Returns the current bucket counts as a snapshot.
     /// Returns [<1us, 1us-10us, 10us-100us, ..., 100s+].
     pub fn snapshot(&self) -> [u32; NUM_BUCKETS] {
-        let mut result = [0u32; NUM_BUCKETS];
-        for (slot, bucket) in result.iter_mut().zip(self.buckets.iter()) {
-            *slot = bucket.load(Ordering::Relaxed) as u32;
-        }
-        result
+        self.buckets
     }
 }
 
@@ -66,14 +60,29 @@ impl std::fmt::Debug for Histogram {
 }
 
 /// Returns the bucket index for a given value in nanoseconds.
+#[inline(always)]
 fn bucket_index(value_ns: u64) -> usize {
-    // Linear scan is fine for 9 boundaries - branch predictor handles this well.
-    for (i, &boundary) in BOUNDARIES.iter().enumerate() {
-        if value_ns < boundary {
-            return i;
-        }
+    if value_ns < BOUNDARIES[0] {
+        0
+    } else if value_ns < BOUNDARIES[1] {
+        1
+    } else if value_ns < BOUNDARIES[2] {
+        2
+    } else if value_ns < BOUNDARIES[3] {
+        3
+    } else if value_ns < BOUNDARIES[4] {
+        4
+    } else if value_ns < BOUNDARIES[5] {
+        5
+    } else if value_ns < BOUNDARIES[6] {
+        6
+    } else if value_ns < BOUNDARIES[7] {
+        7
+    } else if value_ns < BOUNDARIES[8] {
+        8
+    } else {
+        9
     }
-    9 // +inf bucket
 }
 
 /// Returns the upper bounds for each bucket in nanoseconds.
@@ -139,7 +148,7 @@ mod tests {
 
     #[test]
     fn test_histogram_record_and_snapshot() {
-        let h = Histogram::new();
+        let mut h = Histogram::new();
 
         // Record values in different buckets.
         h.record(500); // bucket 0 (<1us)

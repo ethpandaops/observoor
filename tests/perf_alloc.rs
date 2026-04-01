@@ -33,9 +33,6 @@ fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u
 fn syscall_payload() -> Vec<u8> {
     let mut data = header(123_456_789, 1337, 1337, EventType::SyscallFutex as u8, 1);
     data.extend_from_slice(&2_500u64.to_le_bytes());
-    data.extend_from_slice(&0i64.to_le_bytes());
-    data.extend_from_slice(&202u32.to_le_bytes());
-    data.extend_from_slice(&12i32.to_le_bytes());
     data
 }
 
@@ -92,31 +89,14 @@ fn measure_alloc_counts<T>(f: impl FnOnce() -> T) -> (T, usize, usize) {
 fn build_non_empty_buffer() -> (Collector, Buffer, BatchMetadata) {
     let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
     let now = SystemTime::now();
-    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
+    let mut buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     for i in 0..128u32 {
         let pid = 5_000 + i;
-        let basic = BasicDimension {
-            pid,
-            client_type: 1,
-        };
-        let net = NetworkDimension {
-            pid,
-            client_type: 1,
-            port_label: 1, // ElP2PTcp
-            direction: (i % 2) as u8,
-        };
-        let tcp = TCPMetricsDimension {
-            pid,
-            client_type: 1,
-            port_label: 1, // ElP2PTcp
-        };
-        let disk = DiskDimension {
-            pid,
-            client_type: 1,
-            device_id: 259,
-            rw: (i % 2) as u8,
-        };
+        let basic = BasicDimension::new(pid, 1);
+        let net = NetworkDimension::new(pid, 1, 1, (i % 2) as u8);
+        let tcp = TCPMetricsDimension::new(pid, 1, 1);
+        let disk = DiskDimension::new(pid, 1, 259, (i % 2) as u8);
 
         buffer.add_syscall(EventType::SyscallRead, basic, 1_200);
         buffer.add_syscall(EventType::SyscallFutex, basic, 450);
@@ -179,7 +159,7 @@ fn parse_fd_event_allocation_budget() {
     });
 
     assert!(
-        allocations <= 32,
+        allocations <= 12,
         "fd parse allocation budget exceeded: {}",
         allocations
     );

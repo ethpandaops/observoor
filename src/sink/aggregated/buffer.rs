@@ -1,28 +1,79 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
-use dashmap::DashMap;
+use hashbrown::HashMap;
 
 use crate::tracer::event::EventType;
 
-use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
+use super::aggregate::{
+    CounterAggregate, DiskAggregate, LatencyAggregate, SchedWaitAggregate, TcpMetricsAggregate,
+};
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
 
-/// Thread-safe aggregation buffer that collects events and aggregates
-/// them by dimension over a time window.
+#[derive(Default)]
+pub struct PackedKeyHasher {
+    hash: u64,
+}
+
+#[inline(always)]
+fn mix_key_u64(value: u64) -> u64 {
+    value ^ value.rotate_left(25)
+}
+
+impl Hasher for PackedKeyHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut folded = 0u64;
+        for (idx, byte) in bytes.iter().take(16).enumerate() {
+            folded ^= u64::from(*byte) << ((idx % 8) * 8);
+        }
+        self.hash = mix_key_u64(folded);
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, i: u32) {
+        self.hash = mix_key_u64(u64::from(i));
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, i: u64) {
+        self.hash = mix_key_u64(i);
+    }
+
+    #[inline(always)]
+    fn write_u128(&mut self, i: u128) {
+        self.hash = mix_key_u64((i as u64) ^ ((i >> 64) as u64).rotate_left(32));
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.hash = mix_key_u64(i as u64);
+    }
+}
+
+pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
+pub(crate) type FastMap<K, V> = HashMap<K, V, FastHashBuilder>;
+
+pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
+    HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default())
+}
+
+/// Aggregation buffer that collects events and aggregates them by dimension
+/// over a time window.
 ///
-/// Uses `DashMap` for concurrent map access, eliminating the need for
-/// a global RWMutex. Each map entry is independently lockable.
+/// Ingestion is serialized through the aggregated sink run loop, so these maps
+/// stay as plain hash maps with no per-event synchronization.
 #[allow(dead_code)]
 pub struct Buffer {
     /// Start of this aggregation window.
     pub start_time: SystemTime,
-    /// Monotonic timestamp when this buffer became active.
-    start_monotonic_ns: u64,
-    /// Actual elapsed window duration, fixed when the buffer is flushed.
-    interval_ns: AtomicU64,
     /// Current wallclock slot number.
     pub wallclock_slot: u64,
     /// Start time of the current wallclock slot.
@@ -37,51 +88,47 @@ pub struct Buffer {
     pub system_cores: u16,
 
     // --- Syscalls (BasicDimension -> LatencyAggregate) ---
-    pub syscall_read: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_write: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_futex: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_mmap: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_epoll_wait: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fsync: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fdatasync: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_pwrite: DashMap<BasicDimension, LatencyAggregate>,
+    pub syscall_read: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_write: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_futex: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_epoll_wait: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_fdatasync: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_pwrite: FastMap<BasicDimension, LatencyAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
-    pub net_io: DashMap<NetworkDimension, CounterAggregate>,
-    pub tcp_retransmit: DashMap<NetworkDimension, CounterAggregate>,
+    pub net_io: FastMap<NetworkDimension, CounterAggregate>,
+    pub tcp_retransmit: FastMap<NetworkDimension, CounterAggregate>,
 
-    // --- TCP metrics (TCPMetricsDimension -> GaugeAggregate) ---
-    pub tcp_rtt: DashMap<TCPMetricsDimension, GaugeAggregate>,
-    pub tcp_cwnd: DashMap<TCPMetricsDimension, GaugeAggregate>,
+    // --- TCP metrics (TCPMetricsDimension -> TcpMetricsAggregate) ---
+    pub tcp_metrics: FastMap<TCPMetricsDimension, TcpMetricsAggregate>,
 
     // --- Disk (DiskDimension) ---
-    pub disk_latency: DashMap<DiskDimension, LatencyAggregate>,
-    pub disk_bytes: DashMap<DiskDimension, CounterAggregate>,
-    pub disk_queue_depth: DashMap<DiskDimension, GaugeAggregate>,
-    pub block_merge: DashMap<DiskDimension, CounterAggregate>,
+    pub disk_io: FastMap<DiskDimension, DiskAggregate>,
+    pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
     // --- Scheduler (BasicDimension -> LatencyAggregate) ---
-    pub sched_on_cpu: DashMap<BasicDimension, LatencyAggregate>,
-    pub cpu_on_core: DashMap<CpuCoreDimension, CounterAggregate>,
-    pub sched_off_cpu: DashMap<BasicDimension, LatencyAggregate>,
-    pub sched_runqueue: DashMap<BasicDimension, LatencyAggregate>,
+    pub sched_on_cpu: FastMap<BasicDimension, LatencyAggregate>,
+    pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
+    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
 
     // --- Page faults (BasicDimension -> CounterAggregate) ---
-    pub page_fault_major: DashMap<BasicDimension, CounterAggregate>,
-    pub page_fault_minor: DashMap<BasicDimension, CounterAggregate>,
+    pub page_fault_major: FastMap<BasicDimension, CounterAggregate>,
+    pub page_fault_minor: FastMap<BasicDimension, CounterAggregate>,
 
     // --- FD operations (BasicDimension -> CounterAggregate) ---
-    pub fd_open: DashMap<BasicDimension, CounterAggregate>,
-    pub fd_close: DashMap<BasicDimension, CounterAggregate>,
+    pub fd_open: FastMap<BasicDimension, CounterAggregate>,
+    pub fd_close: FastMap<BasicDimension, CounterAggregate>,
 
     // --- Memory pressure ---
-    pub mem_reclaim: DashMap<BasicDimension, LatencyAggregate>,
-    pub mem_compaction: DashMap<BasicDimension, LatencyAggregate>,
-    pub swap_in: DashMap<BasicDimension, CounterAggregate>,
-    pub swap_out: DashMap<BasicDimension, CounterAggregate>,
-    pub oom_kill: DashMap<BasicDimension, CounterAggregate>,
-    pub process_exit: DashMap<BasicDimension, CounterAggregate>,
-    pub tcp_state_change: DashMap<BasicDimension, CounterAggregate>,
+    pub mem_reclaim: FastMap<BasicDimension, LatencyAggregate>,
+    pub mem_compaction: FastMap<BasicDimension, LatencyAggregate>,
+    pub swap_in: FastMap<BasicDimension, CounterAggregate>,
+    pub swap_out: FastMap<BasicDimension, CounterAggregate>,
+    pub oom_kill: FastMap<BasicDimension, CounterAggregate>,
+    pub process_exit: FastMap<BasicDimension, CounterAggregate>,
+    pub tcp_state_change: FastMap<BasicDimension, CounterAggregate>,
 }
 
 impl Buffer {
@@ -97,8 +144,6 @@ impl Buffer {
     ) -> Self {
         Self {
             start_time,
-            start_monotonic_ns: super::monotonic_ns(),
-            interval_ns: AtomicU64::new(0),
             wallclock_slot,
             wallclock_slot_start,
             cl_syncing,
@@ -106,138 +151,93 @@ impl Buffer {
             el_offline,
             system_cores,
             // Syscalls.
-            syscall_read: DashMap::with_capacity(16),
-            syscall_write: DashMap::with_capacity(16),
-            syscall_futex: DashMap::with_capacity(16),
-            syscall_mmap: DashMap::with_capacity(16),
-            syscall_epoll_wait: DashMap::with_capacity(16),
-            syscall_fsync: DashMap::with_capacity(16),
-            syscall_fdatasync: DashMap::with_capacity(16),
-            syscall_pwrite: DashMap::with_capacity(16),
+            syscall_read: fast_map_with_capacity(16),
+            syscall_write: fast_map_with_capacity(16),
+            syscall_futex: fast_map_with_capacity(16),
+            syscall_mmap: fast_map_with_capacity(16),
+            syscall_epoll_wait: fast_map_with_capacity(16),
+            syscall_fsync: fast_map_with_capacity(16),
+            syscall_fdatasync: fast_map_with_capacity(16),
+            syscall_pwrite: fast_map_with_capacity(16),
             // Network.
-            net_io: DashMap::with_capacity(64),
-            tcp_retransmit: DashMap::with_capacity(32),
+            net_io: fast_map_with_capacity(64),
+            tcp_retransmit: fast_map_with_capacity(32),
             // TCP metrics.
-            tcp_rtt: DashMap::with_capacity(32),
-            tcp_cwnd: DashMap::with_capacity(32),
+            tcp_metrics: fast_map_with_capacity(32),
             // Disk.
-            disk_latency: DashMap::with_capacity(16),
-            disk_bytes: DashMap::with_capacity(16),
-            disk_queue_depth: DashMap::with_capacity(16),
-            block_merge: DashMap::with_capacity(16),
+            disk_io: fast_map_with_capacity(16),
+            block_merge: fast_map_with_capacity(16),
             // Scheduler.
-            sched_on_cpu: DashMap::with_capacity(16),
-            cpu_on_core: DashMap::with_capacity(64),
-            sched_off_cpu: DashMap::with_capacity(16),
-            sched_runqueue: DashMap::with_capacity(16),
+            sched_on_cpu: fast_map_with_capacity(16),
+            cpu_on_core: fast_map_with_capacity(64),
+            sched_wait: fast_map_with_capacity(16),
             // Page faults.
-            page_fault_major: DashMap::with_capacity(16),
-            page_fault_minor: DashMap::with_capacity(16),
+            page_fault_major: fast_map_with_capacity(16),
+            page_fault_minor: fast_map_with_capacity(16),
             // FD operations.
-            fd_open: DashMap::with_capacity(16),
-            fd_close: DashMap::with_capacity(16),
+            fd_open: fast_map_with_capacity(16),
+            fd_close: fast_map_with_capacity(16),
             // Memory pressure.
-            mem_reclaim: DashMap::with_capacity(8),
-            mem_compaction: DashMap::with_capacity(8),
-            swap_in: DashMap::with_capacity(8),
-            swap_out: DashMap::with_capacity(8),
-            oom_kill: DashMap::with_capacity(8),
-            process_exit: DashMap::with_capacity(8),
-            tcp_state_change: DashMap::with_capacity(8),
+            mem_reclaim: fast_map_with_capacity(8),
+            mem_compaction: fast_map_with_capacity(8),
+            swap_in: fast_map_with_capacity(8),
+            swap_out: fast_map_with_capacity(8),
+            oom_kill: fast_map_with_capacity(8),
+            process_exit: fast_map_with_capacity(8),
+            tcp_state_change: fast_map_with_capacity(8),
         }
-    }
-
-    /// Records the actual elapsed duration for this buffer at flush time.
-    pub fn mark_flushed(&self, boundary_ns: u64) {
-        let interval_ns = boundary_ns.saturating_sub(self.start_monotonic_ns);
-        if interval_ns > 0 {
-            self.interval_ns.store(interval_ns, Ordering::Relaxed);
-        }
-    }
-
-    /// Returns the flushed interval in nanoseconds, or the configured default.
-    pub fn interval_ns_or(&self, default_interval_ns: u64) -> u64 {
-        let actual = self.interval_ns.load(Ordering::Relaxed);
-        if actual > 0 {
-            actual
-        } else {
-            default_interval_ns
-        }
-    }
-
-    /// Returns whether a timestamp belongs to this buffer's active window.
-    pub fn contains_monotonic_timestamp(&self, timestamp_ns: u64) -> bool {
-        timestamp_ns >= self.start_monotonic_ns
-    }
-
-    /// Caps raw runtime to the time that could have elapsed inside this window.
-    pub fn cap_on_cpu_ns_to_window(&self, timestamp_ns: u64, on_cpu_ns: u64) -> u64 {
-        on_cpu_ns.min(timestamp_ns.saturating_sub(self.start_monotonic_ns))
-    }
-
-    #[cfg(test)]
-    pub fn set_interval_ns_for_test(&self, interval_ns: u64) {
-        self.interval_ns.store(interval_ns, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub fn set_start_monotonic_ns_for_test(&mut self, start_monotonic_ns: u64) {
-        self.start_monotonic_ns = start_monotonic_ns;
     }
 
     /// Adds a syscall latency event to the appropriate map.
-    pub fn add_syscall(&self, event_type: EventType, dim: BasicDimension, latency_ns: u64) {
+    pub fn add_syscall(&mut self, event_type: EventType, dim: BasicDimension, latency_ns: u64) {
         let map = match event_type {
-            EventType::SyscallRead => &self.syscall_read,
-            EventType::SyscallWrite => &self.syscall_write,
-            EventType::SyscallFutex => &self.syscall_futex,
-            EventType::SyscallMmap => &self.syscall_mmap,
-            EventType::SyscallEpollWait => &self.syscall_epoll_wait,
-            EventType::SyscallFsync => &self.syscall_fsync,
-            EventType::SyscallFdatasync => &self.syscall_fdatasync,
-            EventType::SyscallPwrite => &self.syscall_pwrite,
+            EventType::SyscallRead => &mut self.syscall_read,
+            EventType::SyscallWrite => &mut self.syscall_write,
+            EventType::SyscallFutex => &mut self.syscall_futex,
+            EventType::SyscallMmap => &mut self.syscall_mmap,
+            EventType::SyscallEpollWait => &mut self.syscall_epoll_wait,
+            EventType::SyscallFsync => &mut self.syscall_fsync,
+            EventType::SyscallFdatasync => &mut self.syscall_fdatasync,
+            EventType::SyscallPwrite => &mut self.syscall_pwrite,
             _ => return,
         };
         map.entry(dim).or_default().record(latency_ns);
     }
 
     /// Adds a network I/O event.
-    pub fn add_net_io(&self, dim: NetworkDimension, bytes: i64) {
+    pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
         self.net_io.entry(dim).or_default().add(bytes);
     }
 
     /// Adds a TCP retransmit event.
-    pub fn add_tcp_retransmit(&self, dim: NetworkDimension, bytes: i64) {
+    pub fn add_tcp_retransmit(&mut self, dim: NetworkDimension, bytes: i64) {
         self.tcp_retransmit.entry(dim).or_default().add(bytes);
     }
 
     /// Adds TCP metrics (RTT and CWND).
-    pub fn add_tcp_metrics(&self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
-        self.tcp_rtt
+    pub fn add_tcp_metrics(&mut self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
+        self.tcp_metrics
             .entry(dim)
             .or_default()
-            .record(i64::from(rtt_us));
-        self.tcp_cwnd
-            .entry(dim)
-            .or_default()
-            .record(i64::from(cwnd));
+            .record(rtt_us, cwnd);
     }
 
     /// Adds a disk I/O event with latency, bytes, and queue depth.
-    pub fn add_disk_io(&self, dim: DiskDimension, latency_ns: u64, bytes: u32, queue_depth: u32) {
-        self.disk_latency.entry(dim).or_default().record(latency_ns);
-        self.disk_bytes
+    pub fn add_disk_io(
+        &mut self,
+        dim: DiskDimension,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+    ) {
+        self.disk_io
             .entry(dim)
             .or_default()
-            .add(i64::from(bytes));
-        self.disk_queue_depth
-            .entry(dim)
-            .or_default()
-            .record(i64::from(queue_depth));
+            .record(latency_ns, bytes, queue_depth);
     }
 
     /// Adds a block merge event.
-    pub fn add_block_merge(&self, dim: DiskDimension, bytes: u32) {
+    pub fn add_block_merge(&mut self, dim: DiskDimension, bytes: u32) {
         self.block_merge
             .entry(dim)
             .or_default()
@@ -245,18 +245,14 @@ impl Buffer {
     }
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
-    pub fn add_sched_on_cpu(&self, dim: BasicDimension, on_cpu_ns: u64) {
+    pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
         self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
-    pub fn add_cpu_on_core(&self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+    pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
         self.cpu_on_core
-            .entry(CpuCoreDimension {
-                pid: dim.pid,
-                client_type: dim.client_type,
-                cpu_id,
-            })
+            .entry(CpuCoreDimension::new(dim.pid(), dim.client_type(), cpu_id))
             .or_default()
             .add(on_cpu_ns as i64);
     }
@@ -266,29 +262,23 @@ impl Buffer {
     /// This helper is kept for direct tests/benchmarks. Production code uses
     /// carried scheduler state and calls `add_sched_on_cpu`/`add_cpu_on_core`
     /// separately to keep window accounting exact across rotations.
-    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
+    pub fn add_sched_switch(&mut self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
         self.add_sched_on_cpu(dim, on_cpu_ns);
         self.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.
-    pub fn add_sched_runqueue(&self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
-        if runqueue_ns > 0 {
-            self.sched_runqueue
+    pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
+        if runqueue_ns > 0 || off_cpu_ns > 0 {
+            self.sched_wait
                 .entry(dim)
                 .or_default()
-                .record(runqueue_ns);
-        }
-        if off_cpu_ns > 0 {
-            self.sched_off_cpu
-                .entry(dim)
-                .or_default()
-                .record(off_cpu_ns);
+                .record(runqueue_ns, off_cpu_ns);
         }
     }
 
     /// Adds a page fault event.
-    pub fn add_page_fault(&self, dim: BasicDimension, major: bool) {
+    pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
         if major {
             self.page_fault_major.entry(dim).or_default().add_count(1);
         } else {
@@ -297,22 +287,22 @@ impl Buffer {
     }
 
     /// Adds an FD open event.
-    pub fn add_fd_open(&self, dim: BasicDimension) {
+    pub fn add_fd_open(&mut self, dim: BasicDimension) {
         self.fd_open.entry(dim).or_default().add_count(1);
     }
 
     /// Adds an FD close event.
-    pub fn add_fd_close(&self, dim: BasicDimension) {
+    pub fn add_fd_close(&mut self, dim: BasicDimension) {
         self.fd_close.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a memory reclaim event.
-    pub fn add_mem_reclaim(&self, dim: BasicDimension, duration_ns: u64) {
+    pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
         self.mem_reclaim.entry(dim).or_default().record(duration_ns);
     }
 
     /// Adds a memory compaction event.
-    pub fn add_mem_compaction(&self, dim: BasicDimension, duration_ns: u64) {
+    pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
         self.mem_compaction
             .entry(dim)
             .or_default()
@@ -320,27 +310,27 @@ impl Buffer {
     }
 
     /// Adds a swap-in event.
-    pub fn add_swap_in(&self, dim: BasicDimension, pages: u64) {
+    pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
         self.swap_in.entry(dim).or_default().add(pages as i64);
     }
 
     /// Adds a swap-out event.
-    pub fn add_swap_out(&self, dim: BasicDimension, pages: u64) {
+    pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
         self.swap_out.entry(dim).or_default().add(pages as i64);
     }
 
     /// Adds an OOM kill event.
-    pub fn add_oom_kill(&self, dim: BasicDimension) {
+    pub fn add_oom_kill(&mut self, dim: BasicDimension) {
         self.oom_kill.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a process exit event.
-    pub fn add_process_exit(&self, dim: BasicDimension) {
+    pub fn add_process_exit(&mut self, dim: BasicDimension) {
         self.process_exit.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a TCP state change event.
-    pub fn add_tcp_state_change(&self, dim: BasicDimension) {
+    pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
         self.tcp_state_change.entry(dim).or_default().add_count(1);
     }
 }
@@ -363,11 +353,8 @@ mod tests {
 
     #[test]
     fn test_add_syscall_read() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
@@ -380,11 +367,8 @@ mod tests {
 
     #[test]
     fn test_add_syscall_unknown_type_is_noop() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
@@ -393,13 +377,8 @@ mod tests {
 
     #[test]
     fn test_add_net_io() {
-        let buf = test_buffer();
-        let dim = NetworkDimension {
-            pid: 1,
-            client_type: 1,
-            port_label: 3, // ElJsonRpc
-            direction: 0,
-        };
+        let mut buf = test_buffer();
+        let dim = NetworkDimension::new(1, 1, 3, 0);
 
         buf.add_net_io(dim, 1024);
         buf.add_net_io(dim, 2048);
@@ -412,48 +391,33 @@ mod tests {
 
     #[test]
     fn test_add_tcp_metrics() {
-        let buf = test_buffer();
-        let dim = TCPMetricsDimension {
-            pid: 1,
-            client_type: 1,
-            port_label: 3, // ElJsonRpc
-        };
+        let mut buf = test_buffer();
+        let dim = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_tcp_metrics(dim, 100, 65535);
 
-        let rtt = buf.tcp_rtt.get(&dim).expect("rtt exists");
-        assert_eq!(rtt.snapshot().sum, 100);
-        let cwnd = buf.tcp_cwnd.get(&dim).expect("cwnd exists");
-        assert_eq!(cwnd.snapshot().sum, 65535);
+        let metrics = buf.tcp_metrics.get(&dim).expect("tcp metrics exist");
+        assert_eq!(metrics.rtt_snapshot().sum, 100);
+        assert_eq!(metrics.cwnd_snapshot().sum, 65535);
     }
 
     #[test]
     fn test_add_disk_io() {
-        let buf = test_buffer();
-        let dim = DiskDimension {
-            pid: 1,
-            client_type: 1,
-            device_id: 259,
-            rw: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = DiskDimension::new(1, 1, 259, 1);
 
         buf.add_disk_io(dim, 50_000, 4096, 3);
 
-        let lat = buf.disk_latency.get(&dim).expect("latency exists");
-        assert_eq!(lat.snapshot().count, 1);
-        let bytes = buf.disk_bytes.get(&dim).expect("bytes exists");
-        assert_eq!(bytes.snapshot().sum, 4096);
-        let qd = buf.disk_queue_depth.get(&dim).expect("queue depth exists");
-        assert_eq!(qd.snapshot().sum, 3);
+        let disk = buf.disk_io.get(&dim).expect("disk aggregate exists");
+        assert_eq!(disk.latency_snapshot().count, 1);
+        assert_eq!(disk.bytes_snapshot().sum, 4096);
+        assert_eq!(disk.queue_depth_snapshot().sum, 3);
     }
 
     #[test]
     fn test_add_sched_switch_tracks_per_core() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_switch(dim, 1_000, 2);
         buf.add_sched_switch(dim, 2_000, 2);
@@ -466,11 +430,7 @@ mod tests {
 
         let core2 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 2,
-            })
+            .get(&CpuCoreDimension::new(1, 1, 2))
             .expect("core 2 exists");
         let core2_snap = core2.snapshot();
         assert_eq!(core2_snap.count, 2);
@@ -478,11 +438,7 @@ mod tests {
 
         let core4 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 4,
-            })
+            .get(&CpuCoreDimension::new(1, 1, 4))
             .expect("core 4 exists");
         let core4_snap = core4.snapshot();
         assert_eq!(core4_snap.count, 1);
@@ -491,29 +447,25 @@ mod tests {
 
     #[test]
     fn test_add_sched_runqueue_skips_zero() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_runqueue(dim, 0, 5_000);
-        assert!(buf.sched_runqueue.is_empty());
-        assert!(!buf.sched_off_cpu.is_empty());
+        let first = buf.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(first.runqueue_snapshot().count, 0);
+        assert_eq!(first.off_cpu_snapshot().count, 1);
 
-        let buf2 = test_buffer();
+        let mut buf2 = test_buffer();
         buf2.add_sched_runqueue(dim, 5_000, 0);
-        assert!(!buf2.sched_runqueue.is_empty());
-        assert!(buf2.sched_off_cpu.is_empty());
+        let second = buf2.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(second.runqueue_snapshot().count, 1);
+        assert_eq!(second.off_cpu_snapshot().count, 0);
     }
 
     #[test]
     fn test_add_page_fault() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_page_fault(dim, true);
         buf.add_page_fault(dim, false);
@@ -527,11 +479,8 @@ mod tests {
 
     #[test]
     fn test_add_fd_open_close() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_fd_open(dim);
         buf.add_fd_open(dim);
@@ -541,34 +490,5 @@ mod tests {
         assert_eq!(open.snapshot().count, 2);
         let close = buf.fd_close.get(&dim).expect("close exists");
         assert_eq!(close.snapshot().count, 1);
-    }
-
-    #[test]
-    fn test_concurrent_add_syscall() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let buf = Arc::new(test_buffer());
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
-        let mut handles = Vec::new();
-
-        for _ in 0..4 {
-            let buf = Arc::clone(&buf);
-            handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
-                    buf.add_syscall(EventType::SyscallRead, dim, 5_000);
-                }
-            }));
-        }
-
-        for h in handles {
-            h.join().expect("thread panicked");
-        }
-
-        let entry = buf.syscall_read.get(&dim).expect("entry exists");
-        assert_eq!(entry.snapshot().count, 4000);
     }
 }

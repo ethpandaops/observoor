@@ -3,48 +3,173 @@ use crate::agent::ports::PortLabel;
 /// Dimension key for metrics that only need PID + client type.
 /// Used for syscalls, page faults, scheduler events, memory events.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BasicDimension {
-    pub pid: u32,
-    pub client_type: u8,
-}
+#[repr(transparent)]
+pub struct BasicDimension(u64);
 
 /// Dimension key for per-core scheduler utilization accumulation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CpuCoreDimension {
-    pub pid: u32,
-    pub client_type: u8,
-    pub cpu_id: u32,
-}
+#[repr(transparent)]
+pub struct CpuCoreDimension(u128);
 
 /// Dimension key for network I/O metrics.
 /// Includes port label and direction for detailed network breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NetworkDimension {
-    pub pid: u32,
-    pub client_type: u8,
-    pub port_label: u8,
-    /// 0 = TX, 1 = RX.
-    pub direction: u8,
-}
+#[repr(transparent)]
+pub struct NetworkDimension(u64);
 
 /// Dimension key for TCP metrics (RTT, CWND).
 /// Similar to network but without direction since these are connection-level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct TCPMetricsDimension {
-    pub pid: u32,
-    pub client_type: u8,
-    pub port_label: u8,
-}
+#[repr(transparent)]
+pub struct TCPMetricsDimension(u64);
 
 /// Dimension key for disk I/O metrics.
 /// Includes device ID and read/write for per-device breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct DiskDimension {
-    pub pid: u32,
-    pub client_type: u8,
-    pub device_id: u32,
-    /// 0 = read, 1 = write.
-    pub rw: u8,
+#[repr(transparent)]
+pub struct DiskDimension(u128);
+
+impl BasicDimension {
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8) -> Self {
+        Self(pack_basic(pid, client_type))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+}
+
+impl CpuCoreDimension {
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8, cpu_id: u32) -> Self {
+        Self(pack_cpu_core(pid, client_type, cpu_id))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn cpu_id(self) -> u32 {
+        (self.0 >> 40) as u32
+    }
+}
+
+impl NetworkDimension {
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8, port_label: u8, direction: u8) -> Self {
+        Self(pack_network(pid, client_type, port_label, direction))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn port_label(self) -> u8 {
+        (self.0 >> 40) as u8
+    }
+
+    #[inline(always)]
+    pub fn direction(self) -> u8 {
+        (self.0 >> 48) as u8
+    }
+}
+
+impl TCPMetricsDimension {
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8, port_label: u8) -> Self {
+        Self(pack_tcp_metrics(pid, client_type, port_label))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn port_label(self) -> u8 {
+        (self.0 >> 40) as u8
+    }
+}
+
+impl DiskDimension {
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8, device_id: u32, rw: u8) -> Self {
+        Self(pack_disk(pid, client_type, device_id, rw))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn device_id(self) -> u32 {
+        (self.0 >> 40) as u32
+    }
+
+    #[inline(always)]
+    pub fn rw(self) -> u8 {
+        (self.0 >> 72) as u8
+    }
+}
+
+#[inline(always)]
+fn pack_basic(pid: u32, client_type: u8) -> u64 {
+    (pid as u64) | ((client_type as u64) << 32)
+}
+
+#[inline(always)]
+fn pack_cpu_core(pid: u32, client_type: u8, cpu_id: u32) -> u128 {
+    u128::from(pid) | (u128::from(client_type) << 32) | (u128::from(cpu_id) << 40)
+}
+
+#[inline(always)]
+fn pack_network(pid: u32, client_type: u8, port_label: u8, direction: u8) -> u64 {
+    pack_basic(pid, client_type) | (u64::from(port_label) << 40) | (u64::from(direction) << 48)
+}
+
+#[inline(always)]
+fn pack_tcp_metrics(pid: u32, client_type: u8, port_label: u8) -> u64 {
+    pack_basic(pid, client_type) | (u64::from(port_label) << 40)
+}
+
+#[inline(always)]
+fn pack_disk(pid: u32, client_type: u8, device_id: u32, rw: u8) -> u128 {
+    u128::from(pid)
+        | (u128::from(client_type) << 32)
+        | (u128::from(device_id) << 40)
+        | (u128::from(rw) << 72)
 }
 
 /// Returns a human-readable direction string.
@@ -78,80 +203,91 @@ mod tests {
     #[test]
     fn test_basic_dimension_as_map_key() {
         let mut map: HashMap<BasicDimension, u32> = HashMap::new();
-        let dim = BasicDimension {
-            pid: 100,
-            client_type: 1,
-        };
+        let dim = BasicDimension::new(100, 1);
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
     }
 
     #[test]
     fn test_basic_dimension_equality() {
-        let a = BasicDimension {
-            pid: 1,
-            client_type: 2,
-        };
-        let b = BasicDimension {
-            pid: 1,
-            client_type: 2,
-        };
-        let c = BasicDimension {
-            pid: 1,
-            client_type: 3,
-        };
+        let a = BasicDimension::new(1, 2);
+        let b = BasicDimension::new(1, 2);
+        let c = BasicDimension::new(1, 3);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
 
     #[test]
+    fn test_basic_dimension_accessors() {
+        let dim = BasicDimension::new(100, 7);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 7);
+    }
+
+    #[test]
     fn test_network_dimension_as_map_key() {
         let mut map: HashMap<NetworkDimension, u32> = HashMap::new();
-        let dim = NetworkDimension {
-            pid: 100,
-            client_type: 1,
-            port_label: PortLabel::ElJsonRpc as u8,
-            direction: 0,
-        };
+        let dim = NetworkDimension::new(100, 1, PortLabel::ElJsonRpc as u8, 0);
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
+    }
+
+    #[test]
+    fn test_network_dimension_accessors() {
+        let dim = NetworkDimension::new(100, 1, PortLabel::ElJsonRpc as u8, 1);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 1);
+        assert_eq!(dim.port_label(), PortLabel::ElJsonRpc as u8);
+        assert_eq!(dim.direction(), 1);
     }
 
     #[test]
     fn test_cpu_core_dimension_as_map_key() {
         let mut map: HashMap<CpuCoreDimension, u32> = HashMap::new();
-        let dim = CpuCoreDimension {
-            pid: 100,
-            client_type: 1,
-            cpu_id: 7,
-        };
+        let dim = CpuCoreDimension::new(100, 1, 7);
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
+    }
+
+    #[test]
+    fn test_cpu_core_dimension_accessors() {
+        let dim = CpuCoreDimension::new(100, 1, 7);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 1);
+        assert_eq!(dim.cpu_id(), 7);
     }
 
     #[test]
     fn test_tcp_metrics_dimension_as_map_key() {
         let mut map: HashMap<TCPMetricsDimension, u32> = HashMap::new();
-        let dim = TCPMetricsDimension {
-            pid: 100,
-            client_type: 1,
-            port_label: PortLabel::ElP2PTcp as u8,
-        };
+        let dim = TCPMetricsDimension::new(100, 1, PortLabel::ElP2PTcp as u8);
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
     }
 
     #[test]
+    fn test_tcp_metrics_dimension_accessors() {
+        let dim = TCPMetricsDimension::new(100, 1, PortLabel::ElP2PTcp as u8);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 1);
+        assert_eq!(dim.port_label(), PortLabel::ElP2PTcp as u8);
+    }
+
+    #[test]
     fn test_disk_dimension_as_map_key() {
         let mut map: HashMap<DiskDimension, u32> = HashMap::new();
-        let dim = DiskDimension {
-            pid: 100,
-            client_type: 1,
-            device_id: 259,
-            rw: 0,
-        };
+        let dim = DiskDimension::new(100, 1, 259, 0);
         map.insert(dim, 42);
         assert_eq!(map.get(&dim), Some(&42));
+    }
+
+    #[test]
+    fn test_disk_dimension_accessors() {
+        let dim = DiskDimension::new(100, 1, 259, 1);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 1);
+        assert_eq!(dim.device_id(), 259);
+        assert_eq!(dim.rw(), 1);
     }
 
     #[test]

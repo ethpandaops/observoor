@@ -349,25 +349,24 @@ pub struct Event {
     pub pid: u32,
     pub tid: u32,
     pub event_type: EventType,
-    pub client_type: ClientType,
+    /// Validated raw `ClientType` discriminant from the ring buffer.
+    pub client_type: u8,
 }
 
 /// Syscall event with latency measurement.
+///
+/// The aggregated sink only needs latency on the hot path, so the parser
+/// drops return value and argument fields to avoid extra decoding and copying.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SyscallEvent {
-    pub event: Event,
     pub latency_ns: u64,
-    pub ret: i64,
-    pub syscall_nr: u32,
-    pub fd: i32,
 }
 
 /// Block I/O operation event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct DiskIOEvent {
-    pub event: Event,
     pub latency_ns: u64,
     pub bytes: u32,
     /// 0 = read, 1 = write.
@@ -382,12 +381,13 @@ pub struct DiskIOEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct NetIOEvent {
-    pub event: Event,
     pub bytes: u32,
     pub src_port: u16,
     pub dst_port: u16,
-    pub direction: Direction,
-    pub transport: NetTransport,
+    /// Validated raw `Direction` discriminant from the ring buffer.
+    pub direction: u8,
+    /// Validated raw `NetTransport` discriminant from the ring buffer.
+    pub transport: u8,
     pub has_metrics: bool,
     pub srtt_us: u32,
     pub cwnd: u32,
@@ -397,7 +397,6 @@ pub struct NetIOEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SchedEvent {
-    pub event: Event,
     pub on_cpu_ns: u64,
     pub voluntary: bool,
     pub cpu_id: u32,
@@ -407,7 +406,6 @@ pub struct SchedEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SchedRunqueueEvent {
-    pub event: Event,
     pub runqueue_ns: u64,
     pub off_cpu_ns: u64,
     pub cpu_id: u32,
@@ -417,25 +415,13 @@ pub struct SchedRunqueueEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct PageFaultEvent {
-    pub event: Event,
-    pub address: u64,
     pub major: bool,
-}
-
-/// File descriptor open/close event.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct FDEvent {
-    pub event: Event,
-    pub fd: i32,
-    pub filename: String,
 }
 
 /// Merged block I/O request event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct BlockMergeEvent {
-    pub event: Event,
     pub bytes: u32,
     /// 0 = read, 1 = write.
     pub rw: u8,
@@ -445,7 +431,6 @@ pub struct BlockMergeEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct TcpRetransmitEvent {
-    pub event: Event,
     pub bytes: u32,
     pub src_port: u16,
     pub dst_port: u16,
@@ -455,7 +440,6 @@ pub struct TcpRetransmitEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct TcpStateEvent {
-    pub event: Event,
     pub src_port: u16,
     pub dst_port: u16,
     pub new_state: u8,
@@ -466,7 +450,6 @@ pub struct TcpStateEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct MemLatencyEvent {
-    pub event: Event,
     pub duration_ns: u64,
 }
 
@@ -474,7 +457,6 @@ pub struct MemLatencyEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SwapEvent {
-    pub event: Event,
     pub pages: u64,
 }
 
@@ -482,7 +464,6 @@ pub struct SwapEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct OOMKillEvent {
-    pub event: Event,
     pub target_pid: u32,
 }
 
@@ -490,7 +471,6 @@ pub struct OOMKillEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct ProcessExitEvent {
-    pub event: Event,
     pub exit_code: u32,
 }
 
@@ -499,7 +479,8 @@ pub struct ProcessExitEvent {
 pub struct ParsedEvent {
     /// Common event header.
     pub raw: Event,
-    /// Typed event payload.
+    /// Typed event payload. The shared header lives only in `raw` to keep
+    /// hot-path parse and channel copies small.
     pub typed: TypedEvent,
 }
 
@@ -507,18 +488,29 @@ pub struct ParsedEvent {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum TypedEvent {
-    Syscall(SyscallEvent),
+    // Subtype-specific variants avoid a second hot-path match on raw.event_type.
+    SyscallRead(SyscallEvent),
+    SyscallWrite(SyscallEvent),
+    SyscallFutex(SyscallEvent),
+    SyscallMmap(SyscallEvent),
+    SyscallEpollWait(SyscallEvent),
+    SyscallFsync(SyscallEvent),
+    SyscallFdatasync(SyscallEvent),
+    SyscallPwrite(SyscallEvent),
     DiskIO(DiskIOEvent),
     NetIO(NetIOEvent),
     Sched(SchedEvent),
     SchedRunqueue(SchedRunqueueEvent),
     PageFault(PageFaultEvent),
-    FD(FDEvent),
+    FDOpen,
+    FDClose,
     BlockMerge(BlockMergeEvent),
     TcpRetransmit(TcpRetransmitEvent),
     TcpState(TcpStateEvent),
-    MemLatency(MemLatencyEvent),
-    Swap(SwapEvent),
+    MemReclaim(MemLatencyEvent),
+    MemCompaction(MemLatencyEvent),
+    SwapIn(SwapEvent),
+    SwapOut(SwapEvent),
     OOMKill(OOMKillEvent),
     ProcessExit(ProcessExitEvent),
 }

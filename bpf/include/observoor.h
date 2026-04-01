@@ -46,13 +46,10 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Syscall event (48 bytes total).
+// Syscall event (32 bytes total).
 struct syscall_event {
     struct event_header hdr;
     __u64 latency_ns;
-    __s64 ret;
-    __u32 syscall_nr;
-    __s32 fd;
 };
 
 // Disk I/O event (48 bytes total).
@@ -89,20 +86,16 @@ struct sched_event {
     __u32 cpu_id;
 };
 
-// Page fault event (40 bytes total).
+// Page fault event (32 bytes total).
 struct page_fault_event {
     struct event_header hdr;
-    __u64 address;
     __u8  major;
     __u8  pad[7];
 };
 
-// FD event (96 bytes total).
+// FD event (24 bytes total).
 struct fd_event {
     struct event_header hdr;
-    __s32 fd;
-    __u8  pad[4];
-    char  filename[64];
 };
 
 // Scheduler runqueue event (48 bytes total).
@@ -179,12 +172,6 @@ struct syscall_val {
     __u32 pad;
 };
 
-// Openat filename capture.
-struct openat_val {
-    __u64 ts;
-    char  filename[64];
-};
-
 // Block I/O request tracking.
 struct req_key {
     __u32 dev;
@@ -224,12 +211,6 @@ struct net_send_val {
     __u8  pad[2];
     __u32 srtt_us;
     __u32 snd_cwnd;
-};
-
-// Page fault tracking.
-struct fault_val {
-    __u64 ts;
-    __u64 address;
 };
 
 // Tracepoint context structs (non-CO-RE). Defined here (outside vmlinux.h)

@@ -64,14 +64,6 @@ struct {
     __type(value, struct syscall_val);
 } syscall_start SEC(".maps");
 
-// openat_names: Filename capture during openat.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, struct syscall_key);
-    __type(value, struct openat_val);
-} openat_names SEC(".maps");
-
 // req_start: Block I/O request tracking.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -111,14 +103,6 @@ struct {
     __type(key, struct syscall_key);
     __type(value, struct net_send_val);
 } net_send_udp_start SEC(".maps");
-
-// fault_start: Page fault entry timestamps.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
-    __type(key, struct syscall_key);
-    __type(value, struct fault_val);
-} fault_start SEC(".maps");
 
 // tracked_tids: TIDs to trace for on-CPU time, value is pid + client_type.
 struct tracked_tid_val {
@@ -268,19 +252,6 @@ static __always_inline struct tracked_tid_val *lookup_tracked_tid(
     __u32 tid
 ) {
     return bpf_map_lookup_elem(&tracked_tids, &tid);
-}
-
-// Helper: Drop per-TID scheduler state on thread exit.
-//
-// Linux can reuse TIDs quickly under thread-heavy runtimes. Removing this
-// state eagerly prevents a newly-created thread from inheriting old scheduler
-// timestamps or stale tracked-thread metadata.
-static __always_inline void cleanup_tid_scheduler_state(__u32 tid)
-{
-    bpf_map_delete_elem(&tracked_tids, &tid);
-    bpf_map_delete_elem(&wakeup_ts, &tid);
-    bpf_map_delete_elem(&sched_on_ts, &tid);
-    bpf_map_delete_elem(&offcpu_ts, &tid);
 }
 
 // Helper: Fill common event header.

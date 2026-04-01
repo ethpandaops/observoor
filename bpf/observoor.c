@@ -81,6 +81,7 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_READ))
         goto cleanup;
@@ -91,9 +92,6 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_READ, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = 0; // read
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -136,6 +134,7 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_WRITE))
         goto cleanup;
@@ -146,9 +145,6 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_WRITE, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = 1; // write
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -191,6 +187,7 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_FUTEX))
         goto cleanup;
@@ -201,9 +198,6 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = 202; // futex
-    e->fd = 0;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -246,6 +240,7 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_MMAP))
         goto cleanup;
@@ -256,9 +251,6 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_MMAP, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = 9; // mmap
-    e->fd = 0;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -301,6 +293,7 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_EPOLL_WAIT))
         goto cleanup;
@@ -311,9 +304,6 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = 232; // epoll_wait
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -356,6 +346,7 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_FSYNC))
         goto cleanup;
@@ -366,9 +357,6 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = (u32)ctx->id;
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -411,6 +399,7 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_FDATASYNC))
         goto cleanup;
@@ -421,9 +410,6 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = (u32)ctx->id;
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -466,6 +452,7 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
     struct syscall_val *val = bpf_map_lookup_elem(&syscall_start, &key);
     if (!val)
         return 0;
+    (void)ctx;
 
     if (!should_emit_event(EVENT_SYSCALL_PWRITE))
         goto cleanup;
@@ -476,9 +463,6 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
 
     fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, ct);
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->ret = ctx->ret;
-    e->syscall_nr = (u32)ctx->id;
-    e->fd = val->fd;
 
     bpf_ringbuf_submit(e, 0);
 
@@ -491,29 +475,10 @@ cleanup:
 // FD tracers: openat, close
 // =========================================================
 
-SEC("tracepoint/syscalls/sys_enter_openat")
-int trace_sys_enter_openat(struct trace_event_raw_sys_enter *ctx)
-{
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
-    struct syscall_key key = { .pid_tgid = pid_tgid };
-    struct openat_val val = { .ts = bpf_ktime_get_ns() };
-
-    const char *fname = (const char *)ctx->args[1];
-    bpf_probe_read_user_str(val.filename, sizeof(val.filename), fname);
-
-    bpf_map_update_elem(&openat_names, &key, &val, BPF_ANY);
-    return 0;
-}
-
 SEC("tracepoint/syscalls/sys_exit_openat")
 int trace_sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -521,32 +486,22 @@ int trace_sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
     if (!is_tracked(pid, &ct))
         return 0;
 
-    struct syscall_key key = { .pid_tgid = pid_tgid };
-    struct openat_val *val = bpf_map_lookup_elem(&openat_names, &key);
-    if (!val)
-        return 0;
-
     if (!should_emit_event(EVENT_FD_OPEN))
-        goto cleanup;
+        return 0;
 
     struct fd_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
-        goto cleanup;
+        return 0;
 
     fill_header(&e->hdr, EVENT_FD_OPEN, ct);
-    e->fd = (int)ctx->ret;
-    __builtin_memcpy(e->filename, val->filename, sizeof(e->filename));
-
     bpf_ringbuf_submit(e, 0);
-
-cleanup:
-    bpf_map_delete_elem(&openat_names, &key);
     return 0;
 }
 
 SEC("tracepoint/syscalls/sys_enter_close")
 int trace_sys_enter_close(struct trace_event_raw_sys_enter *ctx)
 {
+    (void)ctx;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -562,9 +517,6 @@ int trace_sys_enter_close(struct trace_event_raw_sys_enter *ctx)
         return 0;
 
     fill_header(&e->hdr, EVENT_FD_CLOSE, ct);
-    e->fd = (int)ctx->args[0];
-    __builtin_memset(e->filename, 0, sizeof(e->filename));
-
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
@@ -1183,45 +1135,20 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     }
 
     // Path B: Emit event for outgoing (prev) thread.
-    //
-    // The tracepoint already provides prev_pid (the outgoing TID). Prefer the
-    // tracked_tids map for PID/client resolution instead of assuming
-    // bpf_get_current_pid_tgid() still refers to the outgoing task on every
-    // kernel. That assumption can drift across kernels and lead to stale
-    // sched_on_ts lookups being charged to the wrong process.
-    __u32 tid = ctx->prev_pid;
-    __u32 pid = 0;
+    // The tracepoint's prev_pid is a TID (thread ID), not the TGID
+    // (thread group ID) we store in tracked_pids. Use the current
+    // task's TGID for the PID filter check.
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    __u32 tid = (__u32)pid_tgid;
 
-    struct tracked_tid_val *prev_info = lookup_tracked_tid(tid);
-    if (prev_info) {
-        pid = prev_info->pid;
-        ct = prev_info->client_type;
-    } else {
-        // Fallback for threads created between userspace TID refreshes: only
-        // trust current_pid_tgid when the kernel still reports the outgoing TID
-        // as current. Otherwise skip rather than risk misattributing CPU time.
-        __u64 pid_tgid = bpf_get_current_pid_tgid();
-        if ((__u32)pid_tgid != tid)
-            return 0;
+    if (!is_tracked(pid, &ct))
+        return 0;
 
-        pid = pid_tgid >> 32;
-        if (!is_tracked(pid, &ct))
-            return 0;
-    }
-
-    // Record off-CPU timestamp for the outgoing tracked thread. The LRU map
-    // auto-evicts stale entries from dead threads.
+    // Record off-CPU timestamp unconditionally for all threads in tracked
+    // processes. The is_tracked(pid) check above already filters by TGID.
+    // The LRU map auto-evicts stale entries from dead threads.
     bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
-
-    // Consume sched_on_ts exactly once even if the event is sampled out or the
-    // ring buffer is temporarily full. Leaving the old start timestamp behind
-    // would make the next switch-out accumulate multiple slices into one
-    // impossible on_cpu_ns value.
-    __u64 on_cpu_ns = 0;
-    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
-    if (on_ts && *on_ts > 0 && now > *on_ts)
-        on_cpu_ns = now - *on_ts;
-    bpf_map_delete_elem(&sched_on_ts, &tid);
 
     if (!should_emit_event(EVENT_SCHED_SWITCH))
         return 0;
@@ -1236,7 +1163,15 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     e->hdr.event_type = EVENT_SCHED_SWITCH;
     e->hdr.client_type = ct;
     __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
-    e->on_cpu_ns = on_cpu_ns;
+
+    // Compute on-CPU duration from sched_on_ts entry.
+    __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
+    if (on_ts && *on_ts > 0 && now > *on_ts) {
+        e->on_cpu_ns = now - *on_ts;
+    } else {
+        e->on_cpu_ns = 0;
+    }
+    bpf_map_delete_elem(&sched_on_ts, &tid);
 
     // prev_state > 0 means the task was preempted (involuntary),
     // prev_state == 0 means the task voluntarily yielded.
@@ -1252,58 +1187,28 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
 // Memory tracers
 // =========================================================
 
-SEC("kprobe/handle_mm_fault")
-int BPF_KPROBE(kprobe_handle_mm_fault, struct vm_area_struct *vma,
-               unsigned long address)
-{
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
-    struct syscall_key key = { .pid_tgid = pid_tgid };
-    struct fault_val val = {
-        .ts = bpf_ktime_get_ns(),
-        .address = address,
-    };
-    bpf_map_update_elem(&fault_start, &key, &val, BPF_ANY);
-    return 0;
-}
-
 SEC("kretprobe/handle_mm_fault")
 int BPF_KRETPROBE(kretprobe_handle_mm_fault, unsigned long ret)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
+    __u32 pid = bpf_get_current_pid_tgid() >> 32;
     __u8 ct;
 
     if (!is_tracked(pid, &ct))
         return 0;
 
-    struct syscall_key key = { .pid_tgid = pid_tgid };
-    struct fault_val *val = bpf_map_lookup_elem(&fault_start, &key);
-    if (!val)
+    if (!should_emit_event(EVENT_PAGE_FAULT))
         return 0;
 
-    if (!should_emit_event(EVENT_PAGE_FAULT))
-        goto cleanup;
-
-    struct page_fault_event *e = bpf_ringbuf_reserve(
-        &events, sizeof(*e), 0);
+    struct page_fault_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
-        goto cleanup;
+        return 0;
 
     fill_header(&e->hdr, EVENT_PAGE_FAULT, ct);
-    e->address = val->address;
     // VM_FAULT_MAJOR is typically bit 2 (0x04).
     e->major = (ret & 0x04) ? 1 : 0;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
-
-cleanup:
-    bpf_map_delete_elem(&fault_start, &key);
     return 0;
 }
 
@@ -1490,13 +1395,7 @@ int BPF_KPROBE(kprobe_do_exit, long code)
 {
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
-    __u32 tid = (__u32)pid_tgid;
     __u8 ct;
-
-    // Always clean scheduler/TID state. sched_switch timestamps are tracked for
-    // all threads, and fast TID reuse can otherwise turn stale entries into
-    // impossible on/off-CPU durations for the next thread owner.
-    cleanup_tid_scheduler_state(tid);
 
     if (!is_tracked(pid, &ct))
         return 0;

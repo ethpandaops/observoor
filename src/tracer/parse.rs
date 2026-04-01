@@ -7,10 +7,10 @@
 use thiserror::Error;
 
 use super::event::{
-    BlockMergeEvent, ClientType, Direction, DiskIOEvent, Event, EventType, FDEvent,
-    MemLatencyEvent, NetIOEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
-    ProcessExitEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent,
-    TcpStateEvent, TypedEvent,
+    BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
+    NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent, ProcessExitEvent, SchedEvent,
+    SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TcpStateEvent, TypedEvent,
+    MAX_CLIENT_TYPE,
 };
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
@@ -47,66 +47,115 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
     let event_type_raw = read_u8(data, 16);
     let client_type_raw = read_u8(data, 17);
 
-    let event_type = EventType::from_u8(event_type_raw).ok_or(ParseError::UnknownEventType {
-        raw: event_type_raw,
-    })?;
-    let client_type =
-        ClientType::from_u8(client_type_raw).ok_or(ParseError::UnknownClientType {
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(ParseError::UnknownClientType {
             raw: client_type_raw,
-        })?;
+        });
+    }
+
+    // Decode the raw event tag once and build the typed payload from the same
+    // dispatch to avoid a second hot-path match on `EventType`.
+    // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
+    let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
+    let (event_type, typed) = match event_type_raw {
+        1 => (
+            EventType::SyscallRead,
+            TypedEvent::SyscallRead(parse_syscall(payload)?),
+        ),
+        2 => (
+            EventType::SyscallWrite,
+            TypedEvent::SyscallWrite(parse_syscall(payload)?),
+        ),
+        3 => (
+            EventType::SyscallFutex,
+            TypedEvent::SyscallFutex(parse_syscall(payload)?),
+        ),
+        4 => (
+            EventType::SyscallMmap,
+            TypedEvent::SyscallMmap(parse_syscall(payload)?),
+        ),
+        5 => (
+            EventType::SyscallEpollWait,
+            TypedEvent::SyscallEpollWait(parse_syscall(payload)?),
+        ),
+        6 => (
+            EventType::DiskIO,
+            TypedEvent::DiskIO(parse_disk_io(payload)?),
+        ),
+        7 => (EventType::NetTX, TypedEvent::NetIO(parse_net_io(payload)?)),
+        8 => (EventType::NetRX, TypedEvent::NetIO(parse_net_io(payload)?)),
+        9 => (
+            EventType::SchedSwitch,
+            TypedEvent::Sched(parse_sched(payload)?),
+        ),
+        10 => (
+            EventType::PageFault,
+            TypedEvent::PageFault(parse_page_fault(payload)?),
+        ),
+        11 => (EventType::FDOpen, TypedEvent::FDOpen),
+        12 => (EventType::FDClose, TypedEvent::FDClose),
+        13 => (
+            EventType::SyscallFsync,
+            TypedEvent::SyscallFsync(parse_syscall(payload)?),
+        ),
+        14 => (
+            EventType::SyscallFdatasync,
+            TypedEvent::SyscallFdatasync(parse_syscall(payload)?),
+        ),
+        15 => (
+            EventType::SyscallPwrite,
+            TypedEvent::SyscallPwrite(parse_syscall(payload)?),
+        ),
+        16 => (
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(parse_sched_runqueue(payload)?),
+        ),
+        17 => (
+            EventType::BlockMerge,
+            TypedEvent::BlockMerge(parse_block_merge(payload)?),
+        ),
+        18 => (
+            EventType::TcpRetransmit,
+            TypedEvent::TcpRetransmit(parse_tcp_retransmit(payload)?),
+        ),
+        19 => (
+            EventType::TcpState,
+            TypedEvent::TcpState(parse_tcp_state(payload)?),
+        ),
+        20 => (
+            EventType::MemReclaim,
+            TypedEvent::MemReclaim(parse_mem_latency(payload)?),
+        ),
+        21 => (
+            EventType::MemCompaction,
+            TypedEvent::MemCompaction(parse_mem_latency(payload)?),
+        ),
+        22 => (EventType::SwapIn, TypedEvent::SwapIn(parse_swap(payload)?)),
+        23 => (
+            EventType::SwapOut,
+            TypedEvent::SwapOut(parse_swap(payload)?),
+        ),
+        24 => (
+            EventType::OOMKill,
+            TypedEvent::OOMKill(parse_oom_kill(payload)?),
+        ),
+        25 => (
+            EventType::ProcessExit,
+            TypedEvent::ProcessExit(parse_process_exit(payload)?),
+        ),
+        _ => {
+            return Err(ParseError::UnknownEventType {
+                raw: event_type_raw,
+            });
+        }
+    };
 
     let event = Event {
         timestamp_ns: read_u64_le(data, 0),
         pid: read_u32_le(data, 8),
         tid: read_u32_le(data, 12),
         event_type,
-        client_type,
-    };
-
-    // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
-    let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
-
-    let typed = match event_type {
-        EventType::SyscallRead
-        | EventType::SyscallWrite
-        | EventType::SyscallFutex
-        | EventType::SyscallMmap
-        | EventType::SyscallEpollWait
-        | EventType::SyscallFsync
-        | EventType::SyscallFdatasync
-        | EventType::SyscallPwrite => TypedEvent::Syscall(parse_syscall(event, payload)?),
-
-        EventType::DiskIO => TypedEvent::DiskIO(parse_disk_io(event, payload)?),
-
-        EventType::NetTX | EventType::NetRX => TypedEvent::NetIO(parse_net_io(event, payload)?),
-
-        EventType::SchedSwitch => TypedEvent::Sched(parse_sched(event, payload)?),
-
-        EventType::SchedRunqueue => {
-            TypedEvent::SchedRunqueue(parse_sched_runqueue(event, payload)?)
-        }
-
-        EventType::PageFault => TypedEvent::PageFault(parse_page_fault(event, payload)?),
-
-        EventType::FDOpen | EventType::FDClose => TypedEvent::FD(parse_fd(event, payload)?),
-
-        EventType::BlockMerge => TypedEvent::BlockMerge(parse_block_merge(event, payload)?),
-
-        EventType::TcpRetransmit => {
-            TypedEvent::TcpRetransmit(parse_tcp_retransmit(event, payload)?)
-        }
-
-        EventType::TcpState => TypedEvent::TcpState(parse_tcp_state(event, payload)?),
-
-        EventType::MemReclaim | EventType::MemCompaction => {
-            TypedEvent::MemLatency(parse_mem_latency(event, payload)?)
-        }
-
-        EventType::SwapIn | EventType::SwapOut => TypedEvent::Swap(parse_swap(event, payload)?),
-
-        EventType::OOMKill => TypedEvent::OOMKill(parse_oom_kill(event, payload)?),
-
-        EventType::ProcessExit => TypedEvent::ProcessExit(parse_process_exit(event, payload)?),
+        client_type: client_type_raw,
     };
 
     Ok(ParsedEvent { raw: event, typed })
@@ -145,14 +194,6 @@ fn read_fixed<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
     unsafe { (data.as_ptr().add(offset) as *const [u8; N]).read_unaligned() }
 }
 
-fn read_i32_le(data: &[u8], offset: usize) -> i32 {
-    read_u32_le(data, offset) as i32
-}
-
-fn read_i64_le(data: &[u8], offset: usize) -> i64 {
-    read_u64_le(data, offset) as i64
-}
-
 fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), ParseError> {
     if data.len() < need {
         Err(ParseError::PayloadTruncated { event_name: name })
@@ -165,23 +206,21 @@ fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), Pa
 // Per-event-type parsers
 // ---------------------------------------------------------------------------
 
-/// Syscall events: types 1-5, 13-15. Payload: 24 bytes.
-fn parse_syscall(event: Event, data: &[u8]) -> Result<SyscallEvent, ParseError> {
-    ensure_payload(data, 24, "syscall event")?;
+/// Syscall events: types 1-5, 13-15. Payload: 8 bytes.
+///
+/// The kernel emits latency-only syscall payloads so the hottest event family
+/// stays small on the ring buffer and in tracer batch handoff.
+fn parse_syscall(data: &[u8]) -> Result<SyscallEvent, ParseError> {
+    ensure_payload(data, 8, "syscall event")?;
     Ok(SyscallEvent {
-        event,
         latency_ns: read_u64_le(data, 0),
-        ret: read_i64_le(data, 8),
-        syscall_nr: read_u32_le(data, 16),
-        fd: read_i32_le(data, 20),
     })
 }
 
 /// Disk I/O event: type 6. Payload: 24 bytes.
-fn parse_disk_io(event: Event, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
+fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     ensure_payload(data, 24, "disk IO event")?;
     Ok(DiskIOEvent {
-        event,
         latency_ns: read_u64_le(data, 0),
         bytes: read_u32_le(data, 8),
         rw: read_u8(data, 12),
@@ -192,26 +231,28 @@ fn parse_disk_io(event: Event, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
 }
 
 /// Net I/O event: types 7-8. Payload: 20 bytes minimum.
-fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
+fn parse_net_io(data: &[u8]) -> Result<NetIOEvent, ParseError> {
     ensure_payload(data, 20, "net IO event")?;
     let direction_raw = read_u8(data, 8);
-    let direction = Direction::from_u8(direction_raw).ok_or(ParseError::InvalidDirection {
-        event_name: "net IO event",
-        raw: direction_raw,
-    })?;
+    if direction_raw > Direction::RX as u8 {
+        return Err(ParseError::InvalidDirection {
+            event_name: "net IO event",
+            raw: direction_raw,
+        });
+    }
     let transport_raw = read_u8(data, 10);
-    let transport =
-        NetTransport::from_u8(transport_raw).ok_or(ParseError::InvalidNetTransport {
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(ParseError::InvalidNetTransport {
             event_name: "net IO event",
             raw: transport_raw,
-        })?;
+        });
+    }
     Ok(NetIOEvent {
-        event,
         bytes: read_u32_le(data, 0),
         src_port: read_u16_le(data, 4),
         dst_port: read_u16_le(data, 6),
-        direction,
-        transport,
+        direction: direction_raw,
+        transport: transport_raw,
         has_metrics: read_u8(data, 9) != 0,
         // pad[1] at 11
         srtt_us: read_u32_le(data, 12),
@@ -220,10 +261,9 @@ fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
 }
 
 /// Scheduler context-switch event: type 9. Payload: 16 bytes.
-fn parse_sched(event: Event, data: &[u8]) -> Result<SchedEvent, ParseError> {
+fn parse_sched(data: &[u8]) -> Result<SchedEvent, ParseError> {
     ensure_payload(data, 16, "sched event")?;
     Ok(SchedEvent {
-        event,
         on_cpu_ns: read_u64_le(data, 0),
         voluntary: read_u8(data, 8) != 0,
         cpu_id: read_u32_le(data, 12),
@@ -231,68 +271,36 @@ fn parse_sched(event: Event, data: &[u8]) -> Result<SchedEvent, ParseError> {
 }
 
 /// Scheduler runqueue/off-CPU latency event: type 16. Payload: 24 bytes.
-fn parse_sched_runqueue(event: Event, data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
+fn parse_sched_runqueue(data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
     ensure_payload(data, 24, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
-        event,
         runqueue_ns: read_u64_le(data, 0),
         off_cpu_ns: read_u64_le(data, 8),
         cpu_id: read_u32_le(data, 16),
     })
 }
 
-/// Page fault event: type 10. Payload: 16 bytes.
-fn parse_page_fault(event: Event, data: &[u8]) -> Result<PageFaultEvent, ParseError> {
-    ensure_payload(data, 16, "page fault event")?;
+/// Page fault event: type 10. Payload: 8 bytes.
+fn parse_page_fault(data: &[u8]) -> Result<PageFaultEvent, ParseError> {
+    ensure_payload(data, 8, "page fault event")?;
     Ok(PageFaultEvent {
-        event,
-        address: read_u64_le(data, 0),
-        major: read_u8(data, 8) != 0,
-    })
-}
-
-/// File descriptor open/close event: types 11-12. Payload: 72 bytes.
-fn parse_fd(event: Event, data: &[u8]) -> Result<FDEvent, ParseError> {
-    ensure_payload(data, 72, "FD event")?;
-    // Safety: ensure_payload above guarantees `data[8..72]` is in-bounds.
-    let filename_bytes = unsafe { data.get_unchecked(8..72) };
-    let filename = if filename_bytes.first().copied().unwrap_or(0) == 0 {
-        String::new()
-    } else {
-        let null_pos = filename_bytes
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(filename_bytes.len());
-        let trimmed = filename_bytes.get(..null_pos).unwrap_or(&[]);
-
-        match std::str::from_utf8(trimmed) {
-            Ok(s) => s.to_owned(),
-            Err(_) => String::from_utf8_lossy(trimmed).into_owned(),
-        }
-    };
-    Ok(FDEvent {
-        event,
-        fd: read_i32_le(data, 0),
-        // pad[4] at 4-7
-        filename,
+        major: read_u8(data, 0) != 0,
     })
 }
 
 /// Block merge event: type 17. Payload: 8 bytes.
-fn parse_block_merge(event: Event, data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
+fn parse_block_merge(data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
     ensure_payload(data, 8, "block merge event")?;
     Ok(BlockMergeEvent {
-        event,
         bytes: read_u32_le(data, 0),
         rw: read_u8(data, 4),
     })
 }
 
 /// TCP retransmit event: type 18. Payload: 16 bytes (8 meaningful + 8 pad).
-fn parse_tcp_retransmit(event: Event, data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
+fn parse_tcp_retransmit(data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
     ensure_payload(data, 16, "tcp retransmit event")?;
     Ok(TcpRetransmitEvent {
-        event,
         bytes: read_u32_le(data, 0),
         src_port: read_u16_le(data, 4),
         dst_port: read_u16_le(data, 6),
@@ -300,10 +308,9 @@ fn parse_tcp_retransmit(event: Event, data: &[u8]) -> Result<TcpRetransmitEvent,
 }
 
 /// TCP state change event: type 19. Payload: 16 bytes (6 meaningful + 10 pad).
-fn parse_tcp_state(event: Event, data: &[u8]) -> Result<TcpStateEvent, ParseError> {
+fn parse_tcp_state(data: &[u8]) -> Result<TcpStateEvent, ParseError> {
     ensure_payload(data, 16, "tcp state event")?;
     Ok(TcpStateEvent {
-        event,
         src_port: read_u16_le(data, 0),
         dst_port: read_u16_le(data, 2),
         new_state: read_u8(data, 4),
@@ -312,37 +319,33 @@ fn parse_tcp_state(event: Event, data: &[u8]) -> Result<TcpStateEvent, ParseErro
 }
 
 /// Memory reclaim/compaction latency event: types 20-21. Payload: 8 bytes.
-fn parse_mem_latency(event: Event, data: &[u8]) -> Result<MemLatencyEvent, ParseError> {
+fn parse_mem_latency(data: &[u8]) -> Result<MemLatencyEvent, ParseError> {
     ensure_payload(data, 8, "mem latency event")?;
     Ok(MemLatencyEvent {
-        event,
         duration_ns: read_u64_le(data, 0),
     })
 }
 
 /// Swap in/out event: types 22-23. Payload: 8 bytes.
-fn parse_swap(event: Event, data: &[u8]) -> Result<SwapEvent, ParseError> {
+fn parse_swap(data: &[u8]) -> Result<SwapEvent, ParseError> {
     ensure_payload(data, 8, "swap event")?;
     Ok(SwapEvent {
-        event,
         pages: read_u64_le(data, 0),
     })
 }
 
 /// OOM kill event: type 24. Payload: 8 bytes.
-fn parse_oom_kill(event: Event, data: &[u8]) -> Result<OOMKillEvent, ParseError> {
+fn parse_oom_kill(data: &[u8]) -> Result<OOMKillEvent, ParseError> {
     ensure_payload(data, 8, "oom kill event")?;
     Ok(OOMKillEvent {
-        event,
         target_pid: read_u32_le(data, 0),
     })
 }
 
 /// Process exit event: type 25. Payload: 8 bytes.
-fn parse_process_exit(event: Event, data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
+fn parse_process_exit(data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
     ensure_payload(data, 8, "process exit event")?;
     Ok(ProcessExitEvent {
-        event,
         exit_code: read_u32_le(data, 0),
     })
 }
@@ -368,7 +371,7 @@ mod tests {
         buf
     }
 
-    fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: ClientType) {
+    fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
         assert_eq!(event.pid, pid);
         assert_eq!(event.tid, tid);
@@ -416,7 +419,7 @@ mod tests {
 
     #[test]
     fn test_header_only_truncates_payload() {
-        // SyscallRead needs 24 byte payload, none provided.
+        // SyscallRead needs 8 bytes of payload, none provided.
         let data = header(1000, 42, 43, 1, 1);
         assert!(matches!(
             parse_event(&data).unwrap_err(),
@@ -427,7 +430,7 @@ mod tests {
     #[test]
     fn test_syscall_short_payload() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 10]); // need 24
+        data.extend_from_slice(&[0u8; 4]); // need 8
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::PayloadTruncated {
@@ -473,52 +476,50 @@ mod tests {
     fn test_syscall_read() {
         let mut data = header(1_000_000, 100, 200, 1, 1); // SyscallRead, Geth
         data.extend_from_slice(&500_000u64.to_le_bytes());
-        data.extend_from_slice(&42i64.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&3i32.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        assert_header(
-            &parsed.raw,
-            1_000_000,
-            100,
-            200,
-            EventType::SyscallRead,
-            ClientType::Geth,
-        );
-        let TypedEvent::Syscall(e) = &parsed.typed else {
-            panic!("expected Syscall");
+        assert_header(&parsed.raw, 1_000_000, 100, 200, EventType::SyscallRead, 1);
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
         };
         assert_eq!(e.latency_ns, 500_000);
-        assert_eq!(e.ret, 42);
-        assert_eq!(e.syscall_nr, 0);
-        assert_eq!(e.fd, 3);
     }
 
     #[test]
     fn test_syscall_write_negative_return() {
         let mut data = header(2_000_000, 101, 201, 2, 2); // SyscallWrite, Reth
         data.extend_from_slice(&750_000u64.to_le_bytes());
-        data.extend_from_slice(&(-1i64).to_le_bytes());
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&5i32.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Syscall(e) = &parsed.typed else {
-            panic!("expected Syscall");
+        let TypedEvent::SyscallWrite(e) = &parsed.typed else {
+            panic!("expected SyscallWrite");
         };
-        assert_eq!(e.ret, -1);
-        assert_eq!(e.event.event_type, EventType::SyscallWrite);
+        assert_eq!(e.latency_ns, 750_000);
+        assert_eq!(parsed.raw.event_type, EventType::SyscallWrite);
     }
 
     #[test]
     fn test_all_syscall_types_parse() {
         for event_type in [1u8, 2, 3, 4, 5, 13, 14, 15] {
             let mut data = header(1000, 42, 43, event_type, 0);
-            data.extend_from_slice(&[0u8; 24]);
-            let result = parse_event(&data);
-            assert!(result.is_ok(), "event type {} should parse", event_type);
-            assert!(matches!(result.unwrap().typed, TypedEvent::Syscall(_)));
+            data.extend_from_slice(&[0u8; 8]);
+            let parsed = parse_event(&data).expect("syscall should parse");
+            let matches_expected_variant = match event_type {
+                1 => matches!(parsed.typed, TypedEvent::SyscallRead(_)),
+                2 => matches!(parsed.typed, TypedEvent::SyscallWrite(_)),
+                3 => matches!(parsed.typed, TypedEvent::SyscallFutex(_)),
+                4 => matches!(parsed.typed, TypedEvent::SyscallMmap(_)),
+                5 => matches!(parsed.typed, TypedEvent::SyscallEpollWait(_)),
+                13 => matches!(parsed.typed, TypedEvent::SyscallFsync(_)),
+                14 => matches!(parsed.typed, TypedEvent::SyscallFdatasync(_)),
+                15 => matches!(parsed.typed, TypedEvent::SyscallPwrite(_)),
+                _ => false,
+            };
+            assert!(
+                matches_expected_variant,
+                "event type {} should map to its specialized syscall variant",
+                event_type
+            );
         }
     }
 
@@ -567,8 +568,8 @@ mod tests {
         assert_eq!(e.bytes, 1024);
         assert_eq!(e.src_port, 8080);
         assert_eq!(e.dst_port, 9090);
-        assert_eq!(e.direction, Direction::TX);
-        assert_eq!(e.transport, NetTransport::Tcp);
+        assert_eq!(e.direction, Direction::TX as u8);
+        assert_eq!(e.transport, NetTransport::Tcp as u8);
         assert!(e.has_metrics);
         assert_eq!(e.srtt_us, 50_000);
         assert_eq!(e.cwnd, 10);
@@ -591,8 +592,8 @@ mod tests {
         let TypedEvent::NetIO(e) = &parsed.typed else {
             panic!("expected NetIO");
         };
-        assert_eq!(e.direction, Direction::RX);
-        assert_eq!(e.transport, NetTransport::Udp);
+        assert_eq!(e.direction, Direction::RX as u8);
+        assert_eq!(e.transport, NetTransport::Udp as u8);
         assert!(!e.has_metrics);
         assert_eq!(e.bytes, 2048);
     }
@@ -655,7 +656,6 @@ mod tests {
     #[test]
     fn test_page_fault_major() {
         let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
-        data.extend_from_slice(&0xDEAD_BEEFu64.to_le_bytes());
         data.push(1); // major
         data.extend_from_slice(&[0u8; 7]);
 
@@ -663,14 +663,12 @@ mod tests {
         let TypedEvent::PageFault(e) = &parsed.typed else {
             panic!("expected PageFault");
         };
-        assert_eq!(e.address, 0xDEAD_BEEF);
         assert!(e.major);
     }
 
     #[test]
     fn test_page_fault_minor() {
         let mut data = header(8_000_000, 107, 207, 10, 2);
-        data.extend_from_slice(&0x1234u64.to_le_bytes());
         data.push(0); // minor
         data.extend_from_slice(&[0u8; 7]);
 
@@ -684,55 +682,25 @@ mod tests {
     // -- FD events --
 
     #[test]
-    fn test_fd_open_with_filename() {
-        let mut data = header(9_000_000, 108, 208, 11, 1); // FDOpen, Geth
-        data.extend_from_slice(&7i32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
-        let mut filename = [0u8; 64];
-        let name = b"/var/log/geth.log";
-        filename[..name.len()].copy_from_slice(name);
-        data.extend_from_slice(&filename);
+    fn test_fd_open_header_only() {
+        let data = header(9_000_000, 108, 208, 11, 1); // FDOpen, Geth
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
+        let TypedEvent::FDOpen = &parsed.typed else {
+            panic!("expected FDOpen");
         };
-        assert_eq!(e.fd, 7);
-        assert_eq!(e.filename, "/var/log/geth.log");
+        assert_eq!(parsed.raw.pid, 108);
     }
 
     #[test]
-    fn test_fd_close_empty_filename() {
-        let mut data = header(10_000_000, 109, 209, 12, 4); // FDClose, Nethermind
-        data.extend_from_slice(&(-1i32).to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
-        data.extend_from_slice(&[0u8; 64]);
+    fn test_fd_close_header_only() {
+        let data = header(10_000_000, 109, 209, 12, 4); // FDClose, Nethermind
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
+        let TypedEvent::FDClose = &parsed.typed else {
+            panic!("expected FDClose");
         };
-        assert_eq!(e.fd, -1);
-        assert_eq!(e.filename, "");
-    }
-
-    #[test]
-    fn test_fd_filename_truncated_at_null() {
-        let mut data = header(1000, 42, 43, 11, 1);
-        data.extend_from_slice(&5i32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
-        let mut filename = [0u8; 64];
-        filename[0] = b'a';
-        filename[1] = b'b';
-        filename[2] = 0; // null terminates here
-        filename[3] = b'c'; // ignored
-        data.extend_from_slice(&filename);
-
-        let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
-        };
-        assert_eq!(e.filename, "ab");
+        assert_eq!(parsed.raw.tid, 209);
     }
 
     // -- Block merge --
@@ -800,11 +768,11 @@ mod tests {
         data.extend_from_slice(&5_000_000u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::MemLatency(e) = &parsed.typed else {
-            panic!("expected MemLatency");
+        let TypedEvent::MemReclaim(e) = &parsed.typed else {
+            panic!("expected MemReclaim");
         };
         assert_eq!(e.duration_ns, 5_000_000);
-        assert_eq!(e.event.event_type, EventType::MemReclaim);
+        assert_eq!(parsed.raw.event_type, EventType::MemReclaim);
     }
 
     #[test]
@@ -813,10 +781,10 @@ mod tests {
         data.extend_from_slice(&3_000_000u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::MemLatency(e) = &parsed.typed else {
-            panic!("expected MemLatency");
+        let TypedEvent::MemCompaction(_e) = &parsed.typed else {
+            panic!("expected MemCompaction");
         };
-        assert_eq!(e.event.event_type, EventType::MemCompaction);
+        assert_eq!(parsed.raw.event_type, EventType::MemCompaction);
     }
 
     // -- Swap --
@@ -827,11 +795,11 @@ mod tests {
         data.extend_from_slice(&1u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Swap(e) = &parsed.typed else {
-            panic!("expected Swap");
+        let TypedEvent::SwapIn(e) = &parsed.typed else {
+            panic!("expected SwapIn");
         };
         assert_eq!(e.pages, 1);
-        assert_eq!(e.event.event_type, EventType::SwapIn);
+        assert_eq!(parsed.raw.event_type, EventType::SwapIn);
     }
 
     #[test]
@@ -840,11 +808,11 @@ mod tests {
         data.extend_from_slice(&100u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Swap(e) = &parsed.typed else {
-            panic!("expected Swap");
+        let TypedEvent::SwapOut(e) = &parsed.typed else {
+            panic!("expected SwapOut");
         };
         assert_eq!(e.pages, 100);
-        assert_eq!(e.event.event_type, EventType::SwapOut);
+        assert_eq!(parsed.raw.event_type, EventType::SwapOut);
     }
 
     // -- OOM kill --
@@ -882,7 +850,7 @@ mod tests {
     #[test]
     fn test_extra_trailing_data_ignored() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 24]); // syscall payload
+        data.extend_from_slice(&[0u8; 8]); // syscall payload
         data.extend_from_slice(&[0xFF; 100]); // trailing garbage
 
         assert!(parse_event(&data).is_ok());
@@ -892,7 +860,7 @@ mod tests {
     fn test_all_client_types_accepted() {
         for ct in 0..=11u8 {
             let mut data = header(1000, 42, 43, 1, ct); // SyscallRead
-            data.extend_from_slice(&[0u8; 24]);
+            data.extend_from_slice(&[0u8; 8]);
             assert!(
                 parse_event(&data).is_ok(),
                 "client type {} should be accepted",

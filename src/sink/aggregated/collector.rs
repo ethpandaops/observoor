@@ -6,12 +6,9 @@ use std::fs;
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
-use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
-use super::buffer::Buffer;
-use super::dimension::{
-    direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
-    TCPMetricsDimension,
-};
+use super::aggregate::{CounterAggregate, LatencyAggregate};
+use super::buffer::{fast_map_with_capacity, Buffer, FastMap};
+use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
     SamplingMode, SlotInfo, WindowInfo,
@@ -78,6 +75,10 @@ pub struct Collector {
 struct EventSamplingMetadata {
     mode: SamplingMode,
     rate: f32,
+}
+
+fn map_len<K, V>(map: &FastMap<K, V>) -> usize {
+    map.len()
 }
 
 #[cfg(feature = "bpf")]
@@ -191,19 +192,6 @@ impl Collector {
             })
     }
 
-    fn configured_interval_ns(&self) -> u64 {
-        u64::from(self.interval_ms) * 1_000_000
-    }
-
-    fn resolved_interval_ns(&self, buf: &Buffer) -> u64 {
-        buf.interval_ns_or(self.configured_interval_ns())
-    }
-
-    fn interval_ms_from_ns(interval_ns: u64) -> u16 {
-        let interval_ms = interval_ns.div_ceil(1_000_000);
-        interval_ms.clamp(1, u64::from(u16::MAX)) as u16
-    }
-
     /// Iterates the buffer once and returns all metrics.
     pub fn collect(&self, buf: &Buffer, meta: BatchMetadata) -> MetricBatch {
         let latency_capacity = self.estimate_latency_capacity(buf);
@@ -258,10 +246,9 @@ impl Collector {
     ///
     /// Reuses existing vector allocations when capacities are sufficient.
     pub fn collect_into(&self, buf: &Buffer, batch: &mut MetricBatch) {
-        let interval_ns = self.resolved_interval_ns(buf);
         let window = WindowInfo {
             start: buf.start_time,
-            interval_ms: Self::interval_ms_from_ns(interval_ns),
+            interval_ms: self.interval_ms,
         };
 
         let slot = SlotInfo {
@@ -322,74 +309,72 @@ impl Collector {
         }
 
         self.collect_basic_latency(batch, buf, window, slot);
-        self.collect_disk_latency(batch, buf, window, slot);
+        self.collect_disk_metrics(batch, buf, window, slot);
         self.collect_basic_counters(batch, buf, window, slot);
         self.collect_network_counters(batch, buf, window, slot);
         self.collect_disk_counters(batch, buf, window, slot);
         self.collect_tcp_gauges(batch, buf, window, slot);
-        self.collect_disk_gauges(batch, buf, window, slot);
-        self.collect_cpu_utilization(batch, buf, window, slot, interval_ns);
+        self.collect_cpu_utilization(batch, buf, window, slot);
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        buf.syscall_read.len()
-            + buf.syscall_write.len()
-            + buf.syscall_futex.len()
-            + buf.syscall_mmap.len()
-            + buf.syscall_epoll_wait.len()
-            + buf.syscall_fsync.len()
-            + buf.syscall_fdatasync.len()
-            + buf.syscall_pwrite.len()
-            + buf.sched_on_cpu.len()
-            + buf.sched_off_cpu.len()
-            + buf.sched_runqueue.len()
-            + buf.mem_reclaim.len()
-            + buf.mem_compaction.len()
-            + buf.disk_latency.len()
+        map_len(&buf.syscall_read)
+            + map_len(&buf.syscall_write)
+            + map_len(&buf.syscall_futex)
+            + map_len(&buf.syscall_mmap)
+            + map_len(&buf.syscall_epoll_wait)
+            + map_len(&buf.syscall_fsync)
+            + map_len(&buf.syscall_fdatasync)
+            + map_len(&buf.syscall_pwrite)
+            + map_len(&buf.sched_on_cpu)
+            + (map_len(&buf.sched_wait) * 2)
+            + map_len(&buf.mem_reclaim)
+            + map_len(&buf.mem_compaction)
+            + map_len(&buf.disk_io)
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
-        buf.page_fault_major.len()
-            + buf.page_fault_minor.len()
-            + buf.swap_in.len()
-            + buf.swap_out.len()
-            + buf.oom_kill.len()
-            + buf.fd_open.len()
-            + buf.fd_close.len()
-            + buf.process_exit.len()
-            + buf.tcp_state_change.len()
-            + buf.net_io.len()
-            + buf.tcp_retransmit.len()
-            + buf.disk_bytes.len()
-            + buf.block_merge.len()
+        map_len(&buf.page_fault_major)
+            + map_len(&buf.page_fault_minor)
+            + map_len(&buf.swap_in)
+            + map_len(&buf.swap_out)
+            + map_len(&buf.oom_kill)
+            + map_len(&buf.fd_open)
+            + map_len(&buf.fd_close)
+            + map_len(&buf.process_exit)
+            + map_len(&buf.tcp_state_change)
+            + map_len(&buf.net_io)
+            + map_len(&buf.tcp_retransmit)
+            + map_len(&buf.disk_io)
+            + map_len(&buf.block_merge)
     }
 
     fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
-        buf.tcp_rtt.len() + buf.tcp_cwnd.len() + buf.disk_queue_depth.len()
+        (map_len(&buf.tcp_metrics) * 2) + map_len(&buf.disk_io)
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        map_len(&buf.cpu_on_core)
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        map_len(&buf.cpu_on_core)
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_io_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        map_len(&buf.cpu_on_core)
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_fd_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        map_len(&buf.cpu_on_core)
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        map_len(&buf.cpu_on_core)
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -400,11 +385,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(
-            EventType,
-            &str,
-            &dashmap::DashMap<BasicDimension, LatencyAggregate>,
-        )] = &[
+        let maps: &[(EventType, &str, &FastMap<BasicDimension, LatencyAggregate>)] = &[
             (EventType::SyscallRead, "syscall_read", &buf.syscall_read),
             (EventType::SyscallWrite, "syscall_write", &buf.syscall_write),
             (EventType::SyscallFutex, "syscall_futex", &buf.syscall_futex),
@@ -426,16 +407,6 @@ impl Collector {
                 &buf.syscall_pwrite,
             ),
             (EventType::SchedSwitch, "sched_on_cpu", &buf.sched_on_cpu),
-            (
-                EventType::SchedRunqueue,
-                "sched_off_cpu",
-                &buf.sched_off_cpu,
-            ),
-            (
-                EventType::SchedRunqueue,
-                "sched_runqueue",
-                &buf.sched_runqueue,
-            ),
             (EventType::MemReclaim, "mem_reclaim", &buf.mem_reclaim),
             (
                 EventType::MemCompaction,
@@ -446,9 +417,8 @@ impl Collector {
 
         for &(event_type, name, map) in maps {
             let sampling = self.sampling_for_event(event_type);
-            for entry in map.iter() {
-                let dim = *entry.key();
-                let snap = entry.value().snapshot();
+            for (dim, aggregate) in map.iter() {
+                let snap = aggregate.snapshot();
                 if snap.count == 0 {
                     continue;
                 }
@@ -457,8 +427,8 @@ impl Collector {
                     metric_type: name,
                     window,
                     slot,
-                    pid: dim.pid,
-                    client_type: client_type_from_u8(dim.client_type),
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
                     device_id: None,
                     rw: None,
                     sampling_mode: sampling.mode,
@@ -471,10 +441,53 @@ impl Collector {
                 });
             }
         }
+
+        let sampling = self.sampling_for_event(EventType::SchedRunqueue);
+        for (dim, aggregate) in buf.sched_wait.iter() {
+            let off_cpu = aggregate.off_cpu_snapshot();
+            if off_cpu.count > 0 {
+                batch.latency.push(LatencyMetric {
+                    metric_type: "sched_off_cpu",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: None,
+                    rw: None,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: off_cpu.sum,
+                    count: off_cpu.count,
+                    min: off_cpu.min,
+                    max: off_cpu.max,
+                    histogram: off_cpu.histogram,
+                });
+            }
+
+            let runqueue = aggregate.runqueue_snapshot();
+            if runqueue.count > 0 {
+                batch.latency.push(LatencyMetric {
+                    metric_type: "sched_runqueue",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: None,
+                    rw: None,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: runqueue.sum,
+                    count: runqueue.count,
+                    min: runqueue.min,
+                    max: runqueue.max,
+                    histogram: runqueue.histogram,
+                });
+            }
+        }
     }
 
-    /// Collects disk latency metrics with device/rw dimensions.
-    fn collect_disk_latency(
+    /// Collects disk latency, byte, and queue-depth metrics.
+    fn collect_disk_metrics(
         &self,
         batch: &mut MetricBatch,
         buf: &Buffer,
@@ -482,29 +495,64 @@ impl Collector {
         slot: SlotInfo,
     ) {
         let sampling = self.sampling_for_event(EventType::DiskIO);
-        for entry in buf.disk_latency.iter() {
-            let dim = *entry.key();
-            let snap = entry.value().snapshot();
-            if snap.count == 0 {
-                continue;
+        for (dim, aggregate) in buf.disk_io.iter() {
+            let latency = aggregate.latency_snapshot();
+            if latency.count > 0 {
+                batch.latency.push(LatencyMetric {
+                    metric_type: "disk_latency",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: Some(dim.device_id()),
+                    rw: Some(rw_string(dim.rw())),
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: latency.sum,
+                    count: latency.count,
+                    min: latency.min,
+                    max: latency.max,
+                    histogram: latency.histogram,
+                });
             }
 
-            batch.latency.push(LatencyMetric {
-                metric_type: "disk_latency",
-                window,
-                slot,
-                pid: dim.pid,
-                client_type: client_type_from_u8(dim.client_type),
-                device_id: Some(dim.device_id),
-                rw: Some(rw_string(dim.rw)),
-                sampling_mode: sampling.mode,
-                sampling_rate: sampling.rate,
-                sum: snap.sum,
-                count: snap.count,
-                min: snap.min,
-                max: snap.max,
-                histogram: snap.histogram,
-            });
+            let bytes = aggregate.bytes_snapshot();
+            if bytes.count > 0 {
+                batch.counter.push(CounterMetric {
+                    metric_type: "disk_bytes",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: Some(dim.device_id()),
+                    rw: Some(rw_string(dim.rw())),
+                    port_label: None,
+                    direction: None,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: bytes.sum,
+                    count: bytes.count,
+                });
+            }
+            let queue_depth = aggregate.queue_depth_snapshot();
+            if queue_depth.count > 0 {
+                batch.gauge.push(GaugeMetric {
+                    metric_type: "disk_queue_depth",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: Some(dim.device_id()),
+                    rw: Some(rw_string(dim.rw())),
+                    port_label: None,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: queue_depth.sum,
+                    count: queue_depth.count,
+                    min: queue_depth.min,
+                    max: queue_depth.max,
+                });
+            }
         }
     }
 
@@ -516,11 +564,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(
-            EventType,
-            &str,
-            &dashmap::DashMap<BasicDimension, CounterAggregate>,
-        )] = &[
+        let maps: &[(EventType, &str, &FastMap<BasicDimension, CounterAggregate>)] = &[
             (
                 EventType::PageFault,
                 "page_fault_major",
@@ -546,9 +590,8 @@ impl Collector {
 
         for &(event_type, name, map) in maps {
             let sampling = self.sampling_for_event(event_type);
-            for entry in map.iter() {
-                let dim = *entry.key();
-                let snap = entry.value().snapshot();
+            for (dim, aggregate) in map.iter() {
+                let snap = aggregate.snapshot();
                 if snap.count == 0 {
                     continue;
                 }
@@ -557,8 +600,8 @@ impl Collector {
                     metric_type: name,
                     window,
                     slot,
-                    pid: dim.pid,
-                    client_type: client_type_from_u8(dim.client_type),
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
                     device_id: None,
                     rw: None,
                     port_label: None,
@@ -580,14 +623,13 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        for entry in buf.net_io.iter() {
-            let dim = *entry.key();
-            let snap = entry.value().snapshot();
+        for (dim, aggregate) in buf.net_io.iter() {
+            let snap = aggregate.snapshot();
             if snap.count == 0 {
                 continue;
             }
 
-            let source_event = if dim.direction == 0 {
+            let source_event = if dim.direction() == 0 {
                 EventType::NetTX
             } else {
                 EventType::NetRX
@@ -598,12 +640,12 @@ impl Collector {
                 metric_type: "net_io",
                 window,
                 slot,
-                pid: dim.pid,
-                client_type: client_type_from_u8(dim.client_type),
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
                 device_id: None,
                 rw: None,
-                port_label: Some(port_label_string(dim.port_label)),
-                direction: Some(direction_string(dim.direction)),
+                port_label: Some(port_label_string(dim.port_label())),
+                direction: Some(direction_string(dim.direction())),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
                 sum: snap.sum,
@@ -612,9 +654,8 @@ impl Collector {
         }
 
         let sampling = self.sampling_for_event(EventType::TcpRetransmit);
-        for entry in buf.tcp_retransmit.iter() {
-            let dim = *entry.key();
-            let snap = entry.value().snapshot();
+        for (dim, aggregate) in buf.tcp_retransmit.iter() {
+            let snap = aggregate.snapshot();
             if snap.count == 0 {
                 continue;
             }
@@ -623,12 +664,12 @@ impl Collector {
                 metric_type: "tcp_retransmit",
                 window,
                 slot,
-                pid: dim.pid,
-                client_type: client_type_from_u8(dim.client_type),
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
                 device_id: None,
                 rw: None,
-                port_label: Some(port_label_string(dim.port_label)),
-                direction: Some(direction_string(dim.direction)),
+                port_label: Some(port_label_string(dim.port_label())),
+                direction: Some(direction_string(dim.direction())),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
                 sum: snap.sum,
@@ -637,7 +678,7 @@ impl Collector {
         }
     }
 
-    /// Collects disk counter metrics with device/rw dimensions.
+    /// Collects disk counter metrics that are not part of the merged disk I/O aggregate.
     fn collect_disk_counters(
         &self,
         batch: &mut MetricBatch,
@@ -645,40 +686,28 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(
-            EventType,
-            &str,
-            &dashmap::DashMap<DiskDimension, CounterAggregate>,
-        )] = &[
-            (EventType::DiskIO, "disk_bytes", &buf.disk_bytes),
-            (EventType::BlockMerge, "block_merge", &buf.block_merge),
-        ];
-
-        for &(event_type, name, map) in maps {
-            let sampling = self.sampling_for_event(event_type);
-            for entry in map.iter() {
-                let dim = *entry.key();
-                let snap = entry.value().snapshot();
-                if snap.count == 0 {
-                    continue;
-                }
-
-                batch.counter.push(CounterMetric {
-                    metric_type: name,
-                    window,
-                    slot,
-                    pid: dim.pid,
-                    client_type: client_type_from_u8(dim.client_type),
-                    device_id: Some(dim.device_id),
-                    rw: Some(rw_string(dim.rw)),
-                    port_label: None,
-                    direction: None,
-                    sampling_mode: sampling.mode,
-                    sampling_rate: sampling.rate,
-                    sum: snap.sum,
-                    count: snap.count,
-                });
+        let sampling = self.sampling_for_event(EventType::BlockMerge);
+        for (dim, aggregate) in buf.block_merge.iter() {
+            let snap = aggregate.snapshot();
+            if snap.count == 0 {
+                continue;
             }
+
+            batch.counter.push(CounterMetric {
+                metric_type: "block_merge",
+                window,
+                slot,
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
+                device_id: Some(dim.device_id()),
+                rw: Some(rw_string(dim.rw())),
+                port_label: None,
+                direction: None,
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
         }
     }
 
@@ -690,70 +719,48 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(&str, &dashmap::DashMap<TCPMetricsDimension, GaugeAggregate>)] =
-            &[("tcp_rtt", &buf.tcp_rtt), ("tcp_cwnd", &buf.tcp_cwnd)];
         let sampling = self.sampling_for_event(EventType::NetTX);
 
-        for &(name, map) in maps {
-            for entry in map.iter() {
-                let dim = *entry.key();
-                let snap = entry.value().snapshot();
-                if snap.count == 0 {
-                    continue;
-                }
-
+        for (dim, aggregate) in buf.tcp_metrics.iter() {
+            let rtt = aggregate.rtt_snapshot();
+            if rtt.count > 0 {
                 batch.gauge.push(GaugeMetric {
-                    metric_type: name,
+                    metric_type: "tcp_rtt",
                     window,
                     slot,
-                    pid: dim.pid,
-                    client_type: client_type_from_u8(dim.client_type),
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
                     device_id: None,
                     rw: None,
-                    port_label: Some(port_label_string(dim.port_label)),
+                    port_label: Some(port_label_string(dim.port_label())),
                     sampling_mode: sampling.mode,
                     sampling_rate: sampling.rate,
-                    sum: snap.sum,
-                    count: snap.count,
-                    min: snap.min,
-                    max: snap.max,
+                    sum: rtt.sum,
+                    count: rtt.count,
+                    min: rtt.min,
+                    max: rtt.max,
                 });
             }
-        }
-    }
 
-    /// Collects disk gauge metrics with device/rw dimensions.
-    fn collect_disk_gauges(
-        &self,
-        batch: &mut MetricBatch,
-        buf: &Buffer,
-        window: WindowInfo,
-        slot: SlotInfo,
-    ) {
-        let sampling = self.sampling_for_event(EventType::DiskIO);
-        for entry in buf.disk_queue_depth.iter() {
-            let dim = *entry.key();
-            let snap = entry.value().snapshot();
-            if snap.count == 0 {
-                continue;
+            let cwnd = aggregate.cwnd_snapshot();
+            if cwnd.count > 0 {
+                batch.gauge.push(GaugeMetric {
+                    metric_type: "tcp_cwnd",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type: client_type_from_u8(dim.client_type()),
+                    device_id: None,
+                    rw: None,
+                    port_label: Some(port_label_string(dim.port_label())),
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: cwnd.sum,
+                    count: cwnd.count,
+                    min: cwnd.min,
+                    max: cwnd.max,
+                });
             }
-
-            batch.gauge.push(GaugeMetric {
-                metric_type: "disk_queue_depth",
-                window,
-                slot,
-                pid: dim.pid,
-                client_type: client_type_from_u8(dim.client_type),
-                device_id: Some(dim.device_id),
-                rw: Some(rw_string(dim.rw)),
-                port_label: None,
-                sampling_mode: sampling.mode,
-                sampling_rate: sampling.rate,
-                sum: snap.sum,
-                count: snap.count,
-                min: snap.min,
-                max: snap.max,
-            });
         }
     }
 
@@ -764,7 +771,6 @@ impl Collector {
         buf: &Buffer,
         window: WindowInfo,
         slot: SlotInfo,
-        interval_ns: u64,
     ) {
         struct CpuUtilAcc {
             active_cores: u16,
@@ -822,29 +828,28 @@ impl Collector {
             }
         }
 
-        let interval_ns = i64::try_from(interval_ns).unwrap_or(i64::MAX);
+        let interval_ns = i64::from(self.interval_ms) * 1_000_000;
         if interval_ns <= 0 {
             return;
         }
         let pct_scale = 100.0f32 / interval_ns as f32;
         let sampling = self.sampling_for_event(EventType::SchedSwitch);
 
-        let mut grouped: hashbrown::HashMap<(u32, u8), CpuUtilAcc> =
-            hashbrown::HashMap::with_capacity(buf.cpu_on_core.len());
+        let mut grouped: FastMap<BasicDimension, CpuUtilAcc> =
+            fast_map_with_capacity(buf.cpu_on_core.len());
 
-        for entry in buf.cpu_on_core.iter() {
-            let dim = *entry.key();
-            let snap = entry.value().snapshot();
+        for (dim, aggregate) in buf.cpu_on_core.iter() {
+            let snap = aggregate.snapshot();
             if snap.count == 0 {
                 continue;
             }
             grouped
-                .entry((dim.pid, dim.client_type))
+                .entry(BasicDimension::new(dim.pid(), dim.client_type()))
                 .or_insert_with(CpuUtilAcc::new)
-                .update(dim.cpu_id, snap, interval_ns, pct_scale);
+                .update(dim.cpu_id(), snap, interval_ns, pct_scale);
         }
 
-        for ((pid, client_type), mut acc) in grouped {
+        for (dim, mut acc) in grouped {
             if acc.active_cores == 0 {
                 continue;
             }
@@ -868,8 +873,8 @@ impl Collector {
                 metric_type: "cpu_utilization",
                 window,
                 slot,
-                pid,
-                client_type: client_type_from_u8(client_type),
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
                 total_on_cpu_ns: acc.total_on_cpu_ns,
@@ -885,7 +890,13 @@ impl Collector {
 
             #[cfg(feature = "bpf")]
             if self.collect_process_snapshots {
-                self.collect_process_snapshot_metrics(batch, window, slot, pid, client_type);
+                self.collect_process_snapshot_metrics(
+                    batch,
+                    window,
+                    slot,
+                    dim.pid(),
+                    dim.client_type(),
+                );
             }
         }
     }
@@ -1272,7 +1283,9 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
-    use crate::sink::aggregated::dimension::NetworkDimension;
+    use crate::sink::aggregated::dimension::{
+        DiskDimension, NetworkDimension, TCPMetricsDimension,
+    };
     use crate::tracer::event::EventType;
 
     fn test_meta() -> BatchMetadata {
@@ -1327,11 +1340,8 @@ mod tests {
     #[test]
     fn test_collect_syscall_latency() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
 
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
@@ -1370,17 +1380,9 @@ mod tests {
         );
 
         let collector = Collector::new(Duration::from_secs(1), &sampling);
-        let buf = test_buffer();
-        let basic = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
-        let disk = DiskDimension {
-            pid: 123,
-            client_type: 1,
-            device_id: 259,
-            rw: 1,
-        };
+        let mut buf = test_buffer();
+        let basic = BasicDimension::new(123, 1);
+        let disk = DiskDimension::new(123, 1, 259, 1);
 
         buf.add_syscall(EventType::SyscallRead, basic, 5_000);
         buf.add_disk_io(disk, 20_000, 4096, 1);
@@ -1414,13 +1416,8 @@ mod tests {
     #[test]
     fn test_collect_disk_latency() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = DiskDimension {
-            pid: 123,
-            client_type: 2,
-            device_id: 259,
-            rw: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = DiskDimension::new(123, 2, 259, 1);
 
         buf.add_disk_io(dim, 50_000, 4096, 3);
 
@@ -1440,13 +1437,8 @@ mod tests {
     #[test]
     fn test_collect_network_counters() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = NetworkDimension {
-            pid: 123,
-            client_type: 1,
-            port_label: 3, // ElJsonRpc
-            direction: 0,
-        };
+        let mut buf = test_buffer();
+        let dim = NetworkDimension::new(123, 1, 3, 0);
 
         buf.add_net_io(dim, 1024);
 
@@ -1465,12 +1457,8 @@ mod tests {
     #[test]
     fn test_collect_tcp_gauges() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = TCPMetricsDimension {
-            pid: 123,
-            client_type: 1,
-            port_label: 1, // ElP2PTcp
-        };
+        let mut buf = test_buffer();
+        let dim = TCPMetricsDimension::new(123, 1, 1);
 
         buf.add_tcp_metrics(dim, 100, 65535);
 
@@ -1496,11 +1484,8 @@ mod tests {
     #[test]
     fn test_collect_basic_counters() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
 
         buf.add_page_fault(dim, true);
         buf.add_page_fault(dim, true);
@@ -1535,11 +1520,8 @@ mod tests {
     #[test]
     fn test_collect_window_info() {
         let collector = Collector::new(Duration::from_millis(500), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
         buf.add_fd_open(dim);
 
         let batch = collector.collect(&buf, test_meta());
@@ -1561,17 +1543,9 @@ mod tests {
     #[test]
     fn test_collect_into_matches_collect() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let basic = BasicDimension {
-            pid: 77,
-            client_type: 1,
-        };
-        let net = NetworkDimension {
-            pid: 77,
-            client_type: 1,
-            port_label: 1, // ElP2PTcp
-            direction: 0,
-        };
+        let mut buf = test_buffer();
+        let basic = BasicDimension::new(77, 1);
+        let net = NetworkDimension::new(77, 1, 1, 0);
 
         buf.add_syscall(EventType::SyscallRead, basic, 1_000);
         buf.add_net_io(net, 4_096);
@@ -1603,11 +1577,8 @@ mod tests {
     #[test]
     fn test_collect_into_reuses_capacity() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let basic = BasicDimension {
-            pid: 88,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let basic = BasicDimension::new(88, 1);
         for _ in 0..32 {
             buf.add_syscall(EventType::SyscallRead, basic, 2_000);
             buf.add_fd_open(basic);
@@ -1649,11 +1620,8 @@ mod tests {
     #[test]
     fn test_collect_cpu_utilization() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
 
         // 1.5ms on core 2, 0.5ms on core 4 over a 1s window.
         buf.add_sched_switch(dim, 1_000_000, 2);
@@ -1681,11 +1649,8 @@ mod tests {
     #[test]
     fn test_collect_cpu_utilization_cross_window_event() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
 
         // Cross-window event: 2s on-CPU in a 1s window. The full duration
         // is attributed to the arrival window (no trimming).
@@ -1706,11 +1671,8 @@ mod tests {
     #[test]
     fn test_collect_cpu_utilization_clamps_pct_per_core() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
 
         // Core 0 has a cross-window 2s slice in a 1s window, core 1 has 0.5s.
         // Percentages are bounded per core while raw totals stay untrimmed.
@@ -1726,25 +1688,6 @@ mod tests {
         assert_eq!(m.max_core_id, 0);
         assert!((m.mean_core_pct - 75.0).abs() < 0.0001);
         assert!((m.min_core_pct - 50.0).abs() < 0.0001);
-        assert!((m.max_core_pct - 100.0).abs() < 0.0001);
-    }
-
-    #[test]
-    fn test_collect_cpu_utilization_uses_flushed_interval() {
-        let collector = Collector::new(Duration::from_millis(100), &SamplingConfig::default());
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
-
-        buf.add_sched_switch(dim, 300_000_000, 0);
-        buf.set_interval_ns_for_test(300_000_000);
-
-        let batch = collector.collect(&buf, test_meta());
-        let m = &batch.cpu_util[0];
-        assert_eq!(m.window.interval_ms, 300);
-        assert!((m.mean_core_pct - 100.0).abs() < 0.0001);
         assert!((m.max_core_pct - 100.0).abs() < 0.0001);
     }
 
@@ -1791,11 +1734,8 @@ mod tests {
         };
         collector.proc_fd_count_reader = |_pid| Some(64);
 
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
         buf.add_sched_switch(dim, 1_000_000, 2);
 
         let batch = collector.collect(&buf, test_meta());
