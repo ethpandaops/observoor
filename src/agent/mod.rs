@@ -422,7 +422,7 @@ impl Agent {
                     &batch.client_totals,
                     batch.len(),
                 );
-                sink_ev.handle_event_batch(batch.events);
+                sink_ev.handle_event_batch(batch);
             }));
 
             // Register error handler.

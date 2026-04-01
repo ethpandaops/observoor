@@ -6,8 +6,10 @@ pub mod stats;
 pub mod bpf;
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use anyhow::Result;
+use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
 use self::event::{ClientType, EventType, ParsedEvent, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
@@ -39,11 +41,12 @@ pub const PARSED_EVENT_BATCH_SIZE: usize = 8192;
 ///
 /// This lets downstream consumers reuse already-known event/client totals
 /// instead of rescanning every batch on the hot path.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ParsedEventBatch {
     pub events: Vec<ParsedEvent>,
     pub event_type_totals: [u32; MAX_EVENT_TYPE + 1],
     pub client_totals: [u32; CLIENT_TYPE_CARDINALITY],
+    recycler: Option<Arc<ParsedEventBatchPool>>,
 }
 
 impl ParsedEventBatch {
@@ -52,7 +55,19 @@ impl ParsedEventBatch {
             events: Vec::with_capacity(capacity),
             event_type_totals: [0; MAX_EVENT_TYPE + 1],
             client_totals: [0; CLIENT_TYPE_CARDINALITY],
+            recycler: None,
         }
+    }
+
+    #[cfg_attr(not(feature = "bpf"), allow(dead_code))]
+    pub(crate) fn checkout(pool: &Arc<ParsedEventBatchPool>) -> Self {
+        let mut batch = pool
+            .inner
+            .lock()
+            .pop()
+            .unwrap_or_else(|| Self::with_capacity(PARSED_EVENT_BATCH_SIZE));
+        batch.recycler = Some(Arc::clone(pool));
+        batch
     }
 
     #[inline(always)]
@@ -108,6 +123,20 @@ impl ParsedEventBatch {
         self.event_type_totals.fill(0);
         self.client_totals.fill(0);
     }
+
+    pub fn recycle(mut self) {
+        let Some(pool) = self.recycler.take() else {
+            return;
+        };
+
+        self.clear();
+        pool.inner.lock().push(self);
+    }
+}
+
+#[derive(Default)]
+pub(crate) struct ParsedEventBatchPool {
+    inner: Mutex<Vec<ParsedEventBatch>>,
 }
 
 /// Callback for parsed events.
@@ -231,5 +260,29 @@ mod tests {
         );
         assert_eq!(batch.client_totals[1], 1);
         assert_eq!(batch.client_totals[2], 1);
+    }
+
+    #[test]
+    fn parsed_event_batch_recycle_reuses_storage() {
+        let pool = Arc::new(ParsedEventBatchPool::default());
+        let mut batch = ParsedEventBatch::checkout(&pool);
+
+        batch.push(ParsedEvent {
+            raw: Event {
+                timestamp_ns: 1,
+                pid: 100,
+                tid: 100,
+                event_type: EventType::FDOpen,
+                client_type: 1,
+            },
+            typed: TypedEvent::FDOpen,
+        });
+
+        let initial_capacity = batch.events.capacity();
+        batch.recycle();
+
+        let recycled = ParsedEventBatch::checkout(&pool);
+        assert!(recycled.is_empty());
+        assert_eq!(recycled.events.capacity(), initial_capacity);
     }
 }

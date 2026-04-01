@@ -25,7 +25,7 @@ use crate::beacon::SyncStatus;
 use crate::config::{AggregatedSinkConfig, DimensionsConfig};
 use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
-use crate::tracer::PARSED_EVENT_BATCH_SIZE;
+use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
 use self::buffer::{fast_map_with_capacity, Buffer, FastMap};
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
@@ -36,7 +36,7 @@ use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
 use self::metric::{BatchMetadata, MetricBatch};
 
-type EventBatch = Vec<ParsedEvent>;
+type EventBatch = ParsedEventBatch;
 
 /// Parsed events are queued in fixed-size batches to amortize channel overhead
 /// across the tracer -> sink handoff.
@@ -622,11 +622,11 @@ impl AggregatedSink {
 
     fn process_event_batch_with_scheduler_state(
         buf: &mut Buffer,
-        events: &[ParsedEvent],
+        events: &EventBatch,
         dimensions: &DimensionsConfig,
         scheduler_state: &mut SchedulerWindowState,
     ) {
-        for event in events {
+        for event in &events.events {
             Self::process_event_with_scheduler_state(buf, event, dimensions, scheduler_state);
         }
     }
@@ -757,6 +757,7 @@ impl Sink for AggregatedSink {
                                 &dimensions,
                                 &mut scheduler_state,
                             );
+                            events.recycle();
                         }
 
                         // Flush pending slot-rotation buffers first.
@@ -843,6 +844,7 @@ impl Sink for AggregatedSink {
                             &dimensions,
                             &mut scheduler_state,
                         );
+                        events.recycle();
 
                         // Drain more queued batches without blocking.
                         for _ in 0..EVENT_BATCHES_PER_WAKE - 1 {
@@ -854,6 +856,7 @@ impl Sink for AggregatedSink {
                                         &dimensions,
                                         &mut scheduler_state,
                                     );
+                                    events.recycle();
                                 }
                                 Err(_) => break,
                             }
@@ -1049,7 +1052,9 @@ impl Sink for AggregatedSink {
     }
 
     fn handle_event(&self, event: ParsedEvent) {
-        self.handle_event_batch(vec![event]);
+        let mut batch = ParsedEventBatch::with_capacity(1);
+        batch.push(event);
+        self.handle_event_batch(batch);
     }
 
     fn on_slot_changed(&self, new_slot: u64, slot_start: SystemTime) {

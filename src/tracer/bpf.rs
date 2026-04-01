@@ -19,7 +19,8 @@ use super::event::ClientType;
 use super::event::EventType;
 use super::parse::{parse_event, ParseError};
 use super::{
-    ErrorHandler, EventBatchHandler, EventHandler, ParsedEventBatch, RingbufStats,
+    ErrorHandler, EventBatchHandler, EventHandler, ParsedEventBatch, ParsedEventBatchPool,
+    RingbufStats,
     RingbufStatsHandler, Tracer, TrackedTidInfo, PARSED_EVENT_BATCH_SIZE,
 };
 
@@ -360,7 +361,8 @@ async fn read_loop(
     };
 
     let mut event_count: u32 = 0;
-    let mut parsed_batch = ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE);
+    let batch_pool = std::sync::Arc::new(ParsedEventBatchPool::default());
+    let mut parsed_batch = ParsedEventBatch::checkout(&batch_pool);
     let single_batch_handler_only = event_handlers.is_empty() && event_batch_handlers.len() == 1;
 
     loop {
@@ -408,7 +410,11 @@ async fn read_loop(
                             Ok(event) => {
                                 parsed_batch.push(event);
                                 if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
-                                    dispatch_single_event_batch_handler(&mut parsed_batch, handler);
+                                    dispatch_single_event_batch_handler(
+                                        &mut parsed_batch,
+                                        handler,
+                                        &batch_pool,
+                                    );
                                 }
                             }
                             Err(e) => {
@@ -418,7 +424,11 @@ async fn read_loop(
                         }
                     }
 
-                    dispatch_single_event_batch_handler(&mut parsed_batch, handler);
+                    dispatch_single_event_batch_handler(
+                        &mut parsed_batch,
+                        handler,
+                        &batch_pool,
+                    );
                 } else {
                     while let Some(item) = rb.next() {
                         let data: &[u8] = &item;
@@ -452,6 +462,7 @@ async fn read_loop(
                                             &mut parsed_batch,
                                             &mut event_handlers,
                                             &mut event_batch_handlers,
+                                            &batch_pool,
                                         );
                                     }
                                 }
@@ -467,6 +478,7 @@ async fn read_loop(
                         &mut parsed_batch,
                         &mut event_handlers,
                         &mut event_batch_handlers,
+                        &batch_pool,
                     );
                 }
                 guard.clear_ready();
@@ -498,6 +510,7 @@ fn dispatch_event_batch(
     parsed_batch: &mut ParsedEventBatch,
     event_handlers: &mut [EventHandler],
     event_batch_handlers: &mut [EventBatchHandler],
+    batch_pool: &std::sync::Arc<ParsedEventBatchPool>,
 ) {
     if parsed_batch.is_empty() {
         return;
@@ -517,7 +530,7 @@ fn dispatch_event_batch(
             if let Some(handler) = event_batch_handlers.first_mut() {
                 handler(std::mem::replace(
                     parsed_batch,
-                    ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE),
+                    ParsedEventBatch::checkout(batch_pool),
                 ));
             }
         }
@@ -528,7 +541,7 @@ fn dispatch_event_batch(
             if let Some(last_handler) = event_batch_handlers.get_mut(len - 1) {
                 last_handler(std::mem::replace(
                     parsed_batch,
-                    ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE),
+                    ParsedEventBatch::checkout(batch_pool),
                 ));
             }
         }
@@ -539,6 +552,7 @@ fn dispatch_event_batch(
 fn dispatch_single_event_batch_handler(
     parsed_batch: &mut ParsedEventBatch,
     handler: &mut EventBatchHandler,
+    batch_pool: &std::sync::Arc<ParsedEventBatchPool>,
 ) {
     if parsed_batch.is_empty() {
         return;
@@ -546,7 +560,7 @@ fn dispatch_single_event_batch_handler(
 
     handler(std::mem::replace(
         parsed_batch,
-        ParsedEventBatch::with_capacity(PARSED_EVENT_BATCH_SIZE),
+        ParsedEventBatch::checkout(batch_pool),
     ));
 }
 
