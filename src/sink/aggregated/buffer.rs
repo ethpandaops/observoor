@@ -1,7 +1,6 @@
-use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
-use hashbrown::hash_map::Iter as HashMapIter;
 use hashbrown::HashMap;
 
 use crate::tracer::event::EventType;
@@ -66,95 +65,6 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
     HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default())
 }
 
-/// Stores the common single-key case inline and spills to a hash map only
-/// when a second distinct dimension appears.
-#[doc(hidden)]
-pub struct InlineOrMap<K, V> {
-    inline: Option<(K, V)>,
-    spill: FastMap<K, V>,
-}
-
-#[doc(hidden)]
-pub struct InlineOrMapIter<'a, K, V> {
-    inline: Option<(&'a K, &'a V)>,
-    spill: HashMapIter<'a, K, V>,
-}
-
-impl<'a, K, V> Iterator for InlineOrMapIter<'a, K, V> {
-    type Item = (&'a K, &'a V);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inline.take().or_else(|| self.spill.next())
-    }
-}
-
-impl<K, V> InlineOrMap<K, V>
-where
-    K: Copy + Eq + Hash,
-{
-    pub fn with_capacity(capacity: usize) -> Self {
-        Self {
-            inline: None,
-            spill: fast_map_with_capacity(capacity),
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.inline.is_none() && self.spill.is_empty()
-    }
-
-    pub fn len(&self) -> usize {
-        self.spill.len() + usize::from(self.inline.is_some())
-    }
-
-    pub fn get(&self, key: &K) -> Option<&V> {
-        self.inline
-            .as_ref()
-            .and_then(|(inline_key, value)| (inline_key == key).then_some(value))
-            .or_else(|| self.spill.get(key))
-    }
-
-    pub(crate) fn get_or_insert_with(&mut self, key: K, default: impl FnOnce() -> V) -> &mut V {
-        if self
-            .inline
-            .as_ref()
-            .is_some_and(|(inline_key, _)| *inline_key == key)
-        {
-            return &mut self.inline.as_mut().expect("inline entry exists").1;
-        }
-
-        if self.spill.is_empty() {
-            if self.inline.is_none() {
-                self.inline = Some((key, default()));
-                return &mut self.inline.as_mut().expect("inline entry inserted").1;
-            }
-
-            let (inline_key, inline_value) = self.inline.take().expect("inline entry exists");
-            self.spill.insert(inline_key, inline_value);
-        }
-
-        self.spill.entry(key).or_insert_with(default)
-    }
-
-    pub(crate) fn get_or_default_mut(&mut self, key: K) -> &mut V
-    where
-        V: Default,
-    {
-        self.get_or_insert_with(key, V::default)
-    }
-
-    pub fn iter(&self) -> InlineOrMapIter<'_, K, V> {
-        InlineOrMapIter {
-            inline: self.inline.as_ref().map(|(key, value)| (key, value)),
-            spill: self.spill.iter(),
-        }
-    }
-}
-
-pub(crate) type BasicLatencyMap = InlineOrMap<BasicDimension, LatencyAggregate>;
-pub(crate) type BasicCounterMap = InlineOrMap<BasicDimension, CounterAggregate>;
-pub(crate) type SchedWaitMap = InlineOrMap<BasicDimension, SchedWaitAggregate>;
-
 /// Aggregation buffer that collects events and aggregates them by dimension
 /// over a time window.
 ///
@@ -178,14 +88,14 @@ pub struct Buffer {
     pub system_cores: u16,
 
     // --- Syscalls (BasicDimension -> LatencyAggregate) ---
-    pub syscall_read: BasicLatencyMap,
-    pub syscall_write: BasicLatencyMap,
-    pub syscall_futex: BasicLatencyMap,
-    pub syscall_mmap: BasicLatencyMap,
-    pub syscall_epoll_wait: BasicLatencyMap,
-    pub syscall_fsync: BasicLatencyMap,
-    pub syscall_fdatasync: BasicLatencyMap,
-    pub syscall_pwrite: BasicLatencyMap,
+    pub syscall_read: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_write: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_futex: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_epoll_wait: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_fdatasync: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_pwrite: FastMap<BasicDimension, LatencyAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
     pub net_io: FastMap<NetworkDimension, CounterAggregate>,
@@ -199,26 +109,26 @@ pub struct Buffer {
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
     // --- Scheduler (BasicDimension -> LatencyAggregate) ---
-    pub sched_on_cpu: BasicLatencyMap,
+    pub sched_on_cpu: FastMap<BasicDimension, LatencyAggregate>,
     pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
-    pub sched_wait: SchedWaitMap,
+    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
 
     // --- Page faults (BasicDimension -> CounterAggregate) ---
-    pub page_fault_major: BasicCounterMap,
-    pub page_fault_minor: BasicCounterMap,
+    pub page_fault_major: FastMap<BasicDimension, CounterAggregate>,
+    pub page_fault_minor: FastMap<BasicDimension, CounterAggregate>,
 
     // --- FD operations (BasicDimension -> CounterAggregate) ---
-    pub fd_open: BasicCounterMap,
-    pub fd_close: BasicCounterMap,
+    pub fd_open: FastMap<BasicDimension, CounterAggregate>,
+    pub fd_close: FastMap<BasicDimension, CounterAggregate>,
 
     // --- Memory pressure ---
-    pub mem_reclaim: BasicLatencyMap,
-    pub mem_compaction: BasicLatencyMap,
-    pub swap_in: BasicCounterMap,
-    pub swap_out: BasicCounterMap,
-    pub oom_kill: BasicCounterMap,
-    pub process_exit: BasicCounterMap,
-    pub tcp_state_change: BasicCounterMap,
+    pub mem_reclaim: FastMap<BasicDimension, LatencyAggregate>,
+    pub mem_compaction: FastMap<BasicDimension, LatencyAggregate>,
+    pub swap_in: FastMap<BasicDimension, CounterAggregate>,
+    pub swap_out: FastMap<BasicDimension, CounterAggregate>,
+    pub oom_kill: FastMap<BasicDimension, CounterAggregate>,
+    pub process_exit: FastMap<BasicDimension, CounterAggregate>,
+    pub tcp_state_change: FastMap<BasicDimension, CounterAggregate>,
 }
 
 impl Buffer {
@@ -241,14 +151,14 @@ impl Buffer {
             el_offline,
             system_cores,
             // Syscalls.
-            syscall_read: InlineOrMap::with_capacity(16),
-            syscall_write: InlineOrMap::with_capacity(16),
-            syscall_futex: InlineOrMap::with_capacity(16),
-            syscall_mmap: InlineOrMap::with_capacity(16),
-            syscall_epoll_wait: InlineOrMap::with_capacity(16),
-            syscall_fsync: InlineOrMap::with_capacity(16),
-            syscall_fdatasync: InlineOrMap::with_capacity(16),
-            syscall_pwrite: InlineOrMap::with_capacity(16),
+            syscall_read: fast_map_with_capacity(16),
+            syscall_write: fast_map_with_capacity(16),
+            syscall_futex: fast_map_with_capacity(16),
+            syscall_mmap: fast_map_with_capacity(16),
+            syscall_epoll_wait: fast_map_with_capacity(16),
+            syscall_fsync: fast_map_with_capacity(16),
+            syscall_fdatasync: fast_map_with_capacity(16),
+            syscall_pwrite: fast_map_with_capacity(16),
             // Network.
             net_io: fast_map_with_capacity(64),
             tcp_retransmit: fast_map_with_capacity(32),
@@ -258,23 +168,23 @@ impl Buffer {
             disk_io: fast_map_with_capacity(16),
             block_merge: fast_map_with_capacity(16),
             // Scheduler.
-            sched_on_cpu: InlineOrMap::with_capacity(16),
+            sched_on_cpu: fast_map_with_capacity(16),
             cpu_on_core: fast_map_with_capacity(64),
-            sched_wait: InlineOrMap::with_capacity(16),
+            sched_wait: fast_map_with_capacity(16),
             // Page faults.
-            page_fault_major: InlineOrMap::with_capacity(16),
-            page_fault_minor: InlineOrMap::with_capacity(16),
+            page_fault_major: fast_map_with_capacity(16),
+            page_fault_minor: fast_map_with_capacity(16),
             // FD operations.
-            fd_open: InlineOrMap::with_capacity(16),
-            fd_close: InlineOrMap::with_capacity(16),
+            fd_open: fast_map_with_capacity(16),
+            fd_close: fast_map_with_capacity(16),
             // Memory pressure.
-            mem_reclaim: InlineOrMap::with_capacity(8),
-            mem_compaction: InlineOrMap::with_capacity(8),
-            swap_in: InlineOrMap::with_capacity(8),
-            swap_out: InlineOrMap::with_capacity(8),
-            oom_kill: InlineOrMap::with_capacity(8),
-            process_exit: InlineOrMap::with_capacity(8),
-            tcp_state_change: InlineOrMap::with_capacity(8),
+            mem_reclaim: fast_map_with_capacity(8),
+            mem_compaction: fast_map_with_capacity(8),
+            swap_in: fast_map_with_capacity(8),
+            swap_out: fast_map_with_capacity(8),
+            oom_kill: fast_map_with_capacity(8),
+            process_exit: fast_map_with_capacity(8),
+            tcp_state_change: fast_map_with_capacity(8),
         }
     }
 
@@ -291,7 +201,7 @@ impl Buffer {
             EventType::SyscallPwrite => &mut self.syscall_pwrite,
             _ => return,
         };
-        map.get_or_default_mut(dim).record(latency_ns);
+        map.entry(dim).or_default().record(latency_ns);
     }
 
     /// Adds a network I/O event.
@@ -336,7 +246,7 @@ impl Buffer {
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
     pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        self.sched_on_cpu.get_or_default_mut(dim).record(on_cpu_ns);
+        self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
@@ -361,7 +271,8 @@ impl Buffer {
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
             self.sched_wait
-                .get_or_default_mut(dim)
+                .entry(dim)
+                .or_default()
                 .record(runqueue_ns, off_cpu_ns);
         }
     }
@@ -369,57 +280,58 @@ impl Buffer {
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
         if major {
-            self.page_fault_major.get_or_default_mut(dim).add_count(1);
+            self.page_fault_major.entry(dim).or_default().add_count(1);
         } else {
-            self.page_fault_minor.get_or_default_mut(dim).add_count(1);
+            self.page_fault_minor.entry(dim).or_default().add_count(1);
         }
     }
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        self.fd_open.get_or_default_mut(dim).add_count(1);
+        self.fd_open.entry(dim).or_default().add_count(1);
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        self.fd_close.get_or_default_mut(dim).add_count(1);
+        self.fd_close.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a memory reclaim event.
     pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
-        self.mem_reclaim.get_or_default_mut(dim).record(duration_ns);
+        self.mem_reclaim.entry(dim).or_default().record(duration_ns);
     }
 
     /// Adds a memory compaction event.
     pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
         self.mem_compaction
-            .get_or_default_mut(dim)
+            .entry(dim)
+            .or_default()
             .record(duration_ns);
     }
 
     /// Adds a swap-in event.
     pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
-        self.swap_in.get_or_default_mut(dim).add(pages as i64);
+        self.swap_in.entry(dim).or_default().add(pages as i64);
     }
 
     /// Adds a swap-out event.
     pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
-        self.swap_out.get_or_default_mut(dim).add(pages as i64);
+        self.swap_out.entry(dim).or_default().add(pages as i64);
     }
 
     /// Adds an OOM kill event.
     pub fn add_oom_kill(&mut self, dim: BasicDimension) {
-        self.oom_kill.get_or_default_mut(dim).add_count(1);
+        self.oom_kill.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a process exit event.
     pub fn add_process_exit(&mut self, dim: BasicDimension) {
-        self.process_exit.get_or_default_mut(dim).add_count(1);
+        self.process_exit.entry(dim).or_default().add_count(1);
     }
 
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
-        self.tcp_state_change.get_or_default_mut(dim).add_count(1);
+        self.tcp_state_change.entry(dim).or_default().add_count(1);
     }
 }
 
@@ -578,19 +490,5 @@ mod tests {
         assert_eq!(open.snapshot().count, 2);
         let close = buf.fd_close.get(&dim).expect("close exists");
         assert_eq!(close.snapshot().count, 1);
-    }
-
-    #[test]
-    fn test_inline_or_map_spills_on_second_dimension() {
-        let mut map: BasicCounterMap = InlineOrMap::with_capacity(4);
-        let first = BasicDimension::new(1, 1);
-        let second = BasicDimension::new(2, 1);
-
-        map.get_or_default_mut(first).add_count(2);
-        map.get_or_default_mut(second).add_count(1);
-
-        assert_eq!(map.len(), 2);
-        assert_eq!(map.get(&first).expect("first exists").snapshot().count, 2);
-        assert_eq!(map.get(&second).expect("second exists").snapshot().count, 1);
     }
 }
