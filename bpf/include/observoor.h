@@ -86,11 +86,10 @@ struct sched_event {
     __u32 cpu_id;
 };
 
-// Page fault event (32 bytes total).
+// Page fault event (24 bytes total).
+// The major/minor flag is stored in hdr.pad[0] to keep this hot event header-only.
 struct page_fault_event {
     struct event_header hdr;
-    __u8  major;
-    __u8  pad[7];
 };
 
 // FD event (24 bytes total).

@@ -23,7 +23,7 @@ struct RawEventHeader {
     tid: u32,
     event_type: u8,
     client_type: u8,
-    _pad: [u8; 6],
+    pad: [u8; 6],
 }
 
 #[repr(C)]
@@ -73,13 +73,6 @@ struct RawSchedRunqueuePayload {
     off_cpu_ns: u64,
     cpu_id: u32,
     _pad: [u8; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawPageFaultPayload {
-    major: u8,
-    _pad: [u8; 7],
 }
 
 #[repr(C)]
@@ -215,7 +208,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         ),
         10 => (
             EventType::PageFault,
-            TypedEvent::PageFault(parse_page_fault(payload)?),
+            TypedEvent::PageFault(parse_page_fault(&header)),
         ),
         11 => (EventType::FDOpen, TypedEvent::FDOpen),
         12 => (EventType::FDClose, TypedEvent::FDClose),
@@ -388,12 +381,11 @@ fn parse_sched_runqueue(data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
     })
 }
 
-/// Page fault event: type 10. Payload: 8 bytes.
-fn parse_page_fault(data: &[u8]) -> Result<PageFaultEvent, ParseError> {
-    let raw = read_payload::<RawPageFaultPayload>(data, "page fault event")?;
-    Ok(PageFaultEvent {
-        major: raw.major != 0,
-    })
+/// Page fault event: type 10. No payload; major/minor is carried in `hdr.pad[0]`.
+fn parse_page_fault(header: &RawEventHeader) -> PageFaultEvent {
+    PageFaultEvent {
+        major: header.pad[0] != 0,
+    }
 }
 
 /// Block merge event: type 17. Payload: 8 bytes.
@@ -764,8 +756,7 @@ mod tests {
     #[test]
     fn test_page_fault_major() {
         let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
-        data.push(1); // major
-        data.extend_from_slice(&[0u8; 7]);
+        data[18] = 1; // hdr.pad[0] = major
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
@@ -777,8 +768,7 @@ mod tests {
     #[test]
     fn test_page_fault_minor() {
         let mut data = header(8_000_000, 107, 207, 10, 2);
-        data.push(0); // minor
-        data.extend_from_slice(&[0u8; 7]);
+        data[18] = 0; // hdr.pad[0] = minor
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
