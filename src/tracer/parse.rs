@@ -10,9 +10,9 @@ use thiserror::Error;
 
 use super::event::{
     BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
-    NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent, ProcessExitEvent, SchedEvent,
-    SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TcpStateEvent, TypedEvent,
-    MAX_CLIENT_TYPE,
+    NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent, ProcessExitEvent, SchedCombinedEvent,
+    SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TcpStateEvent,
+    TypedEvent, MAX_CLIENT_TYPE,
 };
 
 #[repr(C)]
@@ -64,13 +64,6 @@ struct RawNetIOMetricsPayload {
 #[derive(Clone, Copy)]
 struct RawSchedPayload {
     on_cpu_ns: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawSchedRunqueuePayload {
-    runqueue_ns: u64,
-    off_cpu_ns: u64,
 }
 
 #[repr(C)]
@@ -128,6 +121,7 @@ struct RawProcessExitPayload {
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
+const SCHED_COMBINED_PAYLOAD_SIZE: usize = 36;
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -205,7 +199,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         ),
         9 => (
             EventType::SchedSwitch,
-            TypedEvent::Sched(parse_sched(&header, payload)?),
+            parse_sched_variant(&header, payload)?,
         ),
         10 => (
             EventType::PageFault,
@@ -307,6 +301,40 @@ fn read_payload<T: Copy>(data: &[u8], name: &'static str) -> Result<T, ParseErro
 }
 
 #[inline(always)]
+fn read_u32(data: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+    ])
+}
+
+#[inline(always)]
+fn read_u64(data: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes([
+        data[offset],
+        data[offset + 1],
+        data[offset + 2],
+        data[offset + 3],
+        data[offset + 4],
+        data[offset + 5],
+        data[offset + 6],
+        data[offset + 7],
+    ])
+}
+
+#[inline(always)]
+fn read_u64_checked(
+    data: &[u8],
+    offset: usize,
+    event_name: &'static str,
+) -> Result<u64, ParseError> {
+    ensure_payload(data, offset + size_of::<u64>(), event_name)?;
+    Ok(read_u64(data, offset))
+}
+
+#[inline(always)]
 fn decode_u32_from_pad(pad: &[u8; 6], offset: usize) -> u32 {
     debug_assert!(offset <= 2);
     u32::from_le_bytes([
@@ -382,7 +410,21 @@ fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
     })
 }
 
-/// Scheduler context-switch event: type 9. Payload: 8 bytes.
+/// Scheduler context-switch event: type 9.
+/// The common payload is 8 bytes, but the BPF side can also attach the
+/// incoming tracked thread to collapse the usual sched_switch + sched_runqueue
+/// pair into one ring-buffer record.
+fn parse_sched_variant(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, ParseError> {
+    if data.len() >= SCHED_COMBINED_PAYLOAD_SIZE {
+        return Ok(TypedEvent::SchedCombined(parse_sched_combined(
+            header, data,
+        )?));
+    }
+
+    Ok(TypedEvent::Sched(parse_sched(header, data)?))
+}
+
+/// Scheduler context-switch event payload: 8 bytes.
 /// voluntary is stored in `hdr.pad[0]`, cpu_id in `hdr.pad[1..4]`.
 fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, ParseError> {
     let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
@@ -393,16 +435,40 @@ fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, Parse
     })
 }
 
+/// Combined scheduler switch-out + switch-in payload: 36 bytes.
+fn parse_sched_combined(
+    header: &RawEventHeader,
+    data: &[u8],
+) -> Result<SchedCombinedEvent, ParseError> {
+    ensure_payload(data, SCHED_COMBINED_PAYLOAD_SIZE, "sched combined event")?;
+    let next_client_type = data[32];
+    if next_client_type > MAX_CLIENT_TYPE as u8 {
+        return Err(ParseError::UnknownClientType {
+            raw: next_client_type,
+        });
+    }
+
+    Ok(SchedCombinedEvent {
+        on_cpu_ns: read_u64(data, 0),
+        voluntary: header.pad[0] != 0,
+        cpu_id: decode_u32_from_pad(&header.pad, 1),
+        runqueue_ns: read_u64(data, 8),
+        off_cpu_ns: read_u64(data, 16),
+        next_pid: read_u32(data, 24),
+        next_tid: read_u32(data, 28),
+        next_client_type,
+    })
+}
+
 /// Scheduler runqueue/off-CPU latency event: type 16. Payload: 16 bytes.
 /// cpu_id is stored in `hdr.pad[0..3]`.
 fn parse_sched_runqueue(
     header: &RawEventHeader,
     data: &[u8],
 ) -> Result<SchedRunqueueEvent, ParseError> {
-    let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
-        runqueue_ns: u64::from_le(raw.runqueue_ns),
-        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
+        runqueue_ns: read_u64_checked(data, 0, "sched runqueue event")?,
+        off_cpu_ns: read_u64_checked(data, 8, "sched runqueue event")?,
         cpu_id: decode_u32_from_pad(&header.pad, 0),
     })
 }
@@ -740,6 +806,33 @@ mod tests {
         };
         assert_eq!(e.on_cpu_ns, 200_000);
         assert!(!e.voluntary);
+        assert_eq!(e.cpu_id, 15);
+    }
+
+    #[test]
+    fn test_sched_switch_combined() {
+        let mut data = header(6_500_000, 105, 205, 9, 6);
+        data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.extend_from_slice(&50_000u64.to_le_bytes());
+        data.extend_from_slice(&70_000u64.to_le_bytes());
+        data.extend_from_slice(&303u32.to_le_bytes());
+        data.extend_from_slice(&404u32.to_le_bytes());
+        data.push(2);
+        data.extend_from_slice(&[0u8; 3]);
+        data[HEADER_PAD_OFFSET] = 1;
+        set_header_pad_u32(&mut data, 1, 15);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SchedCombined(e) = &parsed.typed else {
+            panic!("expected SchedCombined");
+        };
+        assert_eq!(e.on_cpu_ns, 200_000);
+        assert_eq!(e.runqueue_ns, 50_000);
+        assert_eq!(e.off_cpu_ns, 70_000);
+        assert_eq!(e.next_pid, 303);
+        assert_eq!(e.next_tid, 404);
+        assert_eq!(e.next_client_type, 2);
+        assert!(e.voluntary);
         assert_eq!(e.cpu_id, 15);
     }
 

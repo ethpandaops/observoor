@@ -511,6 +511,41 @@ impl AggregatedSink {
                 }
             }
 
+            TypedEvent::SchedCombined(e) => {
+                let prev_dim = BasicDimension::new(pid, client_type);
+                let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
+                let switch = crate::tracer::event::SchedEvent {
+                    on_cpu_ns: e.on_cpu_ns,
+                    voluntary: e.voluntary,
+                    cpu_id: e.cpu_id,
+                };
+                let runqueue = crate::tracer::event::SchedRunqueueEvent {
+                    runqueue_ns: e.runqueue_ns,
+                    off_cpu_ns: e.off_cpu_ns,
+                    cpu_id: e.cpu_id,
+                };
+
+                if let Some(scheduler_state) = scheduler_state {
+                    scheduler_state.handle_sched_switch(
+                        buf,
+                        event.raw.tid,
+                        event.raw.timestamp_ns,
+                        prev_dim,
+                        &switch,
+                    );
+                    scheduler_state.handle_sched_runqueue(
+                        buf,
+                        e.next_tid,
+                        event.raw.timestamp_ns,
+                        next_dim,
+                        &runqueue,
+                    );
+                } else {
+                    buf.add_sched_switch(prev_dim, e.on_cpu_ns, e.cpu_id);
+                    buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
+                }
+            }
+
             TypedEvent::SchedRunqueue(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 if let Some(scheduler_state) = scheduler_state {
@@ -1483,6 +1518,71 @@ mod tests {
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
         assert!(!buf.tcp_state_change.is_empty());
+    }
+
+    #[test]
+    fn test_process_event_sched_combined_with_scheduler_state() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let event = make_event_at(
+            1_000,
+            123,
+            77,
+            EventType::SchedSwitch,
+            TypedEvent::SchedCombined(SchedCombinedEvent {
+                on_cpu_ns: 300,
+                voluntary: false,
+                cpu_id: 2,
+                next_pid: 124,
+                next_tid: 88,
+                next_client_type: ClientType::Geth as u8,
+                runqueue_ns: 50,
+                off_cpu_ns: 100,
+            }),
+        );
+
+        AggregatedSink::process_event_with_scheduler_state(
+            &mut buf,
+            &event,
+            &dims,
+            &mut scheduler_state,
+        );
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
+
+        let prev_sched = buf
+            .sched_on_cpu
+            .get(&BasicDimension::new(123, ClientType::Geth as u8))
+            .expect("prev sched_on_cpu");
+        assert_eq!(prev_sched.snapshot().sum, 300);
+
+        let next_wait = buf
+            .sched_wait
+            .get(&BasicDimension::new(124, ClientType::Geth as u8))
+            .expect("next sched_wait");
+        assert_eq!(next_wait.runqueue_snapshot().sum, 50);
+        assert_eq!(next_wait.off_cpu_snapshot().sum, 100);
+
+        let prev_core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
+            .expect("prev core usage");
+        assert_eq!(prev_core.snapshot().sum, 300);
+
+        let next_core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
+            .expect("next core usage");
+        assert_eq!(next_core.snapshot().sum, 300);
     }
 
     #[test]

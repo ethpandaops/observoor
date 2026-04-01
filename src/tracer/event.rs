@@ -402,6 +402,25 @@ pub struct SchedEvent {
     pub cpu_id: u32,
 }
 
+/// Combined scheduler switch-out + switch-in event.
+///
+/// The header identifies the outgoing thread. The payload also carries the
+/// incoming tracked thread so the tracer can collapse the usual
+/// sched_switch + sched_runqueue pair into one ring-buffer record.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct SchedCombinedEvent {
+    pub on_cpu_ns: u64,
+    pub voluntary: bool,
+    pub cpu_id: u32,
+    pub next_pid: u32,
+    pub next_tid: u32,
+    /// Validated raw `ClientType` discriminant for the incoming thread.
+    pub next_client_type: u8,
+    pub runqueue_ns: u64,
+    pub off_cpu_ns: u64,
+}
+
 /// Runqueue/off-CPU latency event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -500,6 +519,7 @@ pub enum TypedEvent {
     DiskIO(DiskIOEvent),
     NetIO(NetIOEvent),
     Sched(SchedEvent),
+    SchedCombined(SchedCombinedEvent),
     SchedRunqueue(SchedRunqueueEvent),
     PageFault(PageFaultEvent),
     FDOpen,

@@ -92,6 +92,20 @@ struct sched_event {
     __u64 on_cpu_ns;
 };
 
+// Combined scheduler switch + switch-in event (60 bytes total).
+// Shares EVENT_SCHED_SWITCH; userspace detects the extended payload length.
+// voluntary is stored in hdr.pad[0], cpu_id in hdr.pad[1..4] (little-endian).
+struct sched_switch_runqueue_event {
+    struct event_header hdr;
+    __u64 on_cpu_ns;
+    __u64 runqueue_ns;
+    __u64 off_cpu_ns;
+    __u32 next_pid;
+    __u32 next_tid;
+    __u8  next_client_type;
+    __u8  pad[3];
+} __attribute__((packed));
+
 // Page fault event (24 bytes total).
 // The major/minor flag is stored in hdr.pad[0] to keep this hot event header-only.
 struct page_fault_event {

@@ -232,6 +232,11 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
         TypedEvent::Sched(e) => {
             buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
         }
+        TypedEvent::SchedCombined(e) => {
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+            let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
+            buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
+        }
         TypedEvent::SchedRunqueue(e) => {
             buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
         }

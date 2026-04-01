@@ -23,6 +23,7 @@ const struct disk_io_event    *__unused_disk_io_ev    __attribute__((unused));
 const struct net_io_event     *__unused_net_io_ev     __attribute__((unused));
 const struct net_io_metrics_event *__unused_net_io_metrics_ev __attribute__((unused));
 const struct sched_event      *__unused_sched_ev      __attribute__((unused));
+const struct sched_switch_runqueue_event *__unused_sched_combo_ev __attribute__((unused));
 const struct page_fault_event *__unused_page_fault_ev __attribute__((unused));
 const struct fd_event         *__unused_fd_ev         __attribute__((unused));
 const struct sched_runqueue_event *__unused_sched_rq_ev __attribute__((unused));
@@ -1050,22 +1051,20 @@ SEC("tracepoint/sched/sched_switch")
 int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
 {
     __u64 now = bpf_ktime_get_ns();
-    __u8 ct;
+    __u8 ct = 0;
+    __u32 cpu_id = bpf_get_smp_processor_id();
 
     // Path A: Record sched-ON timestamp for incoming thread unconditionally.
     // We cannot filter by TGID here because ctx->next_pid is a TID and
     // bpf_get_current_pid_tgid() returns the *outgoing* task's TGID.
     // The LRU map auto-evicts stale entries from irrelevant threads.
     __u32 next_tid = ctx->next_pid;
+    __u64 runqueue_ns = 0;
+    __u64 offcpu_ns = 0;
     bpf_map_update_elem(&sched_on_ts, &next_tid, &now, BPF_ANY);
 
     struct tracked_tid_val *next_info = lookup_tracked_tid(next_tid);
-
-    // Emit runqueue/off-CPU latency event for incoming thread.
     if (next_info) {
-        __u64 runqueue_ns = 0;
-        __u64 offcpu_ns = 0;
-
         __u64 *wake_ts = bpf_map_lookup_elem(&wakeup_ts, &next_tid);
         if (wake_ts && now > *wake_ts)
             runqueue_ns = now - *wake_ts;
@@ -1077,24 +1076,6 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             offcpu_ns = now - *off_ts;
         if (off_ts)
             bpf_map_delete_elem(&offcpu_ts, &next_tid);
-
-        if (should_emit_event(EVENT_SCHED_RUNQUEUE)) {
-            struct sched_runqueue_event *rq =
-                bpf_ringbuf_reserve(&events, sizeof(*rq), 0);
-            if (rq) {
-                __u32 cpu_id = bpf_get_smp_processor_id();
-                rq->hdr.timestamp_ns = now;
-                rq->hdr.pid = next_info->pid;
-                rq->hdr.tid = next_tid;
-                rq->hdr.event_type = EVENT_SCHED_RUNQUEUE;
-                rq->hdr.client_type = next_info->client_type;
-                __builtin_memset(rq->hdr.pad, 0, sizeof(rq->hdr.pad));
-                encode_u32_le(&rq->hdr.pad[0], cpu_id);
-                rq->runqueue_ns = runqueue_ns;
-                rq->off_cpu_ns = offcpu_ns;
-                bpf_ringbuf_submit(rq, 0);
-            }
-        }
     }
 
     // Path B: Emit event for outgoing (prev) thread.
@@ -1105,22 +1086,74 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     __u32 pid = pid_tgid >> 32;
     __u32 tid = (__u32)pid_tgid;
 
-    if (!is_tracked(pid, &ct))
-        return 0;
+    int prev_tracked = is_tracked(pid, &ct);
+    int emit_switch = 0;
+    int emit_runqueue = 0;
 
-    // Record off-CPU timestamp unconditionally for all threads in tracked
-    // processes. The is_tracked(pid) check above already filters by TGID.
-    // The LRU map auto-evicts stale entries from dead threads.
-    bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
+    if (prev_tracked) {
+        // Record off-CPU timestamp unconditionally for all threads in tracked
+        // processes. The is_tracked(pid) check above already filters by TGID.
+        // The LRU map auto-evicts stale entries from dead threads.
+        bpf_map_update_elem(&offcpu_ts, &tid, &now, BPF_ANY);
+        emit_switch = should_emit_event(EVENT_SCHED_SWITCH);
+    }
+    if (next_info)
+        emit_runqueue = should_emit_event(EVENT_SCHED_RUNQUEUE);
 
-    if (!should_emit_event(EVENT_SCHED_SWITCH))
+    if (prev_tracked && next_info && emit_switch && emit_runqueue) {
+        struct sched_switch_runqueue_event *combo =
+            bpf_ringbuf_reserve(&events, sizeof(*combo), 0);
+        if (combo) {
+            __u64 on_cpu_ns = 0;
+            __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
+            if (on_ts && *on_ts > 0 && now > *on_ts)
+                on_cpu_ns = now - *on_ts;
+            bpf_map_delete_elem(&sched_on_ts, &tid);
+
+            combo->hdr.timestamp_ns = now;
+            combo->hdr.pid = pid;
+            combo->hdr.tid = tid;
+            combo->hdr.event_type = EVENT_SCHED_SWITCH;
+            combo->hdr.client_type = ct;
+            __builtin_memset(combo->hdr.pad, 0, sizeof(combo->hdr.pad));
+            combo->hdr.pad[0] = (ctx->prev_state == 0) ? 1 : 0;
+            encode_u32_le(&combo->hdr.pad[1], cpu_id);
+            combo->on_cpu_ns = on_cpu_ns;
+            combo->runqueue_ns = runqueue_ns;
+            combo->off_cpu_ns = offcpu_ns;
+            combo->next_pid = next_info->pid;
+            combo->next_tid = next_tid;
+            combo->next_client_type = next_info->client_type;
+            __builtin_memset(combo->pad, 0, sizeof(combo->pad));
+            bpf_ringbuf_submit(combo, 0);
+            return 0;
+        }
+    }
+
+    if (next_info && emit_runqueue) {
+        struct sched_runqueue_event *rq =
+            bpf_ringbuf_reserve(&events, sizeof(*rq), 0);
+        if (rq) {
+            rq->hdr.timestamp_ns = now;
+            rq->hdr.pid = next_info->pid;
+            rq->hdr.tid = next_tid;
+            rq->hdr.event_type = EVENT_SCHED_RUNQUEUE;
+            rq->hdr.client_type = next_info->client_type;
+            __builtin_memset(rq->hdr.pad, 0, sizeof(rq->hdr.pad));
+            encode_u32_le(&rq->hdr.pad[0], cpu_id);
+            rq->runqueue_ns = runqueue_ns;
+            rq->off_cpu_ns = offcpu_ns;
+            bpf_ringbuf_submit(rq, 0);
+        }
+    }
+
+    if (!prev_tracked || !emit_switch)
         return 0;
 
     struct sched_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e)
         return 0;
 
-    __u32 cpu_id = bpf_get_smp_processor_id();
     e->hdr.timestamp_ns = now;
     e->hdr.pid = pid;
     e->hdr.tid = tid;
@@ -1132,11 +1165,10 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
 
     // Compute on-CPU duration from sched_on_ts entry.
     __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
-    if (on_ts && *on_ts > 0 && now > *on_ts) {
+    if (on_ts && *on_ts > 0 && now > *on_ts)
         e->on_cpu_ns = now - *on_ts;
-    } else {
+    else
         e->on_cpu_ns = 0;
-    }
     bpf_map_delete_elem(&sched_on_ts, &tid);
 
     // prev_state > 0 means the task was preempted (involuntary),
