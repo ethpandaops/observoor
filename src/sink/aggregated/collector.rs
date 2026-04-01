@@ -6,8 +6,7 @@ use std::fs;
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
-use super::aggregate::{CounterAggregate, LatencyAggregate};
-use super::buffer::{fast_map_with_capacity, Buffer, FastMap};
+use super::buffer::{fast_map_with_capacity, BasicCounterMap, BasicLatencyMap, Buffer, FastMap};
 use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
@@ -75,10 +74,6 @@ pub struct Collector {
 struct EventSamplingMetadata {
     mode: SamplingMode,
     rate: f32,
-}
-
-fn map_len<K, V>(map: &FastMap<K, V>) -> usize {
-    map.len()
 }
 
 #[cfg(feature = "bpf")]
@@ -318,63 +313,63 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.syscall_read)
-            + map_len(&buf.syscall_write)
-            + map_len(&buf.syscall_futex)
-            + map_len(&buf.syscall_mmap)
-            + map_len(&buf.syscall_epoll_wait)
-            + map_len(&buf.syscall_fsync)
-            + map_len(&buf.syscall_fdatasync)
-            + map_len(&buf.syscall_pwrite)
-            + map_len(&buf.sched_on_cpu)
-            + (map_len(&buf.sched_wait) * 2)
-            + map_len(&buf.mem_reclaim)
-            + map_len(&buf.mem_compaction)
-            + map_len(&buf.disk_io)
+        buf.syscall_read.len()
+            + buf.syscall_write.len()
+            + buf.syscall_futex.len()
+            + buf.syscall_mmap.len()
+            + buf.syscall_epoll_wait.len()
+            + buf.syscall_fsync.len()
+            + buf.syscall_fdatasync.len()
+            + buf.syscall_pwrite.len()
+            + buf.sched_on_cpu.len()
+            + (buf.sched_wait.len() * 2)
+            + buf.mem_reclaim.len()
+            + buf.mem_compaction.len()
+            + buf.disk_io.len()
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.page_fault_major)
-            + map_len(&buf.page_fault_minor)
-            + map_len(&buf.swap_in)
-            + map_len(&buf.swap_out)
-            + map_len(&buf.oom_kill)
-            + map_len(&buf.fd_open)
-            + map_len(&buf.fd_close)
-            + map_len(&buf.process_exit)
-            + map_len(&buf.tcp_state_change)
-            + map_len(&buf.net_io)
-            + map_len(&buf.tcp_retransmit)
-            + map_len(&buf.disk_io)
-            + map_len(&buf.block_merge)
+        buf.page_fault_major.len()
+            + buf.page_fault_minor.len()
+            + buf.swap_in.len()
+            + buf.swap_out.len()
+            + buf.oom_kill.len()
+            + buf.fd_open.len()
+            + buf.fd_close.len()
+            + buf.process_exit.len()
+            + buf.tcp_state_change.len()
+            + buf.net_io.len()
+            + buf.tcp_retransmit.len()
+            + buf.disk_io.len()
+            + buf.block_merge.len()
     }
 
     fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.tcp_metrics) * 2) + map_len(&buf.disk_io)
+        (buf.tcp_metrics.len() * 2) + buf.disk_io.len()
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_io_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_fd_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -385,7 +380,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(EventType, &str, &FastMap<BasicDimension, LatencyAggregate>)] = &[
+        let maps: &[(EventType, &str, &BasicLatencyMap)] = &[
             (EventType::SyscallRead, "syscall_read", &buf.syscall_read),
             (EventType::SyscallWrite, "syscall_write", &buf.syscall_write),
             (EventType::SyscallFutex, "syscall_futex", &buf.syscall_futex),
@@ -564,7 +559,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(EventType, &str, &FastMap<BasicDimension, CounterAggregate>)] = &[
+        let maps: &[(EventType, &str, &BasicCounterMap)] = &[
             (
                 EventType::PageFault,
                 "page_fault_major",

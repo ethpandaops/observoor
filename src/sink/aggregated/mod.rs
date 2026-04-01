@@ -398,64 +398,56 @@ impl AggregatedSink {
             TypedEvent::SyscallRead(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_read
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallWrite(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_write
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallFutex(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_futex
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallMmap(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_mmap
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallEpollWait(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_epoll_wait
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallFsync(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_fsync
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallFdatasync(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_fdatasync
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
             TypedEvent::SyscallPwrite(e) => {
                 let dim = BasicDimension::new(pid, client_type);
                 buf.syscall_pwrite
-                    .entry(dim)
-                    .or_default()
+                    .get_or_default_mut(dim)
                     .record(e.latency_ns);
             }
 
