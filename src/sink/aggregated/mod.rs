@@ -42,11 +42,11 @@ type EventBatch = Vec<ParsedEvent>;
 /// across the tracer -> sink handoff.
 const EVENT_BATCH_SIZE: usize = PARSED_EVENT_BATCH_SIZE;
 /// Keep roughly a 65,536-event queue depth, but in batch units.
-const EVENT_BATCH_CHANNEL_CAPACITY: usize = 16;
+const EVENT_BATCH_CHANNEL_CAPACITY: usize = 8;
 /// Drain up to 32,768 queued events per wake to further amortize
 /// `mpsc`/`select!` overhead under sustained tracer load without letting the
 /// event loop run unbounded.
-const EVENT_BATCHES_PER_WAKE: usize = 8;
+const EVENT_BATCHES_PER_WAKE: usize = 4;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {

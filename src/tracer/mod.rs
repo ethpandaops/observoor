@@ -30,9 +30,10 @@ pub struct TrackedTidInfo {
 /// Shared parsed-event batch size for tracer -> sink handoff.
 ///
 /// Under sustained load the tracer and aggregated sink pay this cost on every
-/// batch boundary, so a larger batch materially reduces channel sends, receiver
-/// wakeups, and fresh Vec allocations while keeping buffering bounded.
-pub const PARSED_EVENT_BATCH_SIZE: usize = 4096;
+/// batch boundary, so using 8k-event batches cuts boundary overhead roughly in
+/// half versus 4k while keeping end-to-end buffering bounded by the sink's
+/// batch-channel sizing.
+pub const PARSED_EVENT_BATCH_SIZE: usize = 8192;
 
 /// Parsed events plus per-batch counters computed in the tracer read loop.
 ///
