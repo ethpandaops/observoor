@@ -29,7 +29,11 @@ fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u
 
 fn syscall_payload(event_type: EventType, pid: u32, tid: u32, latency_ns: u64) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, event_type as u8, 1);
-    data.extend_from_slice(&latency_ns.to_le_bytes());
+    data.extend_from_slice(
+        &u32::try_from(latency_ns)
+            .expect("test syscall latency must fit in u32")
+            .to_le_bytes(),
+    );
     data
 }
 

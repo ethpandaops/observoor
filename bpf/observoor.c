@@ -44,6 +44,13 @@ static __always_inline __u32 sectors_to_bytes(__u32 nr_sector)
     return (__u32)bytes;
 }
 
+static __always_inline __u32 clamp_u64_to_u32(__u64 value)
+{
+    if (value > 0xFFFFFFFFULL)
+        return 0xFFFFFFFFU;
+    return (__u32)value;
+}
+
 static __always_inline void encode_u32_le(__u8 *dst, __u32 value)
 {
     dst[0] = value & 0xff;
@@ -95,7 +102,7 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_READ, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -143,7 +150,7 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_WRITE, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -191,7 +198,7 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -239,7 +246,7 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_MMAP, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -287,7 +294,7 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -335,7 +342,7 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -383,7 +390,7 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 
@@ -431,7 +438,7 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, val->client_type);
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
 
     bpf_ringbuf_submit(e, 0);
 

@@ -46,10 +46,10 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Syscall event (32 bytes total).
+// Syscall event (28 bytes total).
 struct syscall_event {
     struct event_header hdr;
-    __u64 latency_ns;
+    __u32 latency_ns;
 };
 
 // Disk I/O event (48 bytes total).
