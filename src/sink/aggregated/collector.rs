@@ -313,7 +313,6 @@ impl Collector {
         self.collect_basic_counters(batch, buf, window, slot);
         self.collect_network_counters(batch, buf, window, slot);
         self.collect_disk_counters(batch, buf, window, slot);
-        self.collect_tcp_gauges(batch, buf, window, slot);
         self.collect_cpu_utilization(batch, buf, window, slot);
     }
 
@@ -616,7 +615,7 @@ impl Collector {
         }
     }
 
-    /// Collects network counter metrics with port label/direction.
+    /// Collects network metrics and emits all `tcp_tx`-backed rows in one pass.
     fn collect_network_counters(
         &self,
         batch: &mut MetricBatch,
@@ -656,26 +655,68 @@ impl Collector {
 
         let sampling = self.sampling_for_event(EventType::NetTX);
         for (dim, aggregate) in buf.tcp_tx.iter() {
-            let snap = aggregate.bytes_snapshot();
-            if snap.count == 0 {
-                continue;
+            let client_type = client_type_from_u8(dim.client_type());
+            let port_label = Some(port_label_string(dim.port_label()));
+            let direction = Some(direction_string(dim.direction()));
+
+            let bytes = aggregate.bytes_snapshot();
+            if bytes.count > 0 {
+                batch.counter.push(CounterMetric {
+                    metric_type: "net_io",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type,
+                    device_id: None,
+                    rw: None,
+                    port_label,
+                    direction,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: bytes.sum,
+                    count: bytes.count,
+                });
             }
 
-            batch.counter.push(CounterMetric {
-                metric_type: "net_io",
-                window,
-                slot,
-                pid: dim.pid(),
-                client_type: client_type_from_u8(dim.client_type()),
-                device_id: None,
-                rw: None,
-                port_label: Some(port_label_string(dim.port_label())),
-                direction: Some(direction_string(dim.direction())),
-                sampling_mode: sampling.mode,
-                sampling_rate: sampling.rate,
-                sum: snap.sum,
-                count: snap.count,
-            });
+            let rtt = aggregate.rtt_snapshot();
+            if rtt.count > 0 {
+                batch.gauge.push(GaugeMetric {
+                    metric_type: "tcp_rtt",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type,
+                    device_id: None,
+                    rw: None,
+                    port_label,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: rtt.sum,
+                    count: rtt.count,
+                    min: rtt.min,
+                    max: rtt.max,
+                });
+            }
+
+            let cwnd = aggregate.cwnd_snapshot();
+            if cwnd.count > 0 {
+                batch.gauge.push(GaugeMetric {
+                    metric_type: "tcp_cwnd",
+                    window,
+                    slot,
+                    pid: dim.pid(),
+                    client_type,
+                    device_id: None,
+                    rw: None,
+                    port_label,
+                    sampling_mode: sampling.mode,
+                    sampling_rate: sampling.rate,
+                    sum: cwnd.sum,
+                    count: cwnd.count,
+                    min: cwnd.min,
+                    max: cwnd.max,
+                });
+            }
         }
 
         let sampling = self.sampling_for_event(EventType::TcpRetransmit);
@@ -733,59 +774,6 @@ impl Collector {
                 sum: snap.sum,
                 count: snap.count,
             });
-        }
-    }
-
-    /// Collects TCP gauge metrics with local port dimension.
-    fn collect_tcp_gauges(
-        &self,
-        batch: &mut MetricBatch,
-        buf: &Buffer,
-        window: WindowInfo,
-        slot: SlotInfo,
-    ) {
-        let sampling = self.sampling_for_event(EventType::NetTX);
-
-        for (dim, aggregate) in buf.tcp_tx.iter() {
-            let rtt = aggregate.rtt_snapshot();
-            if rtt.count > 0 {
-                batch.gauge.push(GaugeMetric {
-                    metric_type: "tcp_rtt",
-                    window,
-                    slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: None,
-                    rw: None,
-                    port_label: Some(port_label_string(dim.port_label())),
-                    sampling_mode: sampling.mode,
-                    sampling_rate: sampling.rate,
-                    sum: rtt.sum,
-                    count: rtt.count,
-                    min: rtt.min,
-                    max: rtt.max,
-                });
-            }
-
-            let cwnd = aggregate.cwnd_snapshot();
-            if cwnd.count > 0 {
-                batch.gauge.push(GaugeMetric {
-                    metric_type: "tcp_cwnd",
-                    window,
-                    slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: None,
-                    rw: None,
-                    port_label: Some(port_label_string(dim.port_label())),
-                    sampling_mode: sampling.mode,
-                    sampling_rate: sampling.rate,
-                    sum: cwnd.sum,
-                    count: cwnd.count,
-                    min: cwnd.min,
-                    max: cwnd.max,
-                });
-            }
         }
     }
 
