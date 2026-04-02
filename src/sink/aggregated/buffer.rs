@@ -1,3 +1,4 @@
+use std::hash::Hash;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
@@ -63,6 +64,102 @@ pub(crate) type FastMap<K, V> = HashMap<K, V, FastHashBuilder>;
 
 pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
     HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default())
+}
+
+#[inline(always)]
+pub(crate) fn record_latency<K>(map: &mut FastMap<K, LatencyAggregate>, key: K, latency_ns: u64)
+where
+    K: Copy + Eq + Hash,
+{
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.record(latency_ns);
+    } else {
+        map.entry(key).or_default().record(latency_ns);
+    }
+}
+
+#[inline(always)]
+fn add_counter_value<K>(map: &mut FastMap<K, CounterAggregate>, key: K, value: i64)
+where
+    K: Copy + Eq + Hash,
+{
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.add(value);
+    } else {
+        map.entry(key).or_default().add(value);
+    }
+}
+
+#[inline(always)]
+fn add_counter_count<K>(map: &mut FastMap<K, CounterAggregate>, key: K, count: u32)
+where
+    K: Copy + Eq + Hash,
+{
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.add_count(count);
+    } else {
+        map.entry(key).or_default().add_count(count);
+    }
+}
+
+#[inline(always)]
+fn record_sched_wait(
+    map: &mut FastMap<BasicDimension, SchedWaitAggregate>,
+    key: BasicDimension,
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+) {
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.record(runqueue_ns, off_cpu_ns);
+    } else {
+        map.entry(key).or_default().record(runqueue_ns, off_cpu_ns);
+    }
+}
+
+#[inline(always)]
+fn record_disk(
+    map: &mut FastMap<DiskDimension, DiskAggregate>,
+    key: DiskDimension,
+    latency_ns: u64,
+    bytes: u32,
+    queue_depth: u32,
+) {
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.record(latency_ns, bytes, queue_depth);
+    } else {
+        map.entry(key)
+            .or_default()
+            .record(latency_ns, bytes, queue_depth);
+    }
+}
+
+#[inline(always)]
+fn record_tcp_tx(
+    map: &mut FastMap<NetworkDimension, TcpTxAggregate>,
+    key: NetworkDimension,
+    bytes: i64,
+    rtt_us: u32,
+    cwnd: u32,
+) {
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.record(bytes, rtt_us, cwnd);
+    } else {
+        map.entry(key).or_default().record(bytes, rtt_us, cwnd);
+    }
+}
+
+#[inline(always)]
+fn record_tcp_metrics(
+    map: &mut FastMap<NetworkDimension, TcpTxAggregate>,
+    key: NetworkDimension,
+    rtt_us: u32,
+    cwnd: u32,
+) {
+    if let Some(aggregate) = map.get_mut(&key) {
+        aggregate.record_metrics(rtt_us, cwnd);
+    } else {
+        map.entry(key).or_default().record_metrics(rtt_us, cwnd);
+    }
 }
 
 /// Aggregation buffer that collects events and aggregates them by dimension
@@ -201,17 +298,17 @@ impl Buffer {
             EventType::SyscallPwrite => &mut self.syscall_pwrite,
             _ => return,
         };
-        map.entry(dim).or_default().record(latency_ns);
+        record_latency(map, dim, latency_ns);
     }
 
     /// Adds a network I/O event.
     pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
-        self.net_io.entry(dim).or_default().add(bytes);
+        add_counter_value(&mut self.net_io, dim, bytes);
     }
 
     /// Adds a TCP retransmit event.
     pub fn add_tcp_retransmit(&mut self, dim: NetworkDimension, bytes: i64) {
-        self.tcp_retransmit.entry(dim).or_default().add(bytes);
+        add_counter_value(&mut self.tcp_retransmit, dim, bytes);
     }
 
     /// Adds TCP TX bytes together with inline TCP metrics.
@@ -222,7 +319,7 @@ impl Buffer {
         rtt_us: u32,
         cwnd: u32,
     ) {
-        self.tcp_tx.entry(dim).or_default().record(bytes, rtt_us, cwnd);
+        record_tcp_tx(&mut self.tcp_tx, dim, bytes, rtt_us, cwnd);
     }
 
     /// Adds TCP metrics (RTT and CWND).
@@ -231,10 +328,7 @@ impl Buffer {
     /// TCP-only dimension directly.
     pub fn add_tcp_metrics(&mut self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
         let tx_dim = NetworkDimension::new(dim.pid(), dim.client_type(), dim.port_label(), 0);
-        self.tcp_tx
-            .entry(tx_dim)
-            .or_default()
-            .record_metrics(rtt_us, cwnd);
+        record_tcp_metrics(&mut self.tcp_tx, tx_dim, rtt_us, cwnd);
     }
 
     /// Adds a disk I/O event with latency, bytes, and queue depth.
@@ -245,31 +339,26 @@ impl Buffer {
         bytes: u32,
         queue_depth: u32,
     ) {
-        self.disk_io
-            .entry(dim)
-            .or_default()
-            .record(latency_ns, bytes, queue_depth);
+        record_disk(&mut self.disk_io, dim, latency_ns, bytes, queue_depth);
     }
 
     /// Adds a block merge event.
     pub fn add_block_merge(&mut self, dim: DiskDimension, bytes: u32) {
-        self.block_merge
-            .entry(dim)
-            .or_default()
-            .add(i64::from(bytes));
+        add_counter_value(&mut self.block_merge, dim, i64::from(bytes));
     }
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
     pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
+        record_latency(&mut self.sched_on_cpu, dim, on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
     pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
-        self.cpu_on_core
-            .entry(CpuCoreDimension::from_basic(dim, cpu_id))
-            .or_default()
-            .add(on_cpu_ns as i64);
+        add_counter_value(
+            &mut self.cpu_on_core,
+            CpuCoreDimension::from_basic(dim, cpu_id),
+            on_cpu_ns as i64,
+        );
     }
 
     /// Adds a scheduler switch event (on-CPU time).
@@ -285,68 +374,62 @@ impl Buffer {
     /// Adds scheduler runqueue and off-CPU latency.
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
-            self.sched_wait
-                .entry(dim)
-                .or_default()
-                .record(runqueue_ns, off_cpu_ns);
+            record_sched_wait(&mut self.sched_wait, dim, runqueue_ns, off_cpu_ns);
         }
     }
 
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
         if major {
-            self.page_fault_major.entry(dim).or_default().add_count(1);
+            add_counter_count(&mut self.page_fault_major, dim, 1);
         } else {
-            self.page_fault_minor.entry(dim).or_default().add_count(1);
+            add_counter_count(&mut self.page_fault_minor, dim, 1);
         }
     }
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        self.fd_open.entry(dim).or_default().add_count(1);
+        add_counter_count(&mut self.fd_open, dim, 1);
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        self.fd_close.entry(dim).or_default().add_count(1);
+        add_counter_count(&mut self.fd_close, dim, 1);
     }
 
     /// Adds a memory reclaim event.
     pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
-        self.mem_reclaim.entry(dim).or_default().record(duration_ns);
+        record_latency(&mut self.mem_reclaim, dim, duration_ns);
     }
 
     /// Adds a memory compaction event.
     pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
-        self.mem_compaction
-            .entry(dim)
-            .or_default()
-            .record(duration_ns);
+        record_latency(&mut self.mem_compaction, dim, duration_ns);
     }
 
     /// Adds a swap-in event.
     pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
-        self.swap_in.entry(dim).or_default().add(pages as i64);
+        add_counter_value(&mut self.swap_in, dim, pages as i64);
     }
 
     /// Adds a swap-out event.
     pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
-        self.swap_out.entry(dim).or_default().add(pages as i64);
+        add_counter_value(&mut self.swap_out, dim, pages as i64);
     }
 
     /// Adds an OOM kill event.
     pub fn add_oom_kill(&mut self, dim: BasicDimension) {
-        self.oom_kill.entry(dim).or_default().add_count(1);
+        add_counter_count(&mut self.oom_kill, dim, 1);
     }
 
     /// Adds a process exit event.
     pub fn add_process_exit(&mut self, dim: BasicDimension) {
-        self.process_exit.entry(dim).or_default().add_count(1);
+        add_counter_count(&mut self.process_exit, dim, 1);
     }
 
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
-        self.tcp_state_change.entry(dim).or_default().add_count(1);
+        add_counter_count(&mut self.tcp_state_change, dim, 1);
     }
 }
 

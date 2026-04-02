@@ -26,7 +26,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
 use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
-use self::buffer::Buffer;
+use self::buffer::{record_latency, Buffer};
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension};
@@ -420,66 +420,42 @@ impl AggregatedSink {
         match &event.typed {
             TypedEvent::SyscallRead(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_read
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_read, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallWrite(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_write
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_write, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFutex(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_futex
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_futex, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallMmap(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_mmap
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_mmap, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallEpollWait(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_epoll_wait
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_epoll_wait, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFsync(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_fsync
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_fsync, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFdatasync(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_fdatasync
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_fdatasync, dim, e.latency_ns);
             }
 
             TypedEvent::SyscallPwrite(e) => {
                 let dim = BasicDimension::new(pid, client_type);
-                buf.syscall_pwrite
-                    .entry(dim)
-                    .or_default()
-                    .record(e.latency_ns);
+                record_latency(&mut buf.syscall_pwrite, dim, e.latency_ns);
             }
 
             TypedEvent::NetIO(e) => {
@@ -490,12 +466,7 @@ impl AggregatedSink {
                     && e.transport == NetTransport::Tcp as u8
                     && e.direction == Direction::TX as u8
                 {
-                    buf.add_net_io_with_tcp_metrics(
-                        net_dim,
-                        i64::from(e.bytes),
-                        e.srtt_us,
-                        e.cwnd,
-                    );
+                    buf.add_net_io_with_tcp_metrics(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
                 } else {
                     buf.add_net_io(net_dim, i64::from(e.bytes));
                 }
