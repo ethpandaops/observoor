@@ -7,7 +7,7 @@ use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
 use super::aggregate::{CounterAggregate, LatencyAggregate};
-use super::buffer::{fast_map_with_capacity, Buffer, FastMap};
+use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
@@ -853,6 +853,12 @@ impl Collector {
             }
         }
 
+        impl Default for CpuUtilAcc {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
         let interval_ns = i64::from(self.interval_ms) * 1_000_000;
         if interval_ns <= 0 {
             return;
@@ -868,10 +874,11 @@ impl Collector {
             if snap.count == 0 {
                 continue;
             }
-            grouped
-                .entry(BasicDimension::new(dim.pid(), dim.client_type()))
-                .or_insert_with(CpuUtilAcc::new)
-                .update(dim.cpu_id(), snap, interval_ns, pct_scale);
+            get_or_default_mut(
+                &mut grouped,
+                BasicDimension::new(dim.pid(), dim.client_type()),
+            )
+            .update(dim.cpu_id(), snap, interval_ns, pct_scale);
         }
 
         for (dim, mut acc) in grouped {

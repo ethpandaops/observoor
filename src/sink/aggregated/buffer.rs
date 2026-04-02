@@ -2,7 +2,7 @@ use std::hash::Hash;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
-use hashbrown::HashMap;
+use hashbrown::{hash_map::Iter as HashMapIter, HashMap};
 
 use crate::tracer::event::EventType;
 
@@ -60,22 +60,201 @@ impl Hasher for PackedKeyHasher {
 }
 
 pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
-pub(crate) type FastMap<K, V> = HashMap<K, V, FastHashBuilder>;
+const SMALL_MAP_LIMIT: usize = 8;
 
-pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
-    HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default())
+enum FastMapInner<K, V> {
+    Small(Vec<(K, V)>),
+    Large(HashMap<K, V, FastHashBuilder>),
 }
 
-#[inline(always)]
-fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
+pub struct FastMap<K, V> {
+    large_capacity_hint: usize,
+    inner: FastMapInner<K, V>,
+}
+
+pub enum FastMapIter<'a, K, V> {
+    Small(std::slice::Iter<'a, (K, V)>),
+    Large(HashMapIter<'a, K, V>),
+}
+
+pub enum FastMapIntoIter<K, V> {
+    Small(std::vec::IntoIter<(K, V)>),
+    Large(hashbrown::hash_map::IntoIter<K, V>),
+}
+
+impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(iter) => iter.next().map(|(key, value)| (key, value)),
+            Self::Large(iter) => iter.next(),
+        }
+    }
+}
+
+impl<K, V> Iterator for FastMapIntoIter<K, V> {
+    type Item = (K, V);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Small(iter) => iter.next(),
+            Self::Large(iter) => iter.next(),
+        }
+    }
+}
+
+impl<K, V> FastMap<K, V> {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            large_capacity_hint: capacity.max(SMALL_MAP_LIMIT + 1),
+            inner: FastMapInner::Small(Vec::with_capacity(capacity.min(SMALL_MAP_LIMIT))),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        match &self.inner {
+            FastMapInner::Small(entries) => entries.len(),
+            FastMapInner::Large(map) => map.len(),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
+        match &self.inner {
+            FastMapInner::Small(entries) => FastMapIter::Small(entries.iter()),
+            FastMapInner::Large(map) => FastMapIter::Large(map.iter()),
+        }
+    }
+}
+
+impl<K, V> FastMap<K, V>
+where
+    K: Eq + Hash,
+{
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        match &self.inner {
+            FastMapInner::Small(entries) => entries
+                .iter()
+                .find_map(|(existing, value)| (existing == key).then_some(value)),
+            FastMapInner::Large(map) => map.get(key),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.get(key).is_some()
+    }
+}
+
+impl<K, V> FastMap<K, V>
 where
     K: Copy + Eq + Hash,
     V: Default,
 {
-    map.raw_entry_mut()
-        .from_key(&key)
-        .or_insert_with(|| (key, V::default()))
-        .1
+    #[inline(always)]
+    pub(crate) fn get_or_default_mut(&mut self, key: K) -> &mut V {
+        if matches!(self.inner, FastMapInner::Large(_)) {
+            let FastMapInner::Large(map) = &mut self.inner else {
+                unreachable!("large map fast path must have HashMap")
+            };
+            return map
+                .raw_entry_mut()
+                .from_key(&key)
+                .or_insert_with(|| (key, V::default()))
+                .1;
+        }
+
+        if let FastMapInner::Small(entries) = &mut self.inner {
+            if let Some(idx) = entries.iter().position(|(existing, _)| *existing == key) {
+                let value = unsafe { &mut entries.get_unchecked_mut(idx).1 as *mut V };
+                // Safety: `idx` comes from `position` on the same live Vec,
+                // and we return immediately without mutating the Vec.
+                return unsafe { &mut *value };
+            }
+
+            if entries.len() < SMALL_MAP_LIMIT {
+                entries.push((key, V::default()));
+                let idx = entries.len() - 1;
+                let value = unsafe { &mut entries.get_unchecked_mut(idx).1 as *mut V };
+                // Safety: `idx` points at the element we just pushed and the
+                // Vec is not mutated again before returning.
+                return unsafe { &mut *value };
+            }
+        }
+
+        self.promote_to_large();
+
+        let FastMapInner::Large(map) = &mut self.inner else {
+            unreachable!("small map promotion must produce HashMap")
+        };
+        map.raw_entry_mut()
+            .from_key(&key)
+            .or_insert_with(|| (key, V::default()))
+            .1
+    }
+}
+
+impl<K, V> FastMap<K, V>
+where
+    K: Copy + Eq + Hash,
+    V: Default,
+{
+    fn promote_to_large(&mut self) {
+        let FastMapInner::Small(entries) =
+            std::mem::replace(&mut self.inner, FastMapInner::Small(Vec::new()))
+        else {
+            return;
+        };
+
+        let mut map = HashMap::with_capacity_and_hasher(
+            self.large_capacity_hint.max(entries.len() + 1),
+            FastHashBuilder::default(),
+        );
+        for (key, value) in entries {
+            map.insert(key, value);
+        }
+        self.inner = FastMapInner::Large(map);
+    }
+}
+
+impl<K, V> IntoIterator for FastMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = FastMapIntoIter<K, V>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        match self.inner {
+            FastMapInner::Small(entries) => FastMapIntoIter::Small(entries.into_iter()),
+            FastMapInner::Large(map) => FastMapIntoIter::Large(map.into_iter()),
+        }
+    }
+}
+
+pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
+    FastMap::with_capacity(capacity)
+}
+
+#[inline(always)]
+pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
+where
+    K: Copy + Eq + Hash,
+    V: Default,
+{
+    map.get_or_default_mut(key)
 }
 
 #[inline(always)]
@@ -586,5 +765,19 @@ mod tests {
         assert_eq!(open.snapshot().count, 2);
         let close = buf.fd_close.get(&dim).expect("close exists");
         assert_eq!(close.snapshot().count, 1);
+    }
+
+    #[test]
+    fn test_fast_map_promotes_and_preserves_entries() {
+        let mut map = fast_map_with_capacity::<u32, u32>(32);
+
+        for key in 0..(SMALL_MAP_LIMIT as u32 + 2) {
+            *get_or_default_mut(&mut map, key) += 1;
+        }
+
+        assert_eq!(map.len(), SMALL_MAP_LIMIT + 2);
+        for key in 0..(SMALL_MAP_LIMIT as u32 + 2) {
+            assert_eq!(map.get(&key), Some(&1));
+        }
     }
 }

@@ -20,8 +20,7 @@ use super::event::EventType;
 use super::parse::{parse_event, ParseError};
 use super::{
     ErrorHandler, EventBatchHandler, EventHandler, ParsedEventBatch, ParsedEventBatchPool,
-    RingbufStats,
-    RingbufStatsHandler, Tracer, TrackedTidInfo, PARSED_EVENT_BATCH_SIZE,
+    RingbufStats, RingbufStatsHandler, Tracer, TrackedTidInfo, PARSED_EVENT_BATCH_SIZE,
 };
 
 /// Compiled BPF object, embedded at build time.
