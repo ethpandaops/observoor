@@ -1276,14 +1276,22 @@ fn build_network_dimension_inner(
     } else {
         0
     };
-    let port_label = resolve_network_port_label(
-        client_type,
-        e.transport,
-        local_port(e),
-        remote_port(e),
-        dims,
-        port_label_cache,
-    );
+    let port_label = if dims.network.include_port {
+        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
+            resolve_network_port_label(
+                client_type,
+                e.transport,
+                local_port(e),
+                remote_port(e),
+                port_label_map,
+                port_label_cache,
+            )
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     NetworkDimension::new(pid, client_type, port_label, direction)
 }
@@ -1335,14 +1343,22 @@ fn build_network_dimension_from_tcp_retransmit_inner(
     dims: &DimensionsConfig,
     port_label_cache: Option<&mut PortLabelResolveCache>,
 ) -> NetworkDimension {
-    let port_label = resolve_network_port_label(
-        client_type,
-        NetTransport::Tcp as u8,
-        src_port,
-        dst_port,
-        dims,
-        port_label_cache,
-    );
+    let port_label = if dims.network.include_port {
+        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
+            resolve_network_port_label(
+                client_type,
+                NetTransport::Tcp as u8,
+                src_port,
+                dst_port,
+                port_label_map,
+                port_label_cache,
+            )
+        } else {
+            0
+        }
+    } else {
+        0
+    };
 
     NetworkDimension::new(pid, client_type, port_label, 0)
 }
@@ -1353,17 +1369,9 @@ fn resolve_network_port_label(
     transport: u8,
     primary_port: u16,
     secondary_port: u16,
-    dims: &DimensionsConfig,
+    port_label_map: &crate::agent::ports::PortLabelMap,
     port_label_cache: Option<&mut PortLabelResolveCache>,
 ) -> u8 {
-    if !dims.network.include_port {
-        return 0;
-    }
-
-    let Some(port_label_map) = dims.network.port_label_map.as_ref() else {
-        return 0;
-    };
-
     if let Some(port_label_cache) = port_label_cache {
         port_label_cache.resolve(
             port_label_map,
