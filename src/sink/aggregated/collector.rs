@@ -344,13 +344,14 @@ impl Collector {
             + map_len(&buf.process_exit)
             + map_len(&buf.tcp_state_change)
             + map_len(&buf.net_io)
+            + map_len(&buf.tcp_tx)
             + map_len(&buf.tcp_retransmit)
             + map_len(&buf.disk_io)
             + map_len(&buf.block_merge)
     }
 
     fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.tcp_metrics) * 2) + map_len(&buf.disk_io)
+        (map_len(&buf.tcp_tx) * 2) + map_len(&buf.disk_io)
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
@@ -653,6 +654,30 @@ impl Collector {
             });
         }
 
+        let sampling = self.sampling_for_event(EventType::NetTX);
+        for (dim, aggregate) in buf.tcp_tx.iter() {
+            let snap = aggregate.bytes_snapshot();
+            if snap.count == 0 {
+                continue;
+            }
+
+            batch.counter.push(CounterMetric {
+                metric_type: "net_io",
+                window,
+                slot,
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
+                device_id: None,
+                rw: None,
+                port_label: Some(port_label_string(dim.port_label())),
+                direction: Some(direction_string(dim.direction())),
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
+        }
+
         let sampling = self.sampling_for_event(EventType::TcpRetransmit);
         for (dim, aggregate) in buf.tcp_retransmit.iter() {
             let snap = aggregate.snapshot();
@@ -721,7 +746,7 @@ impl Collector {
     ) {
         let sampling = self.sampling_for_event(EventType::NetTX);
 
-        for (dim, aggregate) in buf.tcp_metrics.iter() {
+        for (dim, aggregate) in buf.tcp_tx.iter() {
             let rtt = aggregate.rtt_snapshot();
             if rtt.count > 0 {
                 batch.gauge.push(GaugeMetric {
@@ -1452,6 +1477,26 @@ mod tests {
         assert_eq!(net[0].port_label, Some("el_json_rpc"));
         assert_eq!(net[0].direction.as_deref(), Some("tx"));
         assert_eq!(net[0].sum, 1024);
+    }
+
+    #[test]
+    fn test_collect_network_counter_from_tcp_tx_aggregate() {
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
+        let mut buf = test_buffer();
+        let dim = NetworkDimension::new(123, 1, 1, 0);
+
+        buf.add_net_io_with_tcp_metrics(dim, 1500, 100, 65535);
+
+        let batch = collector.collect(&buf, test_meta());
+        let net: Vec<_> = batch
+            .counter
+            .iter()
+            .filter(|m| m.metric_type == "net_io")
+            .collect();
+        assert_eq!(net.len(), 1);
+        assert_eq!(net[0].port_label, Some("el_p2p"));
+        assert_eq!(net[0].direction.as_deref(), Some("tx"));
+        assert_eq!(net[0].sum, 1500);
     }
 
     #[test]

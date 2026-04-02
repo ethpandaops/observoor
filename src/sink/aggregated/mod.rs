@@ -29,7 +29,7 @@ use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
+use self::dimension::{BasicDimension, DiskDimension, NetworkDimension};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
@@ -484,16 +484,20 @@ impl AggregatedSink {
 
             TypedEvent::NetIO(e) => {
                 let net_dim = build_network_dimension(pid, client_type, e, dimensions);
-                buf.add_net_io(net_dim, i64::from(e.bytes));
 
                 // Inline metrics are valid only for TCP net_tx events.
-                if e.has_metrics && e.transport == NetTransport::Tcp as u8 {
-                    let tcp_dim = TCPMetricsDimension::new(
-                        net_dim.pid(),
-                        net_dim.client_type(),
-                        net_dim.port_label(),
+                if e.has_metrics
+                    && e.transport == NetTransport::Tcp as u8
+                    && e.direction == Direction::TX as u8
+                {
+                    buf.add_net_io_with_tcp_metrics(
+                        net_dim,
+                        i64::from(e.bytes),
+                        e.srtt_us,
+                        e.cwnd,
                     );
-                    buf.add_tcp_metrics(tcp_dim, e.srtt_us, e.cwnd);
+                } else {
+                    buf.add_net_io(net_dim, i64::from(e.bytes));
                 }
             }
 
@@ -1374,11 +1378,8 @@ mod tests {
 
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        // Check net_io was recorded.
-        assert!(!buf.net_io.is_empty());
-
-        // Check TCP metrics were recorded (has_metrics = true).
-        assert!(!buf.tcp_metrics.is_empty());
+        // Metrics-bearing TCP TX events now use the combined TCP TX aggregate.
+        assert!(!buf.tcp_tx.is_empty());
     }
 
     #[test]
@@ -1419,11 +1420,7 @@ mod tests {
             PortLabel::ElP2PTcp as u8,
             Direction::TX as u8,
         );
-        assert!(buf.net_io.contains_key(&net_dim));
-
-        let tcp_dim =
-            TCPMetricsDimension::new(123, ClientType::Geth as u8, PortLabel::ElP2PTcp as u8);
-        assert!(buf.tcp_metrics.contains_key(&tcp_dim));
+        assert!(buf.tcp_tx.contains_key(&net_dim));
     }
 
     #[test]

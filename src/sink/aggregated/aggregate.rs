@@ -308,6 +308,58 @@ impl Default for TcpMetricsAggregate {
     }
 }
 
+/// Tracks TCP TX bytes alongside inline TCP gauge metrics from the same event.
+/// Used to avoid hashing the same network dimension twice for metric-bearing
+/// TCP transmit events.
+pub struct TcpTxAggregate {
+    bytes: CounterAggregate,
+    metrics: TcpMetricsAggregate,
+}
+
+impl TcpTxAggregate {
+    /// Creates a new aggregate for TCP TX bytes, RTT, and congestion window.
+    pub fn new() -> Self {
+        Self {
+            bytes: CounterAggregate::new(),
+            metrics: TcpMetricsAggregate::new(),
+        }
+    }
+
+    /// Records bytes plus inline TCP gauge metrics from one transmit event.
+    pub fn record(&mut self, bytes: i64, rtt_us: u32, cwnd: u32) {
+        self.bytes.add(bytes);
+        self.metrics.record(rtt_us, cwnd);
+    }
+
+    /// Records only the inline TCP gauge metrics.
+    ///
+    /// Kept for compatibility helpers that still build a TCP-only dimension.
+    pub fn record_metrics(&mut self, rtt_us: u32, cwnd: u32) {
+        self.metrics.record(rtt_us, cwnd);
+    }
+
+    /// Returns a point-in-time snapshot of TX bytes.
+    pub fn bytes_snapshot(&self) -> CounterSnapshot {
+        self.bytes.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of RTT.
+    pub fn rtt_snapshot(&self) -> GaugeSnapshot {
+        self.metrics.rtt_snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of CWND.
+    pub fn cwnd_snapshot(&self) -> GaugeSnapshot {
+        self.metrics.cwnd_snapshot()
+    }
+}
+
+impl Default for TcpTxAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,5 +506,23 @@ mod tests {
         let queue_depth = agg.queue_depth_snapshot();
         assert_eq!(queue_depth.count, 1);
         assert_eq!(queue_depth.sum, 3);
+    }
+
+    #[test]
+    fn test_tcp_tx_aggregate_records_all_components() {
+        let mut agg = TcpTxAggregate::new();
+        agg.record(1_500, 120, 64_000);
+
+        let bytes = agg.bytes_snapshot();
+        assert_eq!(bytes.count, 1);
+        assert_eq!(bytes.sum, 1_500);
+
+        let rtt = agg.rtt_snapshot();
+        assert_eq!(rtt.count, 1);
+        assert_eq!(rtt.sum, 120);
+
+        let cwnd = agg.cwnd_snapshot();
+        assert_eq!(cwnd.count, 1);
+        assert_eq!(cwnd.sum, 64_000);
     }
 }
