@@ -66,6 +66,25 @@ struct RawSchedPayload {
     on_cpu_ns: u64,
 }
 
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawSchedCombinedPayload {
+    on_cpu_ns: u64,
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+    next_pid: u32,
+    next_tid: u32,
+    next_client_type: u8,
+    _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedRunqueuePayload {
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+}
+
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawBlockMergePayload {
@@ -301,40 +320,6 @@ fn read_payload<T: Copy>(data: &[u8], name: &'static str) -> Result<T, ParseErro
 }
 
 #[inline(always)]
-fn read_u32(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-#[inline(always)]
-fn read_u64(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ])
-}
-
-#[inline(always)]
-fn read_u64_checked(
-    data: &[u8],
-    offset: usize,
-    event_name: &'static str,
-) -> Result<u64, ParseError> {
-    ensure_payload(data, offset + size_of::<u64>(), event_name)?;
-    Ok(read_u64(data, offset))
-}
-
-#[inline(always)]
 fn decode_u32_from_pad(pad: &[u8; 6], offset: usize) -> u32 {
     debug_assert!(offset <= 2);
     u32::from_le_bytes([
@@ -440,8 +425,8 @@ fn parse_sched_combined(
     header: &RawEventHeader,
     data: &[u8],
 ) -> Result<SchedCombinedEvent, ParseError> {
-    ensure_payload(data, SCHED_COMBINED_PAYLOAD_SIZE, "sched combined event")?;
-    let next_client_type = data[32];
+    let raw = read_payload::<RawSchedCombinedPayload>(data, "sched combined event")?;
+    let next_client_type = raw.next_client_type;
     if next_client_type > MAX_CLIENT_TYPE as u8 {
         return Err(ParseError::UnknownClientType {
             raw: next_client_type,
@@ -449,13 +434,13 @@ fn parse_sched_combined(
     }
 
     Ok(SchedCombinedEvent {
-        on_cpu_ns: read_u64(data, 0),
+        on_cpu_ns: u64::from_le(raw.on_cpu_ns),
         voluntary: header.pad[0] != 0,
         cpu_id: decode_u32_from_pad(&header.pad, 1),
-        runqueue_ns: read_u64(data, 8),
-        off_cpu_ns: read_u64(data, 16),
-        next_pid: read_u32(data, 24),
-        next_tid: read_u32(data, 28),
+        runqueue_ns: u64::from_le(raw.runqueue_ns),
+        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
+        next_pid: u32::from_le(raw.next_pid),
+        next_tid: u32::from_le(raw.next_tid),
         next_client_type,
     })
 }
@@ -466,9 +451,10 @@ fn parse_sched_runqueue(
     header: &RawEventHeader,
     data: &[u8],
 ) -> Result<SchedRunqueueEvent, ParseError> {
+    let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
-        runqueue_ns: read_u64_checked(data, 0, "sched runqueue event")?,
-        off_cpu_ns: read_u64_checked(data, 8, "sched runqueue event")?,
+        runqueue_ns: u64::from_le(raw.runqueue_ns),
+        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
         cpu_id: decode_u32_from_pad(&header.pad, 0),
     })
 }
