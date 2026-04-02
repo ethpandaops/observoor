@@ -45,6 +45,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 8;
 /// Drain a full bounded queue per wake to amortize `mpsc`/`select!` overhead
 /// under sustained tracer load without letting the event loop run unbounded.
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
+const PORT_LABEL_CACHE_SIZE: usize = 16;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -141,6 +142,73 @@ impl Default for SchedulerWindowState {
             running_by_tid: RunningThreadStore::with_capacity(64),
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct PortLabelCacheEntry {
+    key: u64,
+    label: u8,
+}
+
+struct PortLabelResolveCache {
+    entries: [Option<PortLabelCacheEntry>; PORT_LABEL_CACHE_SIZE],
+}
+
+impl Default for PortLabelResolveCache {
+    fn default() -> Self {
+        Self {
+            entries: [None; PORT_LABEL_CACHE_SIZE],
+        }
+    }
+}
+
+impl PortLabelResolveCache {
+    #[inline(always)]
+    fn resolve(
+        &mut self,
+        port_label_map: &crate::agent::ports::PortLabelMap,
+        client_type: u8,
+        transport: u8,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> u8 {
+        let key = pack_port_label_cache_key(client_type, transport, primary_port, secondary_port);
+        let slot = port_label_cache_slot(key);
+
+        if let Some(entry) = self.entries[slot] {
+            if entry.key == key {
+                return entry.label;
+            }
+        }
+
+        let label = match transport {
+            transport if transport == NetTransport::Tcp as u8 => {
+                port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
+            }
+            _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+        };
+
+        self.entries[slot] = Some(PortLabelCacheEntry { key, label });
+        label
+    }
+}
+
+#[inline(always)]
+fn pack_port_label_cache_key(
+    client_type: u8,
+    transport: u8,
+    primary_port: u16,
+    secondary_port: u16,
+) -> u64 {
+    u64::from(primary_port)
+        | (u64::from(secondary_port) << 16)
+        | (u64::from(client_type) << 32)
+        | (u64::from(transport) << 40)
+}
+
+#[inline(always)]
+fn port_label_cache_slot(key: u64) -> usize {
+    ((key ^ key.rotate_left(25)) as usize) & (PORT_LABEL_CACHE_SIZE - 1)
 }
 
 impl SchedulerWindowState {
@@ -413,6 +481,7 @@ impl AggregatedSink {
         event: &ParsedEvent,
         dimensions: &DimensionsConfig,
         scheduler_state: Option<&mut SchedulerWindowState>,
+        port_label_cache: &mut PortLabelResolveCache,
     ) {
         let pid = event.raw.pid;
         let client_type = event.raw.client_type;
@@ -459,7 +528,13 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIO(e) => {
-                let net_dim = build_network_dimension(pid, client_type, e, dimensions);
+                let net_dim = build_network_dimension_cached(
+                    pid,
+                    client_type,
+                    e,
+                    dimensions,
+                    port_label_cache,
+                );
 
                 // Inline metrics are valid only for TCP net_tx events.
                 if e.has_metrics
@@ -473,12 +548,13 @@ impl AggregatedSink {
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = build_network_dimension_from_tcp_retransmit(
+                let net_dim = build_network_dimension_from_tcp_retransmit_cached(
                     pid,
                     client_type,
                     e.src_port,
                     e.dst_port,
                     dimensions,
+                    port_label_cache,
                 );
                 buf.add_tcp_retransmit(net_dim, i64::from(e.bytes));
             }
@@ -608,7 +684,8 @@ impl AggregatedSink {
     /// Routes a parsed event to the appropriate buffer aggregator.
     #[cfg(test)]
     fn process_event(buf: &mut Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
-        Self::process_event_inner(buf, event, dimensions, None);
+        let mut port_label_cache = PortLabelResolveCache::default();
+        Self::process_event_inner(buf, event, dimensions, None, &mut port_label_cache);
     }
 
     /// Routes a parsed event while maintaining carried scheduler state for
@@ -618,8 +695,15 @@ impl AggregatedSink {
         event: &ParsedEvent,
         dimensions: &DimensionsConfig,
         scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
     ) {
-        Self::process_event_inner(buf, event, dimensions, Some(scheduler_state));
+        Self::process_event_inner(
+            buf,
+            event,
+            dimensions,
+            Some(scheduler_state),
+            port_label_cache,
+        );
     }
 
     fn process_event_batch_with_scheduler_state(
@@ -627,9 +711,16 @@ impl AggregatedSink {
         events: &EventBatch,
         dimensions: &DimensionsConfig,
         scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
     ) {
         for event in &events.events {
-            Self::process_event_with_scheduler_state(buf, event, dimensions, scheduler_state);
+            Self::process_event_with_scheduler_state(
+                buf,
+                event,
+                dimensions,
+                scheduler_state,
+                port_label_cache,
+            );
         }
     }
 
@@ -731,6 +822,7 @@ impl Sink for AggregatedSink {
                 process_sched_usage: Vec::new(),
             };
             let mut scheduler_state = SchedulerWindowState::default();
+            let mut port_label_cache = PortLabelResolveCache::default();
             let mut current_buf = initial_buf;
 
             // Emit host specs once on startup, then on the configured ticker.
@@ -765,6 +857,7 @@ impl Sink for AggregatedSink {
                                 &events,
                                 &dimensions,
                                 &mut scheduler_state,
+                                &mut port_label_cache,
                             );
                             events.recycle();
                         }
@@ -852,6 +945,7 @@ impl Sink for AggregatedSink {
                             &events,
                             &dimensions,
                             &mut scheduler_state,
+                            &mut port_label_cache,
                         );
                         events.recycle();
 
@@ -864,6 +958,7 @@ impl Sink for AggregatedSink {
                                         &events,
                                         &dimensions,
                                         &mut scheduler_state,
+                                        &mut port_label_cache,
                                     );
                                     events.recycle();
                                 }
@@ -1147,38 +1242,54 @@ fn parse_cpu_online_text(text: &str) -> Option<u32> {
 // --- Dimension builder helpers ---
 
 /// Creates a NetworkDimension based on config.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_network_dimension(
     pid: u32,
     client_type: u8,
     e: &NetIOEvent,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
+    build_network_dimension_inner(pid, client_type, e, dims, None)
+}
+
+#[inline(always)]
+fn build_network_dimension_cached(
+    pid: u32,
+    client_type: u8,
+    e: &NetIOEvent,
+    dims: &DimensionsConfig,
+    port_label_cache: &mut PortLabelResolveCache,
+) -> NetworkDimension {
+    build_network_dimension_inner(pid, client_type, e, dims, Some(port_label_cache))
+}
+
+#[inline(always)]
+fn build_network_dimension_inner(
+    pid: u32,
+    client_type: u8,
+    e: &NetIOEvent,
+    dims: &DimensionsConfig,
+    port_label_cache: Option<&mut PortLabelResolveCache>,
+) -> NetworkDimension {
     let direction = if dims.network.include_direction {
         e.direction
     } else {
         0
     };
-    let port_label = if dims.network.include_port {
-        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            let local = local_port(e);
-            let remote = remote_port(e);
-            match e.transport {
-                transport if transport == NetTransport::Tcp as u8 => {
-                    port_label_map.resolve_tcp_raw(client_type, local, remote) as u8
-                }
-                _ => port_label_map.resolve_udp_raw(client_type, local, remote) as u8,
-            }
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    let port_label = resolve_network_port_label(
+        client_type,
+        e.transport,
+        local_port(e),
+        remote_port(e),
+        dims,
+        port_label_cache,
+    );
 
     NetworkDimension::new(pid, client_type, port_label, direction)
 }
 
 /// Creates a NetworkDimension for TCP retransmit events.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_network_dimension_from_tcp_retransmit(
     pid: u32,
     client_type: u8,
@@ -1186,18 +1297,89 @@ fn build_network_dimension_from_tcp_retransmit(
     dst_port: u16,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
-    let port_label = if dims.network.include_port {
-        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            // Retransmits are TCP-only by definition.
-            port_label_map.resolve_tcp_raw(client_type, src_port, dst_port) as u8
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    build_network_dimension_from_tcp_retransmit_inner(
+        pid,
+        client_type,
+        src_port,
+        dst_port,
+        dims,
+        None,
+    )
+}
+
+#[inline(always)]
+fn build_network_dimension_from_tcp_retransmit_cached(
+    pid: u32,
+    client_type: u8,
+    src_port: u16,
+    dst_port: u16,
+    dims: &DimensionsConfig,
+    port_label_cache: &mut PortLabelResolveCache,
+) -> NetworkDimension {
+    build_network_dimension_from_tcp_retransmit_inner(
+        pid,
+        client_type,
+        src_port,
+        dst_port,
+        dims,
+        Some(port_label_cache),
+    )
+}
+
+#[inline(always)]
+fn build_network_dimension_from_tcp_retransmit_inner(
+    pid: u32,
+    client_type: u8,
+    src_port: u16,
+    dst_port: u16,
+    dims: &DimensionsConfig,
+    port_label_cache: Option<&mut PortLabelResolveCache>,
+) -> NetworkDimension {
+    let port_label = resolve_network_port_label(
+        client_type,
+        NetTransport::Tcp as u8,
+        src_port,
+        dst_port,
+        dims,
+        port_label_cache,
+    );
 
     NetworkDimension::new(pid, client_type, port_label, 0)
+}
+
+#[inline(always)]
+fn resolve_network_port_label(
+    client_type: u8,
+    transport: u8,
+    primary_port: u16,
+    secondary_port: u16,
+    dims: &DimensionsConfig,
+    port_label_cache: Option<&mut PortLabelResolveCache>,
+) -> u8 {
+    if !dims.network.include_port {
+        return 0;
+    }
+
+    let Some(port_label_map) = dims.network.port_label_map.as_ref() else {
+        return 0;
+    };
+
+    if let Some(port_label_cache) = port_label_cache {
+        port_label_cache.resolve(
+            port_label_map,
+            client_type,
+            transport,
+            primary_port,
+            secondary_port,
+        )
+    } else {
+        match transport {
+            transport if transport == NetTransport::Tcp as u8 => {
+                port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
+            }
+            _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+        }
+    }
 }
 
 /// Creates a DiskDimension based on config.
@@ -1293,6 +1475,22 @@ mod tests {
             },
             typed,
         }
+    }
+
+    fn process_event_with_scheduler_state(
+        buf: &mut Buffer,
+        event: &ParsedEvent,
+        dims: &DimensionsConfig,
+        scheduler_state: &mut SchedulerWindowState,
+    ) {
+        let mut port_label_cache = PortLabelResolveCache::default();
+        AggregatedSink::process_event_with_scheduler_state(
+            buf,
+            event,
+            dims,
+            scheduler_state,
+            &mut port_label_cache,
+        );
     }
 
     #[test]
@@ -1558,12 +1756,7 @@ mod tests {
             }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &event, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
         let prev_sched = buf
@@ -1619,12 +1812,7 @@ mod tests {
             }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf1,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf1, &rq_event, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf1, 1_500);
 
         let core1 = buf1
@@ -1683,12 +1871,7 @@ mod tests {
                 cpu_id: 3,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf1,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf1, &rq_event, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf1, 10_500);
 
         let mut buf2 = Buffer::new(
@@ -1711,12 +1894,7 @@ mod tests {
                 cpu_id: 3,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf2,
-            &switch_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf2, &switch_event, &dims, &mut scheduler_state);
 
         let core2 = buf2
             .cpu_on_core
@@ -1758,12 +1936,7 @@ mod tests {
                 cpu_id: 1,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &switch_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &switch_event, &dims, &mut scheduler_state);
 
         let core = buf
             .cpu_on_core
@@ -1798,12 +1971,7 @@ mod tests {
                 cpu_id: 4,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &rq_event, &dims, &mut scheduler_state);
 
         scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
@@ -1814,12 +1982,7 @@ mod tests {
             EventType::ProcessExit,
             TypedEvent::ProcessExit(ProcessExitEvent { exit_code: 0 }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &exit_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &exit_event, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf, 2_000);
 
         let core = buf
@@ -1868,18 +2031,8 @@ mod tests {
             }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &rq1,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &rq2,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &rq1, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &rq2, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf, 1_500);
 
         let core1 = buf
@@ -1951,30 +2104,10 @@ mod tests {
             TypedEvent::ProcessExit(ProcessExitEvent { exit_code: 0 }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &rq,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &stale_rq,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &stale_switch,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &mut buf,
-            &stale_exit,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &rq, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_rq, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_switch, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_exit, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf, 1_200);
 
         let carried_core = buf
