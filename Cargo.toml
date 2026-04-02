@@ -59,6 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
 libc = "0.2"
 sha2 = "0.10"
+arrayvec = "0.7"
 
 [features]
 default = ["bpf", "profiling"]

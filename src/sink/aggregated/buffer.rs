@@ -2,6 +2,7 @@ use std::hash::Hash;
 use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
+use arrayvec::{ArrayVec, IntoIter as ArrayVecIntoIter};
 use hashbrown::{hash_map::Iter as HashMapIter, HashMap};
 
 use crate::tracer::event::EventType;
@@ -62,8 +63,24 @@ impl Hasher for PackedKeyHasher {
 pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
 const SMALL_MAP_LIMIT: usize = 8;
 
+#[inline(always)]
+fn small_entry_index<K, V>(entries: &[(K, V)], key: &K) -> Option<usize>
+where
+    K: Eq,
+{
+    let len = entries.len();
+    let mut idx = 0usize;
+    while idx < len {
+        if unsafe { &entries.get_unchecked(idx).0 } == key {
+            return Some(idx);
+        }
+        idx += 1;
+    }
+    None
+}
+
 enum FastMapInner<K, V> {
-    Small(Vec<(K, V)>),
+    Small(ArrayVec<(K, V), SMALL_MAP_LIMIT>),
     Large(HashMap<K, V, FastHashBuilder>),
 }
 
@@ -78,7 +95,7 @@ pub enum FastMapIter<'a, K, V> {
 }
 
 pub enum FastMapIntoIter<K, V> {
-    Small(std::vec::IntoIter<(K, V)>),
+    Small(ArrayVecIntoIter<(K, V), SMALL_MAP_LIMIT>),
     Large(hashbrown::hash_map::IntoIter<K, V>),
 }
 
@@ -111,7 +128,7 @@ impl<K, V> FastMap<K, V> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             large_capacity_hint: capacity.max(SMALL_MAP_LIMIT + 1),
-            inner: FastMapInner::Small(Vec::with_capacity(capacity.min(SMALL_MAP_LIMIT))),
+            inner: FastMapInner::Small(ArrayVec::new()),
         }
     }
 
@@ -146,9 +163,8 @@ where
     #[inline(always)]
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         match &self.inner {
-            FastMapInner::Small(entries) => entries
-                .iter()
-                .find_map(|(existing, value)| (existing == key).then_some(value)),
+            FastMapInner::Small(entries) => small_entry_index(entries.as_slice(), key)
+                .map(|idx| unsafe { &entries.get_unchecked(idx).1 }),
             FastMapInner::Large(map) => map.get(key),
         }
     }
@@ -179,10 +195,10 @@ where
         }
 
         if let FastMapInner::Small(entries) = &mut self.inner {
-            if let Some(idx) = entries.iter().position(|(existing, _)| *existing == key) {
+            if let Some(idx) = small_entry_index(entries.as_slice(), &key) {
                 let value = unsafe { &mut entries.get_unchecked_mut(idx).1 as *mut V };
-                // Safety: `idx` comes from `position` on the same live Vec,
-                // and we return immediately without mutating the Vec.
+                // Safety: `idx` comes from scanning the same live small-entry
+                // slice, and we return immediately without mutating it again.
                 return unsafe { &mut *value };
             }
 
@@ -215,7 +231,7 @@ where
 {
     fn promote_to_large(&mut self) {
         let FastMapInner::Small(entries) =
-            std::mem::replace(&mut self.inner, FastMapInner::Small(Vec::new()))
+            std::mem::replace(&mut self.inner, FastMapInner::Small(ArrayVec::new()))
         else {
             return;
         };
