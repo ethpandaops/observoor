@@ -67,15 +67,23 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
 }
 
 #[inline(always)]
+fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
+where
+    K: Copy + Eq + Hash,
+    V: Default,
+{
+    map.raw_entry_mut()
+        .from_key(&key)
+        .or_insert_with(|| (key, V::default()))
+        .1
+}
+
+#[inline(always)]
 pub(crate) fn record_latency<K>(map: &mut FastMap<K, LatencyAggregate>, key: K, latency_ns: u64)
 where
     K: Copy + Eq + Hash,
 {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.record(latency_ns);
-    } else {
-        map.entry(key).or_default().record(latency_ns);
-    }
+    get_or_default_mut(map, key).record(latency_ns);
 }
 
 #[inline(always)]
@@ -83,11 +91,7 @@ fn add_counter_value<K>(map: &mut FastMap<K, CounterAggregate>, key: K, value: i
 where
     K: Copy + Eq + Hash,
 {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.add(value);
-    } else {
-        map.entry(key).or_default().add(value);
-    }
+    get_or_default_mut(map, key).add(value);
 }
 
 #[inline(always)]
@@ -95,11 +99,7 @@ fn add_counter_count<K>(map: &mut FastMap<K, CounterAggregate>, key: K, count: u
 where
     K: Copy + Eq + Hash,
 {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.add_count(count);
-    } else {
-        map.entry(key).or_default().add_count(count);
-    }
+    get_or_default_mut(map, key).add_count(count);
 }
 
 #[inline(always)]
@@ -109,11 +109,7 @@ fn record_sched_wait(
     runqueue_ns: u64,
     off_cpu_ns: u64,
 ) {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.record(runqueue_ns, off_cpu_ns);
-    } else {
-        map.entry(key).or_default().record(runqueue_ns, off_cpu_ns);
-    }
+    get_or_default_mut(map, key).record(runqueue_ns, off_cpu_ns);
 }
 
 #[inline(always)]
@@ -124,13 +120,7 @@ fn record_disk(
     bytes: u32,
     queue_depth: u32,
 ) {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.record(latency_ns, bytes, queue_depth);
-    } else {
-        map.entry(key)
-            .or_default()
-            .record(latency_ns, bytes, queue_depth);
-    }
+    get_or_default_mut(map, key).record(latency_ns, bytes, queue_depth);
 }
 
 #[inline(always)]
@@ -141,11 +131,7 @@ fn record_tcp_tx(
     rtt_us: u32,
     cwnd: u32,
 ) {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.record(bytes, rtt_us, cwnd);
-    } else {
-        map.entry(key).or_default().record(bytes, rtt_us, cwnd);
-    }
+    get_or_default_mut(map, key).record(bytes, rtt_us, cwnd);
 }
 
 #[inline(always)]
@@ -155,11 +141,7 @@ fn record_tcp_metrics(
     rtt_us: u32,
     cwnd: u32,
 ) {
-    if let Some(aggregate) = map.get_mut(&key) {
-        aggregate.record_metrics(rtt_us, cwnd);
-    } else {
-        map.entry(key).or_default().record_metrics(rtt_us, cwnd);
-    }
+    get_or_default_mut(map, key).record_metrics(rtt_us, cwnd);
 }
 
 /// Aggregation buffer that collects events and aggregates them by dimension
