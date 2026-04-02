@@ -31,6 +31,11 @@ pub struct DiskDimension(u128);
 
 impl BasicDimension {
     #[inline(always)]
+    pub(crate) fn packed(self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
     pub fn new(pid: u32, client_type: u8) -> Self {
         Self(pack_basic(pid, client_type))
     }
@@ -47,6 +52,11 @@ impl BasicDimension {
 }
 
 impl CpuCoreDimension {
+    #[inline(always)]
+    pub(crate) fn packed(self) -> u128 {
+        self.0
+    }
+
     #[inline(always)]
     pub fn new(pid: u32, client_type: u8, cpu_id: u32) -> Self {
         Self(pack_cpu_core(pid, client_type, cpu_id))
@@ -75,6 +85,11 @@ impl CpuCoreDimension {
 
 impl NetworkDimension {
     #[inline(always)]
+    pub(crate) fn packed(self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
     pub fn new(pid: u32, client_type: u8, port_label: u8, direction: u8) -> Self {
         Self(pack_network(pid, client_type, port_label, direction))
     }
@@ -102,6 +117,11 @@ impl NetworkDimension {
 
 impl TCPMetricsDimension {
     #[inline(always)]
+    pub(crate) fn packed(self) -> u64 {
+        self.0
+    }
+
+    #[inline(always)]
     pub fn new(pid: u32, client_type: u8, port_label: u8) -> Self {
         Self(pack_tcp_metrics(pid, client_type, port_label))
     }
@@ -123,6 +143,11 @@ impl TCPMetricsDimension {
 }
 
 impl DiskDimension {
+    #[inline(always)]
+    pub(crate) fn packed(self) -> u128 {
+        self.0
+    }
+
     #[inline(always)]
     pub fn new(pid: u32, client_type: u8, device_id: u32, rw: u8) -> Self {
         Self(pack_disk(pid, client_type, device_id, rw))

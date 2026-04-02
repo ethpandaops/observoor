@@ -3,7 +3,7 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
 use hashbrown::{
-    hash_map::{IntoIter as HashMapIntoIter, Iter as HashMapIter},
+    hash_map::{IntoIter as HashMapIntoIter, Iter as HashMapIter, RawEntryMut},
     HashMap,
 };
 
@@ -64,6 +64,81 @@ impl Hasher for PackedKeyHasher {
 
 pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
 
+pub(crate) trait FastMapKey: Copy + Eq + Hash {
+    fn precomputed_hash(self) -> u64;
+}
+
+#[inline(always)]
+fn precomputed_u32_hash(value: u32) -> u64 {
+    mix_key_u64(u64::from(value))
+}
+
+#[inline(always)]
+fn precomputed_u64_hash(value: u64) -> u64 {
+    mix_key_u64(value)
+}
+
+#[inline(always)]
+fn precomputed_u128_hash(value: u128) -> u64 {
+    mix_key_u64((value as u64) ^ ((value >> 64) as u64).rotate_left(32))
+}
+
+impl FastMapKey for u32 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u32_hash(self)
+    }
+}
+
+impl FastMapKey for u64 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self)
+    }
+}
+
+impl FastMapKey for u128 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self)
+    }
+}
+
+impl FastMapKey for BasicDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for CpuCoreDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
+impl FastMapKey for NetworkDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for TCPMetricsDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for DiskDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
 pub struct FastMap<K, V> {
     // Keep one consistent heap-backed layout for all aggregation maps.
     // Large aggregates stay out of the map object itself, which avoids the
@@ -116,21 +191,6 @@ where
     }
 }
 
-impl<K, V> FastMap<K, V>
-where
-    K: Copy + Eq + Hash,
-    V: Default,
-{
-    #[inline(always)]
-    pub(crate) fn get_or_default_mut(&mut self, key: K) -> &mut V {
-        self.inner
-            .raw_entry_mut()
-            .from_key(&key)
-            .or_insert_with(|| (key, V::default()))
-            .1
-    }
-}
-
 impl<K, V> IntoIterator for FastMap<K, V> {
     type Item = (K, V);
     type IntoIter = FastMapIntoIter<K, V>;
@@ -148,16 +208,25 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
 #[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
-    K: Copy + Eq + Hash,
+    K: FastMapKey,
     V: Default,
 {
-    map.get_or_default_mut(key)
+    let hash = key.precomputed_hash();
+
+    match map
+        .inner
+        .raw_entry_mut()
+        .from_hash(hash, |existing| *existing == key)
+    {
+        RawEntryMut::Occupied(entry) => entry.into_mut(),
+        RawEntryMut::Vacant(entry) => entry.insert_hashed_nocheck(hash, key, V::default()).1,
+    }
 }
 
 #[inline(always)]
 pub(crate) fn record_latency<K>(map: &mut FastMap<K, LatencyAggregate>, key: K, latency_ns: u64)
 where
-    K: Copy + Eq + Hash,
+    K: FastMapKey,
 {
     get_or_default_mut(map, key).record(latency_ns);
 }
@@ -165,7 +234,7 @@ where
 #[inline(always)]
 fn add_counter_value<K>(map: &mut FastMap<K, CounterAggregate>, key: K, value: i64)
 where
-    K: Copy + Eq + Hash,
+    K: FastMapKey,
 {
     get_or_default_mut(map, key).add(value);
 }
@@ -173,7 +242,7 @@ where
 #[inline(always)]
 fn add_counter_count<K>(map: &mut FastMap<K, CounterAggregate>, key: K, count: u32)
 where
-    K: Copy + Eq + Hash,
+    K: FastMapKey,
 {
     get_or_default_mut(map, key).add_count(count);
 }
