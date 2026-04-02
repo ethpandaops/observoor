@@ -3,7 +3,6 @@ use std::hash::{BuildHasherDefault, Hasher};
 use std::time::SystemTime;
 
 use hashbrown::{hash_map::Iter as HashMapIter, HashMap};
-use smallvec::SmallVec;
 
 use crate::tracer::event::EventType;
 
@@ -66,7 +65,7 @@ const SMALL_MAP_LIMIT: usize = 8;
 enum FastMapInner<K, V> {
     Empty,
     Single((K, V)),
-    Small(SmallEntries<K, V>),
+    Small(Vec<(K, V)>),
     Large(HashMap<K, V, FastHashBuilder>),
 }
 
@@ -83,11 +82,9 @@ pub enum FastMapIter<'a, K, V> {
 
 pub enum FastMapIntoIter<K, V> {
     Inline(std::option::IntoIter<(K, V)>),
-    Small(smallvec::IntoIter<[(K, V); SMALL_MAP_LIMIT]>),
+    Small(std::vec::IntoIter<(K, V)>),
     Large(hashbrown::hash_map::IntoIter<K, V>),
 }
-
-type SmallEntries<K, V> = SmallVec<[(K, V); SMALL_MAP_LIMIT]>;
 
 impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
     type Item = (&'a K, &'a V);
@@ -222,7 +219,7 @@ where
                     _ => unreachable!("single-entry map replacement must preserve the entry"),
                 };
 
-                let mut entries = SmallEntries::new();
+                let mut entries = Vec::with_capacity(SMALL_MAP_LIMIT);
                 entries.push(existing);
                 entries.push((key, V::default()));
                 self.inner = FastMapInner::Small(entries);
