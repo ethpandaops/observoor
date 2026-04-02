@@ -1,5 +1,6 @@
 use std::hash::Hash;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::iter::FusedIterator;
 use std::time::SystemTime;
 
 use hashbrown::{
@@ -140,37 +141,86 @@ impl FastMapKey for DiskDimension {
 }
 
 pub struct FastMap<K, V> {
-    // Keep one consistent heap-backed layout for all aggregation maps.
-    // Large aggregates stay out of the map object itself, which avoids the
-    // inline/small-state cache pressure regressions seen in CPU benchmarks.
-    inner: HashMap<K, V, FastHashBuilder>,
+    // Most benchmark windows aggregate into a single dimension key per metric.
+    // Keep that case on a zero-hash fast path and spill to hashbrown only once
+    // cardinality grows beyond one.
+    singleton: Option<(K, V)>,
+    overflow: Option<HashMap<K, V, FastHashBuilder>>,
+    overflow_capacity: usize,
 }
 
-pub type FastMapIter<'a, K, V> = HashMapIter<'a, K, V>;
-pub type FastMapIntoIter<K, V> = HashMapIntoIter<K, V>;
+pub enum FastMapIter<'a, K, V> {
+    Empty,
+    Singleton(std::option::Iter<'a, (K, V)>),
+    Overflow(HashMapIter<'a, K, V>),
+}
+
+impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
+    type Item = (&'a K, &'a V);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::Singleton(iter) => iter.next().map(|(key, value)| (key, value)),
+            Self::Overflow(iter) => iter.next(),
+        }
+    }
+}
+
+impl<'a, K, V> FusedIterator for FastMapIter<'a, K, V> {}
+
+pub enum FastMapIntoIter<K, V> {
+    Empty,
+    Singleton(std::option::IntoIter<(K, V)>),
+    Overflow(HashMapIntoIter<K, V>),
+}
+
+impl<K, V> Iterator for FastMapIntoIter<K, V> {
+    type Item = (K, V);
+
+    #[inline(always)]
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Empty => None,
+            Self::Singleton(iter) => iter.next(),
+            Self::Overflow(iter) => iter.next(),
+        }
+    }
+}
+
+impl<K, V> FusedIterator for FastMapIntoIter<K, V> {}
 
 impl<K, V> FastMap<K, V> {
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            inner: HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default()),
+            singleton: None,
+            overflow: None,
+            overflow_capacity: capacity.max(2),
         }
     }
 
     #[inline(always)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.len()
+        self.overflow
+            .as_ref()
+            .map_or_else(|| usize::from(self.singleton.is_some()), HashMap::len)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.inner.is_empty()
+        self.singleton.is_none() && self.overflow.is_none()
     }
 
     #[inline(always)]
     pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
-        self.inner.iter()
+        match (&self.singleton, &self.overflow) {
+            (_, Some(map)) => FastMapIter::Overflow(map.iter()),
+            (Some(_), None) => FastMapIter::Singleton(self.singleton.iter()),
+            (None, None) => FastMapIter::Empty,
+        }
     }
 }
 
@@ -178,16 +228,33 @@ impl<K, V> FastMap<K, V>
 where
     K: Eq + Hash,
 {
+    #[inline(always)]
+    fn promote_singleton_to_overflow(&mut self) {
+        debug_assert!(self.overflow.is_none());
+
+        let mut overflow =
+            HashMap::with_capacity_and_hasher(self.overflow_capacity, FastHashBuilder::default());
+        if let Some((key, value)) = self.singleton.take() {
+            overflow.insert(key, value);
+        }
+        self.overflow = Some(overflow);
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
-        self.inner.get(key)
+        if let Some((existing_key, value)) = self.singleton.as_ref() {
+            if existing_key == key {
+                return Some(value);
+            }
+        }
+        self.overflow.as_ref().and_then(|map| map.get(key))
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn contains_key(&self, key: &K) -> bool {
-        self.inner.contains_key(key)
+        self.get(key).is_some()
     }
 }
 
@@ -197,7 +264,11 @@ impl<K, V> IntoIterator for FastMap<K, V> {
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        self.inner.into_iter()
+        match (self.singleton, self.overflow) {
+            (_, Some(map)) => FastMapIntoIter::Overflow(map.into_iter()),
+            (Some(entry), None) => FastMapIntoIter::Singleton(Some(entry).into_iter()),
+            (None, None) => FastMapIntoIter::Empty,
+        }
     }
 }
 
@@ -211,10 +282,40 @@ where
     K: FastMapKey,
     V: Default,
 {
+    if matches!(
+        map.singleton.as_ref(),
+        Some((existing_key, _)) if *existing_key == key
+    ) {
+        return &mut map.singleton.as_mut().expect("singleton exists").1;
+    }
+
+    if map.overflow.is_some() {
+        return get_or_default_mut_overflow(map.overflow.as_mut().expect("overflow exists"), key);
+    }
+
+    if map.singleton.is_none() {
+        map.singleton = Some((key, V::default()));
+        return &mut map.singleton.as_mut().expect("singleton inserted").1;
+    }
+
+    map.promote_singleton_to_overflow();
+    get_or_default_mut_overflow(
+        map.overflow
+            .as_mut()
+            .expect("overflow map created from singleton spill"),
+        key,
+    )
+}
+
+#[inline(always)]
+fn get_or_default_mut_overflow<K, V>(map: &mut HashMap<K, V, FastHashBuilder>, key: K) -> &mut V
+where
+    K: FastMapKey,
+    V: Default,
+{
     let hash = key.precomputed_hash();
 
     match map
-        .inner
         .raw_entry_mut()
         .from_hash(hash, |existing| *existing == key)
     {
