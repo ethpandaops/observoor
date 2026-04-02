@@ -179,14 +179,20 @@ where
         }
 
         if let FastMapInner::Small(entries) = &mut self.inner {
-            if let Some(idx) = entries.iter().position(|(existing, _)| *existing == key) {
-                let value = unsafe { &mut entries.get_unchecked_mut(idx).1 as *mut V };
-                // Safety: `idx` comes from `position` on the same live Vec,
+            let len = entries.len();
+            let entries_ptr = entries.as_mut_ptr();
+            let mut idx = 0;
+            while idx < len {
+                // Safety: `idx < len`, `entries_ptr` comes from the live Vec,
                 // and we return immediately without mutating the Vec.
-                return unsafe { &mut *value };
+                let entry = unsafe { &mut *entries_ptr.add(idx) };
+                if entry.0 == key {
+                    return &mut entry.1;
+                }
+                idx += 1;
             }
 
-            if entries.len() < SMALL_MAP_LIMIT {
+            if len < SMALL_MAP_LIMIT {
                 entries.push((key, V::default()));
                 let idx = entries.len() - 1;
                 let value = unsafe { &mut entries.get_unchecked_mut(idx).1 as *mut V };
