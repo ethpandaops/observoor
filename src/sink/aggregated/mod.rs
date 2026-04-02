@@ -46,6 +46,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 8;
 /// under sustained tracer load without letting the event loop run unbounded.
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
+const RUNNING_TID_CACHE_SIZE: usize = 32;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -95,6 +96,15 @@ struct RunningThread {
 #[derive(Default)]
 struct RunningThreadStore {
     entries: Vec<(u32, RunningThread)>,
+    // Scheduler events repeatedly touch the same small set of runnable TIDs.
+    // Cache the last resolved slot per TID to avoid rescanning `entries`.
+    index_cache: [Option<RunningThreadCacheEntry>; RUNNING_TID_CACHE_SIZE],
+}
+
+#[derive(Clone, Copy)]
+struct RunningThreadCacheEntry {
+    tid: u32,
+    index: usize,
 }
 
 impl RunningThreadStore {
@@ -102,14 +112,30 @@ impl RunningThreadStore {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             entries: Vec::with_capacity(capacity),
+            index_cache: [None; RUNNING_TID_CACHE_SIZE],
         }
     }
 
     #[inline(always)]
-    fn find_index(&self, tid: u32) -> Option<usize> {
-        self.entries
+    fn find_index(&mut self, tid: u32) -> Option<usize> {
+        let slot = running_tid_cache_slot(tid);
+
+        if let Some(entry) = self.index_cache[slot] {
+            if entry.tid == tid {
+                if let Some((cached_tid, _)) = self.entries.get(entry.index) {
+                    if *cached_tid == tid {
+                        return Some(entry.index);
+                    }
+                }
+            }
+        }
+
+        let index = self
+            .entries
             .iter()
-            .position(|(running_tid, _)| *running_tid == tid)
+            .position(|(running_tid, _)| *running_tid == tid)?;
+        self.index_cache[slot] = Some(RunningThreadCacheEntry { tid, index });
+        Some(index)
     }
 
     #[inline(always)]
@@ -125,9 +151,14 @@ impl RunningThreadStore {
 
     #[cfg(test)]
     #[inline(always)]
-    fn contains_tid(&self, tid: u32) -> bool {
+    fn contains_tid(&mut self, tid: u32) -> bool {
         self.find_index(tid).is_some()
     }
+}
+
+#[inline(always)]
+fn running_tid_cache_slot(tid: u32) -> usize {
+    ((tid ^ tid.rotate_left(13)) as usize) & (RUNNING_TID_CACHE_SIZE - 1)
 }
 
 struct SchedulerWindowState {
@@ -1499,6 +1530,43 @@ mod tests {
             scheduler_state,
             &mut port_label_cache,
         );
+    }
+
+    #[test]
+    fn test_running_thread_store_repairs_stale_cached_index() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let mut store = RunningThreadStore::with_capacity(4);
+        store.entries.push((
+            10,
+            RunningThread {
+                dim,
+                cpu_id: 0,
+                running_since_ns: 100,
+            },
+        ));
+        store.entries.push((
+            20,
+            RunningThread {
+                dim,
+                cpu_id: 1,
+                running_since_ns: 200,
+            },
+        ));
+        store.entries.push((
+            30,
+            RunningThread {
+                dim,
+                cpu_id: 2,
+                running_since_ns: 300,
+            },
+        ));
+
+        assert_eq!(store.find_index(30), Some(2));
+
+        store.entries.swap_remove(1);
+
+        assert_eq!(store.find_index(30), Some(1));
+        assert!(store.contains_tid(30));
     }
 
     #[test]
