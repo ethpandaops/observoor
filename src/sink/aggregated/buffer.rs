@@ -69,6 +69,8 @@ pub(crate) trait FastMapKey: Copy + Eq + Hash {
     fn precomputed_hash(self) -> u64;
 }
 
+const INLINE_CAPACITY: usize = 2;
+
 #[inline(always)]
 fn precomputed_u32_hash(value: u32) -> u64 {
     mix_key_u64(u64::from(value))
@@ -141,18 +143,20 @@ impl FastMapKey for DiskDimension {
 }
 
 pub struct FastMap<K, V> {
-    // Most benchmark windows aggregate into a single dimension key per metric.
-    // Keep that case on a zero-hash fast path and spill to hashbrown only once
-    // cardinality grows beyond one.
-    singleton: Option<(K, V)>,
+    // Most benchmark windows aggregate into one or two dimension keys per
+    // metric family (for example tx/rx or read/write). Keep those cases on a
+    // zero-hash fast path and spill to hashbrown only once cardinality grows
+    // beyond the inline slots.
+    inline: [Option<(K, V)>; INLINE_CAPACITY],
+    inline_len: usize,
     overflow: Option<HashMap<K, V, FastHashBuilder>>,
     overflow_capacity: usize,
 }
 
-pub enum FastMapIter<'a, K, V> {
-    Empty,
-    Singleton(std::option::Iter<'a, (K, V)>),
-    Overflow(HashMapIter<'a, K, V>),
+pub struct FastMapIter<'a, K, V> {
+    inline: [Option<(&'a K, &'a V)>; INLINE_CAPACITY],
+    index: usize,
+    overflow: Option<HashMapIter<'a, K, V>>,
 }
 
 impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
@@ -160,20 +164,28 @@ impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Empty => None,
-            Self::Singleton(iter) => iter.next().map(|(key, value)| (key, value)),
-            Self::Overflow(iter) => iter.next(),
+        if let Some(iter) = self.overflow.as_mut() {
+            return iter.next();
         }
+
+        while self.index < INLINE_CAPACITY {
+            let item = self.inline[self.index].take();
+            self.index += 1;
+            if item.is_some() {
+                return item;
+            }
+        }
+
+        None
     }
 }
 
 impl<'a, K, V> FusedIterator for FastMapIter<'a, K, V> {}
 
-pub enum FastMapIntoIter<K, V> {
-    Empty,
-    Singleton(std::option::IntoIter<(K, V)>),
-    Overflow(HashMapIntoIter<K, V>),
+pub struct FastMapIntoIter<K, V> {
+    inline: [Option<(K, V)>; INLINE_CAPACITY],
+    index: usize,
+    overflow: Option<HashMapIntoIter<K, V>>,
 }
 
 impl<K, V> Iterator for FastMapIntoIter<K, V> {
@@ -181,11 +193,19 @@ impl<K, V> Iterator for FastMapIntoIter<K, V> {
 
     #[inline(always)]
     fn next(&mut self) -> Option<Self::Item> {
-        match self {
-            Self::Empty => None,
-            Self::Singleton(iter) => iter.next(),
-            Self::Overflow(iter) => iter.next(),
+        if let Some(iter) = self.overflow.as_mut() {
+            return iter.next();
         }
+
+        while self.index < INLINE_CAPACITY {
+            let item = self.inline[self.index].take();
+            self.index += 1;
+            if item.is_some() {
+                return item;
+            }
+        }
+
+        None
     }
 }
 
@@ -195,31 +215,41 @@ impl<K, V> FastMap<K, V> {
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            singleton: None,
+            inline: std::array::from_fn(|_| None),
+            inline_len: 0,
             overflow: None,
-            overflow_capacity: capacity.max(2),
+            overflow_capacity: capacity.max(INLINE_CAPACITY + 1),
         }
     }
 
     #[inline(always)]
     pub(crate) fn len(&self) -> usize {
-        self.overflow
-            .as_ref()
-            .map_or_else(|| usize::from(self.singleton.is_some()), HashMap::len)
+        self.overflow.as_ref().map_or(self.inline_len, HashMap::len)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.singleton.is_none() && self.overflow.is_none()
+        self.inline_len == 0 && self.overflow.as_ref().is_none_or(HashMap::is_empty)
     }
 
     #[inline(always)]
     pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
-        match (&self.singleton, &self.overflow) {
-            (_, Some(map)) => FastMapIter::Overflow(map.iter()),
-            (Some(_), None) => FastMapIter::Singleton(self.singleton.iter()),
-            (None, None) => FastMapIter::Empty,
+        if let Some(map) = self.overflow.as_ref() {
+            FastMapIter {
+                inline: [None; INLINE_CAPACITY],
+                index: 0,
+                overflow: Some(map.iter()),
+            }
+        } else {
+            FastMapIter {
+                inline: [
+                    self.inline[0].as_ref().map(|(key, value)| (key, value)),
+                    self.inline[1].as_ref().map(|(key, value)| (key, value)),
+                ],
+                index: 0,
+                overflow: None,
+            }
         }
     }
 }
@@ -229,23 +259,28 @@ where
     K: Eq + Hash,
 {
     #[inline(always)]
-    fn promote_singleton_to_overflow(&mut self) {
+    fn promote_inline_to_overflow(&mut self) {
         debug_assert!(self.overflow.is_none());
 
         let mut overflow =
             HashMap::with_capacity_and_hasher(self.overflow_capacity, FastHashBuilder::default());
-        if let Some((key, value)) = self.singleton.take() {
-            overflow.insert(key, value);
+        for slot in &mut self.inline {
+            if let Some((key, value)) = slot.take() {
+                overflow.insert(key, value);
+            }
         }
+        self.inline_len = 0;
         self.overflow = Some(overflow);
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
-        if let Some((existing_key, value)) = self.singleton.as_ref() {
-            if existing_key == key {
-                return Some(value);
+        for slot in &self.inline {
+            if let Some((existing_key, value)) = slot.as_ref() {
+                if existing_key == key {
+                    return Some(value);
+                }
             }
         }
         self.overflow.as_ref().and_then(|map| map.get(key))
@@ -264,10 +299,10 @@ impl<K, V> IntoIterator for FastMap<K, V> {
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        match (self.singleton, self.overflow) {
-            (_, Some(map)) => FastMapIntoIter::Overflow(map.into_iter()),
-            (Some(entry), None) => FastMapIntoIter::Singleton(Some(entry).into_iter()),
-            (None, None) => FastMapIntoIter::Empty,
+        FastMapIntoIter {
+            inline: self.inline,
+            index: 0,
+            overflow: self.overflow.map(HashMap::into_iter),
         }
     }
 }
@@ -282,29 +317,43 @@ where
     K: FastMapKey,
     V: Default,
 {
-    if matches!(
-        map.singleton.as_ref(),
-        Some((existing_key, _)) if *existing_key == key
-    ) {
-        return &mut map.singleton.as_mut().expect("singleton exists").1;
+    if let Some(slot) = find_inline_index(&map.inline, &key) {
+        return &mut map.inline[slot].as_mut().expect("inline entry exists").1;
     }
 
     if map.overflow.is_some() {
         return get_or_default_mut_overflow(map.overflow.as_mut().expect("overflow exists"), key);
     }
 
-    if map.singleton.is_none() {
-        map.singleton = Some((key, V::default()));
-        return &mut map.singleton.as_mut().expect("singleton inserted").1;
+    if map.inline_len < INLINE_CAPACITY {
+        let slot = map.inline_len;
+        map.inline[slot] = Some((key, V::default()));
+        map.inline_len += 1;
+        return &mut map.inline[slot].as_mut().expect("inline inserted").1;
     }
 
-    map.promote_singleton_to_overflow();
+    map.promote_inline_to_overflow();
     get_or_default_mut_overflow(
         map.overflow
             .as_mut()
-            .expect("overflow map created from singleton spill"),
+            .expect("overflow map created from inline spill"),
         key,
     )
+}
+
+#[inline(always)]
+fn find_inline_index<K, V>(inline: &[Option<(K, V)>; INLINE_CAPACITY], key: &K) -> Option<usize>
+where
+    K: Eq,
+{
+    for (idx, slot) in inline.iter().enumerate() {
+        if let Some((existing_key, _)) = slot.as_ref() {
+            if existing_key == key {
+                return Some(idx);
+            }
+        }
+    }
+    None
 }
 
 #[inline(always)]
@@ -857,5 +906,36 @@ mod tests {
 
         assert_eq!(map.get(&10), Some(&2));
         assert_eq!(map.len(), 1);
+        assert!(map.overflow.is_none());
+    }
+
+    #[test]
+    fn test_fast_map_two_entries_stay_inline() {
+        let mut map = fast_map_with_capacity::<u32, u32>(4);
+
+        *get_or_default_mut(&mut map, 10) += 1;
+        *get_or_default_mut(&mut map, 20) += 2;
+        *get_or_default_mut(&mut map, 10) += 3;
+        *get_or_default_mut(&mut map, 20) += 4;
+
+        assert_eq!(map.get(&10), Some(&4));
+        assert_eq!(map.get(&20), Some(&6));
+        assert_eq!(map.len(), 2);
+        assert!(map.overflow.is_none());
+    }
+
+    #[test]
+    fn test_fast_map_third_entry_promotes_to_overflow() {
+        let mut map = fast_map_with_capacity::<u32, u32>(4);
+
+        *get_or_default_mut(&mut map, 10) += 1;
+        *get_or_default_mut(&mut map, 20) += 1;
+        *get_or_default_mut(&mut map, 30) += 1;
+
+        assert_eq!(map.get(&10), Some(&1));
+        assert_eq!(map.get(&20), Some(&1));
+        assert_eq!(map.get(&30), Some(&1));
+        assert_eq!(map.len(), 3);
+        assert!(map.overflow.is_some());
     }
 }
