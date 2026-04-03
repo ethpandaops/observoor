@@ -217,7 +217,7 @@ where
     match map
         .inner
         .raw_entry_mut()
-        .from_hash(hash, |existing| *existing == key)
+        .from_key_hashed_nocheck(hash, &key)
     {
         RawEntryMut::Occupied(entry) => entry.into_mut(),
         RawEntryMut::Vacant(entry) => entry.insert_hashed_nocheck(hash, key, V::default()).1,
