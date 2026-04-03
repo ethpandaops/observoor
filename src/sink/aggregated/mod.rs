@@ -117,6 +117,22 @@ impl RunningThreadStore {
     }
 
     #[inline(always)]
+    fn cache_index(&mut self, tid: u32, index: usize) {
+        self.index_cache[running_tid_cache_slot(tid)] =
+            Some(RunningThreadCacheEntry { tid, index });
+    }
+
+    #[inline(always)]
+    fn clear_cached_index(&mut self, tid: u32, index: usize) {
+        let slot = running_tid_cache_slot(tid);
+        if let Some(entry) = self.index_cache[slot] {
+            if entry.tid == tid && entry.index == index {
+                self.index_cache[slot] = None;
+            }
+        }
+    }
+
+    #[inline(always)]
     fn find_index(&mut self, tid: u32) -> Option<usize> {
         let slot = running_tid_cache_slot(tid);
 
@@ -139,6 +155,34 @@ impl RunningThreadStore {
     }
 
     #[inline(always)]
+    fn push_entry(&mut self, tid: u32, running: RunningThread) {
+        let index = self.entries.len();
+        self.entries.push((tid, running));
+        self.cache_index(tid, index);
+    }
+
+    #[inline(always)]
+    fn replace_entry(&mut self, index: usize, tid: u32, running: RunningThread) {
+        unsafe {
+            *self.entries.get_unchecked_mut(index) = (tid, running);
+        }
+        self.cache_index(tid, index);
+    }
+
+    #[inline(always)]
+    fn swap_remove_entry(&mut self, index: usize) -> (u32, RunningThread) {
+        let removed_tid = unsafe { self.entries.get_unchecked(index).0 };
+        self.clear_cached_index(removed_tid, index);
+
+        let removed = self.entries.swap_remove(index);
+        if let Some((moved_tid, _)) = self.entries.get(index) {
+            self.cache_index(*moved_tid, index);
+        }
+
+        removed
+    }
+
+    #[inline(always)]
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut RunningThread> {
         self.entries.iter_mut().map(|(_, running)| running)
     }
@@ -153,6 +197,15 @@ impl RunningThreadStore {
     #[inline(always)]
     fn contains_tid(&mut self, tid: u32) -> bool {
         self.find_index(tid).is_some()
+    }
+
+    #[cfg(test)]
+    #[inline(always)]
+    fn cached_index(&self, tid: u32) -> Option<usize> {
+        let slot = running_tid_cache_slot(tid);
+        self.index_cache[slot]
+            .filter(|entry| entry.tid == tid)
+            .map(|entry| entry.index)
     }
 }
 
@@ -272,13 +325,13 @@ impl SchedulerWindowState {
                     running.cpu_id,
                     timestamp_ns - running.running_since_ns,
                 );
-                self.running_by_tid.entries.swap_remove(idx);
+                self.running_by_tid.swap_remove_entry(idx);
                 return;
             }
 
             // Zero-length runtime for this slice; consume the running state.
             if timestamp_ns == running.running_since_ns {
-                self.running_by_tid.entries.swap_remove(idx);
+                self.running_by_tid.swap_remove_entry(idx);
                 return;
             }
 
@@ -315,12 +368,10 @@ impl SchedulerWindowState {
             }
             // Only move state forward (or replace at same instant).
             if timestamp_ns >= prev.running_since_ns {
-                unsafe {
-                    self.running_by_tid.entries.get_unchecked_mut(idx).1 = next_running;
-                }
+                self.running_by_tid.replace_entry(idx, tid, next_running);
             }
         } else {
-            self.running_by_tid.entries.push((tid, next_running));
+            self.running_by_tid.push_entry(tid, next_running);
         }
     }
 
@@ -336,7 +387,7 @@ impl SchedulerWindowState {
             }
 
             if timestamp_ns >= running.running_since_ns {
-                self.running_by_tid.entries.swap_remove(idx);
+                self.running_by_tid.swap_remove_entry(idx);
             }
         }
     }
@@ -1567,6 +1618,46 @@ mod tests {
 
         assert_eq!(store.find_index(30), Some(1));
         assert!(store.contains_tid(30));
+    }
+
+    #[test]
+    fn test_running_thread_store_keeps_cache_coherent_on_insert_and_remove() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let mut store = RunningThreadStore::with_capacity(4);
+        store.push_entry(
+            10,
+            RunningThread {
+                dim,
+                cpu_id: 0,
+                running_since_ns: 100,
+            },
+        );
+        store.push_entry(
+            20,
+            RunningThread {
+                dim,
+                cpu_id: 1,
+                running_since_ns: 200,
+            },
+        );
+        store.push_entry(
+            30,
+            RunningThread {
+                dim,
+                cpu_id: 2,
+                running_since_ns: 300,
+            },
+        );
+
+        assert_eq!(store.cached_index(10), Some(0));
+        assert_eq!(store.cached_index(20), Some(1));
+        assert_eq!(store.cached_index(30), Some(2));
+
+        store.swap_remove_entry(1);
+
+        assert_eq!(store.cached_index(20), None);
+        assert_eq!(store.cached_index(30), Some(1));
+        assert_eq!(store.find_index(30), Some(1));
     }
 
     #[test]
