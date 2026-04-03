@@ -63,14 +63,13 @@ struct disk_io_event {
     __u32 dev; // Block device ID (major:minor encoded)
 };
 
-// Common network I/O event (36 bytes total).
+// Common network I/O event (32 bytes total).
+// transport is stored in hdr.pad[0] to keep the payload small.
 struct net_io_event {
     struct event_header hdr;
     __u32 bytes;
     __u16 sport;
     __u16 dport;
-    __u8  transport;    // 0=TCP, 1=UDP
-    __u8  pad[3];
 };
 
 // TCP TX network I/O event with inline metrics (40 bytes total).

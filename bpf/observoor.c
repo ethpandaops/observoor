@@ -803,12 +803,11 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
+    e->hdr.pad[0] = val->transport;
     e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->transport = val->transport;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -864,12 +863,11 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
+    e->hdr.pad[0] = val->transport;
     e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->transport = val->transport;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -922,12 +920,11 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
+    e->hdr.pad[0] = val->transport;
     e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->transport = val->transport;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 

@@ -49,8 +49,6 @@ struct RawNetIOPayload {
     bytes: u32,
     src_port: u16,
     dst_port: u16,
-    transport: u8,
-    _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -201,10 +199,10 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
             EventType::DiskIO,
             TypedEvent::DiskIO(parse_disk_io(payload)?),
         ),
-        7 => (EventType::NetTX, parse_net_tx(payload)?),
+        7 => (EventType::NetTX, parse_net_tx(&header, payload)?),
         8 => (
             EventType::NetRX,
-            TypedEvent::NetIO(parse_net_io(payload, Direction::RX as u8)?),
+            TypedEvent::NetIO(parse_net_io(&header, payload, Direction::RX as u8)?),
         ),
         9 => (
             EventType::SchedSwitch,
@@ -345,9 +343,9 @@ fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
 }
 
 /// Net I/O TX event: type 7. Payload is either:
-/// - 12-byte generic TX data with an explicit transport byte, or
+/// - 8-byte generic TX data with transport stored in `hdr.pad[0]`, or
 /// - 16-byte TCP metrics data where transport is implied by the payload shape.
-fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
+fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, ParseError> {
     if data.len() >= size_of::<RawNetIOMetricsPayload>() {
         let metrics = read_payload::<RawNetIOMetricsPayload>(data, "net IO event")?;
         return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
@@ -360,7 +358,7 @@ fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
     }
 
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
-    let transport_raw = raw.transport;
+    let transport_raw = header.pad[0];
     if transport_raw > NetTransport::Udp as u8 {
         return Err(ParseError::InvalidNetTransport {
             event_name: "net IO event",
@@ -378,9 +376,14 @@ fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
 }
 
 /// Net I/O event: type 8 for RX, or TX without inline TCP metrics.
-fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
+/// transport is stored in `hdr.pad[0]`.
+fn parse_net_io(
+    header: &RawEventHeader,
+    data: &[u8],
+    direction: u8,
+) -> Result<NetIOEvent, ParseError> {
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
-    let transport_raw = raw.transport;
+    let transport_raw = header.pad[0];
     if transport_raw > NetTransport::Udp as u8 {
         return Err(ParseError::InvalidNetTransport {
             event_name: "net IO event",
@@ -618,11 +621,10 @@ mod tests {
     #[test]
     fn test_net_io_invalid_transport() {
         let mut data = header(1000, 42, 43, 7, 1);
+        data[HEADER_PAD_OFFSET] = 7; // invalid transport
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&80u16.to_le_bytes()); // sport
         data.extend_from_slice(&90u16.to_le_bytes()); // dport
-        data.push(7); // invalid transport
-        data.extend_from_slice(&[0u8; 3]); // pad
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidNetTransport { raw: 7, .. }
@@ -728,13 +730,31 @@ mod tests {
     }
 
     #[test]
+    fn test_net_tx_no_metrics() {
+        let mut data = header(4_500_000, 103, 203, 7, 1); // NetTX, Geth
+        data[HEADER_PAD_OFFSET] = NetTransport::Udp as u8;
+        data.extend_from_slice(&1536u32.to_le_bytes());
+        data.extend_from_slice(&30303u16.to_le_bytes());
+        data.extend_from_slice(&9000u16.to_le_bytes());
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::NetIO(e) = &parsed.typed else {
+            panic!("expected NetIO");
+        };
+        assert_eq!(e.direction, Direction::TX as u8);
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 1536);
+        assert_eq!(e.src_port, 30303);
+        assert_eq!(e.dst_port, 9000);
+    }
+
+    #[test]
     fn test_net_rx_no_metrics() {
         let mut data = header(5_000_000, 104, 204, 8, 7); // NetRX, Lighthouse
+        data[HEADER_PAD_OFFSET] = NetTransport::Udp as u8;
         data.extend_from_slice(&2048u32.to_le_bytes());
         data.extend_from_slice(&443u16.to_le_bytes());
         data.extend_from_slice(&12345u16.to_le_bytes());
-        data.push(1); // UDP
-        data.extend_from_slice(&[0u8; 3]); // pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
