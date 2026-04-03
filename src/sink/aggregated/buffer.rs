@@ -18,8 +18,6 @@ use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
 
-const FAST_MAP_CACHE_SIZE: usize = 8;
-
 #[derive(Default)]
 pub struct PackedKeyHasher {
     hash: u64,
@@ -161,10 +159,9 @@ pub struct FastMap<K, V> {
     // Large aggregates stay out of the map object itself, which avoids the
     // inline/small-state cache pressure regressions seen in CPU benchmarks.
     inner: HashMap<K, V, FastHashBuilder>,
-    // Hot-path event streams often alternate among a handful of dimensions
-    // (for example TX/RX or read/write keys), so cache a small hot set rather
-    // than only the immediate last hit.
-    cache: [Option<FastMapCacheEntry<K, V>>; FAST_MAP_CACHE_SIZE],
+    // Hot-path event streams often update the same dimension repeatedly.
+    // Cache the most recently resolved entry to bypass hashing/probing on hits.
+    last_hit: Option<FastMapCacheEntry<K, V>>,
 }
 
 pub type FastMapIter<'a, K, V> = HashMapIter<'a, K, V>;
@@ -175,7 +172,7 @@ impl<K, V> FastMap<K, V> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default()),
-            cache: std::array::from_fn(|_| None),
+            last_hit: None,
         }
     }
 
@@ -233,18 +230,16 @@ where
     K: FastMapKey,
     V: Default,
 {
-    let hash = key.precomputed_hash();
-    let cache_slot = fast_map_cache_slot(hash);
-
-    if let Some(cached) = map.cache[cache_slot].as_ref() {
+    if let Some(cached) = map.last_hit.as_ref() {
         if cached.key == key {
             let value = cached.value;
-            // Safety: cached pointers are only populated from references
-            // returned by `hashbrown` and are invalidated before any insertion
-            // that could relocate buckets.
+            // Safety: `last_hit` is populated from references returned by
+            // `hashbrown` and invalidated on any new insertion before reuse.
             return unsafe { &mut *value.as_ptr() };
         }
     }
+
+    let hash = key.precomputed_hash();
 
     let value = match map
         .inner
@@ -252,23 +247,13 @@ where
         .from_key_hashed_nocheck(hash, &key)
     {
         RawEntryMut::Occupied(entry) => entry.into_mut(),
-        RawEntryMut::Vacant(entry) => {
-            for slot in &mut map.cache {
-                *slot = None;
-            }
-            entry.insert_hashed_nocheck(hash, key, V::default()).1
-        }
+        RawEntryMut::Vacant(entry) => entry.insert_hashed_nocheck(hash, key, V::default()).1,
     };
-    map.cache[cache_slot] = Some(FastMapCacheEntry {
+    map.last_hit = Some(FastMapCacheEntry {
         key,
         value: NonNull::from(&mut *value),
     });
     value
-}
-
-#[inline(always)]
-fn fast_map_cache_slot(hash: u64) -> usize {
-    ((hash ^ hash.rotate_left(19)) as usize) & (FAST_MAP_CACHE_SIZE - 1)
 }
 
 #[inline(always)]
@@ -826,21 +811,5 @@ mod tests {
 
         assert_eq!(map.get(&10), Some(&2));
         assert_eq!(map.len(), 1);
-    }
-
-    #[test]
-    fn test_fast_map_cache_invalidates_across_growth() {
-        let mut map = fast_map_with_capacity::<u32, u32>(1);
-
-        *get_or_default_mut(&mut map, 1) += 1;
-
-        for key in 2..128 {
-            *get_or_default_mut(&mut map, key) += 1;
-        }
-
-        *get_or_default_mut(&mut map, 1) += 1;
-
-        assert_eq!(map.get(&1), Some(&2));
-        assert_eq!(map.get(&127), Some(&1));
     }
 }
