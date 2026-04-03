@@ -1000,12 +1000,6 @@ int BPF_KPROBE(kprobe_tcp_set_state, struct sock *sk, int state)
     e->hdr.client_type = sval->client_type;
     __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
 
-    e->sport = BPF_CORE_READ(sk, __sk_common.skc_num);
-    e->dport = __builtin_bswap16(
-        BPF_CORE_READ(sk, __sk_common.skc_dport));
-    e->new_state = (__u8)state;
-    e->old_state = BPF_CORE_READ(sk, __sk_common.skc_state);
-
     bpf_ringbuf_submit(e, 0);
 
     if (state == 7) { // TCP_CLOSE

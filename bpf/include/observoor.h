@@ -142,14 +142,10 @@ struct tcp_retransmit_event {
     __u8  pad[8];
 };
 
-// TCP state change event (40 bytes total).
+// TCP state change event (24 bytes total).
+// The aggregated pipeline only counts transitions, so this stays header-only.
 struct tcp_state_event {
     struct event_header hdr;
-    __u16 sport;
-    __u16 dport;
-    __u8  new_state;
-    __u8  old_state;
-    __u8  pad[10];
 };
 
 // Memory reclaim/compaction event (32 bytes total).

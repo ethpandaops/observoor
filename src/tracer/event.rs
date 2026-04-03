@@ -462,16 +462,6 @@ pub struct TcpRetransmitEvent {
     pub dst_port: u16,
 }
 
-/// TCP state transition event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct TcpStateEvent {
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub new_state: u8,
-    pub old_state: u8,
-}
-
 /// Memory reclaim/compaction latency event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
@@ -534,7 +524,9 @@ pub enum TypedEvent {
     FDClose,
     BlockMerge(BlockMergeEvent),
     TcpRetransmit(TcpRetransmitEvent),
-    TcpState(TcpStateEvent),
+    // The aggregated sink only counts TCP state transitions, so the parser
+    // keeps these as payload-free markers.
+    TcpState,
     MemReclaim(MemLatencyEvent),
     MemCompaction(MemLatencyEvent),
     SwapIn(SwapEvent),

@@ -651,7 +651,7 @@ impl AggregatedSink {
                 buf.add_tcp_retransmit(net_dim, i64::from(e.bytes));
             }
 
-            TypedEvent::TcpState(_) => {
+            TypedEvent::TcpState => {
                 buf.add_tcp_state_change(BasicDimension::new(pid, client_type));
             }
 
@@ -1871,15 +1871,7 @@ mod tests {
         assert!(!buf.swap_in.is_empty());
 
         // TCP state
-        let event = make_event(
-            EventType::TcpState,
-            TypedEvent::TcpState(TcpStateEvent {
-                src_port: 8545,
-                dst_port: 30303,
-                new_state: 1,
-                old_state: 0,
-            }),
-        );
+        let event = make_event(EventType::TcpState, TypedEvent::TcpState);
         AggregatedSink::process_event(&mut buf, &event, &dims);
         assert!(!buf.tcp_state_change.is_empty());
     }

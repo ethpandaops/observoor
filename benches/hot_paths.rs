@@ -169,7 +169,7 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             };
             buf.add_block_merge(disk, e.bytes);
         }
-        TypedEvent::TcpState(_) => {
+        TypedEvent::TcpState => {
             buf.add_tcp_state_change(basic_dim);
         }
         TypedEvent::MemReclaim(e) => {

@@ -12,7 +12,7 @@ use super::event::{
     BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
     NetIOTcpTxMetricsEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
     ProcessExitEvent, SchedCombinedEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent,
-    TcpRetransmitEvent, TcpStateEvent, TypedEvent, MAX_CLIENT_TYPE,
+    TcpRetransmitEvent, TypedEvent, MAX_CLIENT_TYPE,
 };
 
 #[repr(C)]
@@ -100,16 +100,6 @@ struct RawTcpRetransmitPayload {
     src_port: u16,
     dst_port: u16,
     _pad: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawTcpStatePayload {
-    src_port: u16,
-    dst_port: u16,
-    new_state: u8,
-    old_state: u8,
-    _pad: [u8; 10],
 }
 
 #[repr(C)]
@@ -247,10 +237,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
             EventType::TcpRetransmit,
             TypedEvent::TcpRetransmit(parse_tcp_retransmit(payload)?),
         ),
-        19 => (
-            EventType::TcpState,
-            TypedEvent::TcpState(parse_tcp_state(payload)?),
-        ),
+        19 => (EventType::TcpState, TypedEvent::TcpState),
         20 => (
             EventType::MemReclaim,
             TypedEvent::MemReclaim(parse_mem_latency(payload)?),
@@ -502,17 +489,6 @@ fn parse_tcp_retransmit(data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
         bytes: u32::from_le(raw.bytes),
         src_port: u16::from_le(raw.src_port),
         dst_port: u16::from_le(raw.dst_port),
-    })
-}
-
-/// TCP state change event: type 19. Payload: 16 bytes (6 meaningful + 10 pad).
-fn parse_tcp_state(data: &[u8]) -> Result<TcpStateEvent, ParseError> {
-    let raw = read_payload::<RawTcpStatePayload>(data, "tcp state event")?;
-    Ok(TcpStateEvent {
-        src_port: u16::from_le(raw.src_port),
-        dst_port: u16::from_le(raw.dst_port),
-        new_state: raw.new_state,
-        old_state: raw.old_state,
     })
 }
 
@@ -942,21 +918,12 @@ mod tests {
 
     #[test]
     fn test_tcp_state() {
-        let mut data = header(13_000_000, 112, 212, 19, 7); // TcpState, Lighthouse
-        data.extend_from_slice(&8080u16.to_le_bytes());
-        data.extend_from_slice(&9090u16.to_le_bytes());
-        data.push(1); // new_state
-        data.push(2); // old_state
-        data.extend_from_slice(&[0u8; 10]); // pad
+        let data = header(13_000_000, 112, 212, 19, 7); // TcpState, Lighthouse
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::TcpState(e) = &parsed.typed else {
+        let TypedEvent::TcpState = &parsed.typed else {
             panic!("expected TcpState");
         };
-        assert_eq!(e.src_port, 8080);
-        assert_eq!(e.dst_port, 9090);
-        assert_eq!(e.new_state, 1);
-        assert_eq!(e.old_state, 2);
     }
 
     // -- Memory latency --

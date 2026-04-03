@@ -123,18 +123,12 @@ fn tcp_retransmit_payload(pid: u32, tid: u32, bytes: u32, src_port: u16, dst_por
 fn tcp_state_payload(
     pid: u32,
     tid: u32,
-    src_port: u16,
-    dst_port: u16,
-    new_state: u8,
-    old_state: u8,
+    _src_port: u16,
+    _dst_port: u16,
+    _new_state: u8,
+    _old_state: u8,
 ) -> Vec<u8> {
-    let mut data = header(123_456_789, pid, tid, EventType::TcpState as u8, 1);
-    data.extend_from_slice(&src_port.to_le_bytes());
-    data.extend_from_slice(&dst_port.to_le_bytes());
-    data.push(new_state);
-    data.push(old_state);
-    data.extend_from_slice(&[0u8; 10]);
-    data
+    header(123_456_789, pid, tid, EventType::TcpState as u8, 1)
 }
 
 fn page_fault_payload(pid: u32, tid: u32, major: bool) -> Vec<u8> {
@@ -252,7 +246,7 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             let disk = DiskDimension::new(event.raw.pid, event.raw.client_type, 0, e.rw);
             buf.add_block_merge(disk, e.bytes);
         }
-        TypedEvent::TcpState(_) => {
+        TypedEvent::TcpState => {
             buf.add_tcp_state_change(basic_dim);
         }
         TypedEvent::MemReclaim(e) => {
