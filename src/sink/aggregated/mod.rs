@@ -139,20 +139,27 @@ impl RunningThreadStore {
 
         if let Some(entry) = self.index_cache[slot] {
             if entry.tid == tid {
-                if let Some((cached_tid, _)) = self.entries.get(entry.index) {
-                    if *cached_tid == tid {
+                if entry.index < self.entries.len() {
+                    let cached_tid = unsafe { self.entries.get_unchecked(entry.index).0 };
+                    if cached_tid == tid {
                         return Some(entry.index);
                     }
                 }
             }
         }
 
-        let index = self
-            .entries
-            .iter()
-            .position(|(running_tid, _)| *running_tid == tid)?;
-        self.index_cache[slot] = Some(RunningThreadCacheEntry { tid, index });
-        Some(index)
+        let len = self.entries.len();
+        let mut index = 0usize;
+        while index < len {
+            let running_tid = unsafe { self.entries.get_unchecked(index).0 };
+            if running_tid == tid {
+                self.index_cache[slot] = Some(RunningThreadCacheEntry { tid, index });
+                return Some(index);
+            }
+            index += 1;
+        }
+
+        None
     }
 
     #[inline(always)]
