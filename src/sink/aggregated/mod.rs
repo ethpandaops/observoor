@@ -610,10 +610,13 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIO(e) => {
-                let net_dim = build_network_dimension_cached(
+                let net_dim = build_network_dimension_from_parts_cached(
                     pid,
                     client_type,
-                    e,
+                    e.direction,
+                    e.transport,
+                    e.src_port,
+                    e.dst_port,
                     dimensions,
                     port_label_cache,
                 );
@@ -621,17 +624,13 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
-                let net_event = NetIOEvent {
-                    bytes: e.bytes,
-                    src_port: e.src_port,
-                    dst_port: e.dst_port,
-                    direction: Direction::TX as u8,
-                    transport: NetTransport::Tcp as u8,
-                };
-                let net_dim = build_network_dimension_cached(
+                let net_dim = build_network_dimension_from_parts_cached(
                     pid,
                     client_type,
-                    &net_event,
+                    Direction::TX as u8,
+                    NetTransport::Tcp as u8,
+                    e.src_port,
+                    e.dst_port,
                     dimensions,
                     port_label_cache,
                 );
@@ -639,9 +638,11 @@ impl AggregatedSink {
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = build_network_dimension_from_tcp_retransmit_cached(
+                let net_dim = build_network_dimension_from_parts_cached(
                     pid,
                     client_type,
+                    Direction::TX as u8,
+                    NetTransport::Tcp as u8,
                     e.src_port,
                     e.dst_port,
                     dimensions,
@@ -1340,42 +1341,46 @@ fn build_network_dimension(
     e: &NetIOEvent,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
-    build_network_dimension_inner(pid, client_type, e, dims, None)
+    build_network_dimension_from_parts_uncached(
+        pid,
+        client_type,
+        e.direction,
+        e.transport,
+        e.src_port,
+        e.dst_port,
+        dims,
+    )
 }
 
 #[inline(always)]
-fn build_network_dimension_cached(
+fn build_network_dimension_from_parts_cached(
     pid: u32,
     client_type: u8,
-    e: &NetIOEvent,
+    raw_direction: u8,
+    transport: u8,
+    src_port: u16,
+    dst_port: u16,
     dims: &DimensionsConfig,
     port_label_cache: &mut PortLabelResolveCache,
 ) -> NetworkDimension {
-    build_network_dimension_inner(pid, client_type, e, dims, Some(port_label_cache))
-}
-
-#[inline(always)]
-fn build_network_dimension_inner(
-    pid: u32,
-    client_type: u8,
-    e: &NetIOEvent,
-    dims: &DimensionsConfig,
-    port_label_cache: Option<&mut PortLabelResolveCache>,
-) -> NetworkDimension {
     let direction = if dims.network.include_direction {
-        e.direction
+        raw_direction
     } else {
         0
     };
     let port_label = if dims.network.include_port {
         if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            resolve_network_port_label(
-                client_type,
-                e.transport,
-                local_port(e),
-                remote_port(e),
+            let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
+                (src_port, dst_port)
+            } else {
+                (dst_port, src_port)
+            };
+            port_label_cache.resolve(
                 port_label_map,
-                port_label_cache,
+                client_type,
+                transport,
+                primary_port,
+                secondary_port,
             )
         } else {
             0
@@ -1396,53 +1401,46 @@ fn build_network_dimension_from_tcp_retransmit(
     dst_port: u16,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
-    build_network_dimension_from_tcp_retransmit_inner(
+    build_network_dimension_from_parts_uncached(
         pid,
         client_type,
+        Direction::TX as u8,
+        NetTransport::Tcp as u8,
         src_port,
         dst_port,
         dims,
-        None,
     )
 }
 
 #[inline(always)]
-fn build_network_dimension_from_tcp_retransmit_cached(
+fn build_network_dimension_from_parts_uncached(
     pid: u32,
     client_type: u8,
+    raw_direction: u8,
+    transport: u8,
     src_port: u16,
     dst_port: u16,
     dims: &DimensionsConfig,
-    port_label_cache: &mut PortLabelResolveCache,
 ) -> NetworkDimension {
-    build_network_dimension_from_tcp_retransmit_inner(
-        pid,
-        client_type,
-        src_port,
-        dst_port,
-        dims,
-        Some(port_label_cache),
-    )
-}
+    let direction = if dims.network.include_direction {
+        raw_direction
+    } else {
+        0
+    };
 
-#[inline(always)]
-fn build_network_dimension_from_tcp_retransmit_inner(
-    pid: u32,
-    client_type: u8,
-    src_port: u16,
-    dst_port: u16,
-    dims: &DimensionsConfig,
-    port_label_cache: Option<&mut PortLabelResolveCache>,
-) -> NetworkDimension {
     let port_label = if dims.network.include_port {
         if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            resolve_network_port_label(
+            let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
+                (src_port, dst_port)
+            } else {
+                (dst_port, src_port)
+            };
+            resolve_network_port_label_uncached(
                 client_type,
-                NetTransport::Tcp as u8,
-                src_port,
-                dst_port,
+                transport,
+                primary_port,
+                secondary_port,
                 port_label_map,
-                port_label_cache,
             )
         } else {
             0
@@ -1451,33 +1449,43 @@ fn build_network_dimension_from_tcp_retransmit_inner(
         0
     };
 
-    NetworkDimension::new(pid, client_type, port_label, 0)
+    NetworkDimension::new(pid, client_type, port_label, direction)
 }
 
 #[inline(always)]
-fn resolve_network_port_label(
+fn resolve_network_port_label_uncached(
     client_type: u8,
     transport: u8,
     primary_port: u16,
     secondary_port: u16,
     port_label_map: &crate::agent::ports::PortLabelMap,
-    port_label_cache: Option<&mut PortLabelResolveCache>,
 ) -> u8 {
-    if let Some(port_label_cache) = port_label_cache {
-        port_label_cache.resolve(
-            port_label_map,
-            client_type,
-            transport,
-            primary_port,
-            secondary_port,
-        )
-    } else {
-        match transport {
-            transport if transport == NetTransport::Tcp as u8 => {
-                port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
-            }
-            _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+    match transport {
+        transport if transport == NetTransport::Tcp as u8 => {
+            port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
         }
+        _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+    }
+}
+
+/// Extracts the local port from a network event.
+/// For TX (outbound), source is local. For RX (inbound), dest is local.
+#[cfg_attr(not(test), allow(dead_code))]
+fn local_port(e: &NetIOEvent) -> u16 {
+    if e.direction == Direction::TX as u8 {
+        e.src_port
+    } else {
+        e.dst_port
+    }
+}
+
+/// Extracts the peer/remote port from a network event.
+#[cfg_attr(not(test), allow(dead_code))]
+fn remote_port(e: &NetIOEvent) -> u16 {
+    if e.direction == Direction::TX as u8 {
+        e.dst_port
+    } else {
+        e.src_port
     }
 }
 
@@ -1499,25 +1507,6 @@ fn build_disk_dimension(
         },
         if dims.disk.include_rw { rw } else { 0 },
     )
-}
-
-/// Extracts the local port from a network event.
-/// For TX (outbound), source is local. For RX (inbound), dest is local.
-fn local_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX as u8 {
-        e.src_port
-    } else {
-        e.dst_port
-    }
-}
-
-/// Extracts the peer/remote port from a network event.
-fn remote_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX as u8 {
-        e.dst_port
-    } else {
-        e.src_port
-    }
 }
 
 /// Returns current monotonic clock value in nanoseconds.
