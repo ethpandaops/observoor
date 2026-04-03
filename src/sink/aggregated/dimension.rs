@@ -100,6 +100,15 @@ impl NetworkDimension {
     }
 
     #[inline(always)]
+    pub fn from_basic(basic: BasicDimension, port_label: u8, direction: u8) -> Self {
+        Self(
+            u64::from(basic.packed())
+                | (u64::from(port_label) << 40)
+                | (u64::from(direction) << 48),
+        )
+    }
+
+    #[inline(always)]
     pub fn pid(self) -> u32 {
         self.0 as u32
     }
@@ -132,6 +141,11 @@ impl TCPMetricsDimension {
     }
 
     #[inline(always)]
+    pub fn from_basic(basic: BasicDimension, port_label: u8) -> Self {
+        Self(u64::from(basic.packed()) | (u64::from(port_label) << 40))
+    }
+
+    #[inline(always)]
     pub fn pid(self) -> u32 {
         self.0 as u32
     }
@@ -156,6 +170,11 @@ impl DiskDimension {
     #[inline(always)]
     pub fn new(pid: u32, client_type: u8, device_id: u32, rw: u8) -> Self {
         Self(pack_disk(pid, client_type, device_id, rw))
+    }
+
+    #[inline(always)]
+    pub fn from_basic(basic: BasicDimension, device_id: u32, rw: u8) -> Self {
+        Self(u128::from(basic.packed()) | (u128::from(device_id) << 40) | (u128::from(rw) << 72))
     }
 
     #[inline(always)]
@@ -277,6 +296,15 @@ mod tests {
     }
 
     #[test]
+    fn test_network_dimension_from_basic_matches_new() {
+        let basic = BasicDimension::new(100, 1);
+        assert_eq!(
+            NetworkDimension::from_basic(basic, PortLabel::ElJsonRpc as u8, 1),
+            NetworkDimension::new(100, 1, PortLabel::ElJsonRpc as u8, 1)
+        );
+    }
+
+    #[test]
     fn test_cpu_core_dimension_as_map_key() {
         let mut map: HashMap<CpuCoreDimension, u32> = HashMap::new();
         let dim = CpuCoreDimension::new(100, 1, 7);
@@ -318,6 +346,15 @@ mod tests {
     }
 
     #[test]
+    fn test_tcp_metrics_dimension_from_basic_matches_new() {
+        let basic = BasicDimension::new(100, 1);
+        assert_eq!(
+            TCPMetricsDimension::from_basic(basic, PortLabel::ElP2PTcp as u8),
+            TCPMetricsDimension::new(100, 1, PortLabel::ElP2PTcp as u8)
+        );
+    }
+
+    #[test]
     fn test_disk_dimension_as_map_key() {
         let mut map: HashMap<DiskDimension, u32> = HashMap::new();
         let dim = DiskDimension::new(100, 1, 259, 0);
@@ -332,6 +369,15 @@ mod tests {
         assert_eq!(dim.client_type(), 1);
         assert_eq!(dim.device_id(), 259);
         assert_eq!(dim.rw(), 1);
+    }
+
+    #[test]
+    fn test_disk_dimension_from_basic_matches_new() {
+        let basic = BasicDimension::new(100, 1);
+        assert_eq!(
+            DiskDimension::from_basic(basic, 259, 1),
+            DiskDimension::new(100, 1, 259, 1)
+        );
     }
 
     #[test]

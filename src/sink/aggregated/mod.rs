@@ -580,8 +580,6 @@ impl AggregatedSink {
         scheduler_state: Option<&mut SchedulerWindowState>,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
-        let pid = event.raw.pid();
-        let client_type = event.raw.client_type();
         let basic_dim = BasicDimension::from_packed(event.raw.basic_dimension_key());
 
         match &event.typed {
@@ -619,8 +617,7 @@ impl AggregatedSink {
 
             TypedEvent::NetIO(e) => {
                 let net_dim = build_network_dimension_from_parts_cached(
-                    pid,
-                    client_type,
+                    basic_dim,
                     e.direction,
                     e.transport,
                     e.src_port,
@@ -633,8 +630,7 @@ impl AggregatedSink {
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
                 let net_dim = build_network_dimension_from_parts_cached(
-                    pid,
-                    client_type,
+                    basic_dim,
                     Direction::TX as u8,
                     NetTransport::Tcp as u8,
                     e.src_port,
@@ -647,8 +643,7 @@ impl AggregatedSink {
 
             TypedEvent::TcpRetransmit(e) => {
                 let net_dim = build_network_dimension_from_parts_cached(
-                    pid,
-                    client_type,
+                    basic_dim,
                     Direction::TX as u8,
                     NetTransport::Tcp as u8,
                     e.src_port,
@@ -665,12 +660,12 @@ impl AggregatedSink {
 
             TypedEvent::DiskIO(e) => {
                 let disk_dim =
-                    build_disk_dimension(pid, client_type, e.device_id, e.rw, dimensions);
+                    build_disk_dimension_from_basic(basic_dim, e.device_id, e.rw, dimensions);
                 buf.add_disk_io(disk_dim, e.latency_ns, e.bytes, e.queue_depth);
             }
 
             TypedEvent::BlockMerge(e) => {
-                let disk_dim = build_disk_dimension(pid, client_type, 0, e.rw, dimensions);
+                let disk_dim = build_disk_dimension_from_basic(basic_dim, 0, e.rw, dimensions);
                 buf.add_block_merge(disk_dim, e.bytes);
             }
 
@@ -1352,8 +1347,7 @@ fn build_network_dimension(
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
     build_network_dimension_from_parts_uncached(
-        pid,
-        client_type,
+        BasicDimension::new(pid, client_type),
         e.direction,
         e.transport,
         e.src_port,
@@ -1364,8 +1358,7 @@ fn build_network_dimension(
 
 #[inline(always)]
 fn build_network_dimension_from_parts_cached(
-    pid: u32,
-    client_type: u8,
+    basic: BasicDimension,
     raw_direction: u8,
     transport: u8,
     src_port: u16,
@@ -1387,7 +1380,7 @@ fn build_network_dimension_from_parts_cached(
             };
             port_label_cache.resolve(
                 port_label_map,
-                client_type,
+                basic.client_type(),
                 transport,
                 primary_port,
                 secondary_port,
@@ -1399,7 +1392,7 @@ fn build_network_dimension_from_parts_cached(
         0
     };
 
-    NetworkDimension::new(pid, client_type, port_label, direction)
+    NetworkDimension::from_basic(basic, port_label, direction)
 }
 
 /// Creates a NetworkDimension for TCP retransmit events.
@@ -1412,8 +1405,7 @@ fn build_network_dimension_from_tcp_retransmit(
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
     build_network_dimension_from_parts_uncached(
-        pid,
-        client_type,
+        BasicDimension::new(pid, client_type),
         Direction::TX as u8,
         NetTransport::Tcp as u8,
         src_port,
@@ -1424,8 +1416,7 @@ fn build_network_dimension_from_tcp_retransmit(
 
 #[inline(always)]
 fn build_network_dimension_from_parts_uncached(
-    pid: u32,
-    client_type: u8,
+    basic: BasicDimension,
     raw_direction: u8,
     transport: u8,
     src_port: u16,
@@ -1446,7 +1437,7 @@ fn build_network_dimension_from_parts_uncached(
                 (dst_port, src_port)
             };
             resolve_network_port_label_uncached(
-                client_type,
+                basic.client_type(),
                 transport,
                 primary_port,
                 secondary_port,
@@ -1459,7 +1450,7 @@ fn build_network_dimension_from_parts_uncached(
         0
     };
 
-    NetworkDimension::new(pid, client_type, port_label, direction)
+    NetworkDimension::from_basic(basic, port_label, direction)
 }
 
 #[inline(always)]
@@ -1500,6 +1491,7 @@ fn remote_port(e: &NetIOEvent) -> u16 {
 }
 
 /// Creates a DiskDimension based on config.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_disk_dimension(
     pid: u32,
     client_type: u8,
@@ -1507,9 +1499,18 @@ fn build_disk_dimension(
     rw: u8,
     dims: &DimensionsConfig,
 ) -> DiskDimension {
-    DiskDimension::new(
-        pid,
-        client_type,
+    build_disk_dimension_from_basic(BasicDimension::new(pid, client_type), device_id, rw, dims)
+}
+
+#[inline(always)]
+fn build_disk_dimension_from_basic(
+    basic: BasicDimension,
+    device_id: u32,
+    rw: u8,
+    dims: &DimensionsConfig,
+) -> DiskDimension {
+    DiskDimension::from_basic(
+        basic,
         if dims.disk.include_device {
             device_id
         } else {
