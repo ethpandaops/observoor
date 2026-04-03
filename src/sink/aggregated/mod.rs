@@ -41,7 +41,7 @@ type EventBatch = ParsedEventBatch;
 /// across the tracer -> sink handoff.
 const EVENT_BATCH_SIZE: usize = PARSED_EVENT_BATCH_SIZE;
 /// Keep roughly a 65,536-event queue depth, but in batch units.
-const EVENT_BATCH_CHANNEL_CAPACITY: usize = 8;
+const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 /// Drain a full bounded queue per wake to amortize `mpsc`/`select!` overhead
 /// under sustained tracer load without letting the event loop run unbounded.
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
