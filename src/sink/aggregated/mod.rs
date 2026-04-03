@@ -488,6 +488,21 @@ impl AggregatedSink {
         )
     }
 
+    /// Resets a reusable buffer for the next aggregation window while preserving allocations.
+    fn reset_buffer_from_state(state: &SharedState, buf: &mut Buffer, now: SystemTime, slot: u64) {
+        let system_cores =
+            u16::try_from(state.system_cores.load(Ordering::Relaxed)).unwrap_or(u16::MAX);
+        buf.reset(
+            now,
+            slot,
+            state.slot_start_time(),
+            state.cl_syncing.load(Ordering::Relaxed) == 1,
+            state.el_optimistic.load(Ordering::Relaxed) == 1,
+            state.el_offline.load(Ordering::Relaxed) == 1,
+            system_cores,
+        );
+    }
+
     /// Builds a sync-state row from current shared state.
     fn new_sync_state_row(state: &SharedState, now: SystemTime) -> SyncStateRow {
         SyncStateRow {
@@ -906,6 +921,8 @@ impl Sink for AggregatedSink {
             let mut scheduler_state = SchedulerWindowState::default();
             let mut port_label_cache = PortLabelResolveCache::default();
             let mut current_buf = initial_buf;
+            let mut reusable_buf =
+                AggregatedSink::new_buffer_from_state(&state, SystemTime::now(), 0);
 
             // Emit host specs once on startup, then on the configured ticker.
             {
@@ -1128,14 +1145,17 @@ impl Sink for AggregatedSink {
                     _ = ticker.tick() => {
                         let now = SystemTime::now();
                         let slot = state.current_slot.load(Ordering::Relaxed);
-                        let new_buf = AggregatedSink::new_buffer_from_state(
-                            &state, now, slot,
+                        AggregatedSink::reset_buffer_from_state(
+                            &state,
+                            &mut reusable_buf,
+                            now,
+                            slot,
                         );
-
-                        let mut old_buf = std::mem::replace(&mut current_buf, new_buf);
-                        scheduler_state.flush_running_to_boundary(&mut old_buf, monotonic_ns());
+                        std::mem::swap(&mut current_buf, &mut reusable_buf);
+                        scheduler_state
+                            .flush_running_to_boundary(&mut reusable_buf, monotonic_ns());
                         reusable_batch.metadata.updated_time = SystemTime::now();
-                        collector.collect_into(&old_buf, &mut reusable_batch);
+                        collector.collect_into(&reusable_buf, &mut reusable_batch);
                         flush_controller.process_tick(&mut reusable_batch);
                         if !reusable_batch.is_empty() {
                             #[cfg(feature = "bpf")]

@@ -188,6 +188,12 @@ impl<K, V> FastMap<K, V> {
     }
 
     #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.last_hit = None;
+        self.inner.clear();
+    }
+
+    #[inline(always)]
     pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
         self.inner.iter()
     }
@@ -451,6 +457,53 @@ impl Buffer {
             process_exit: fast_map_with_capacity(8),
             tcp_state_change: fast_map_with_capacity(8),
         }
+    }
+
+    /// Resets this buffer for a new aggregation window while preserving map allocations.
+    pub fn reset(
+        &mut self,
+        start_time: SystemTime,
+        wallclock_slot: u64,
+        wallclock_slot_start: SystemTime,
+        cl_syncing: bool,
+        el_optimistic: bool,
+        el_offline: bool,
+        system_cores: u16,
+    ) {
+        self.start_time = start_time;
+        self.wallclock_slot = wallclock_slot;
+        self.wallclock_slot_start = wallclock_slot_start;
+        self.cl_syncing = cl_syncing;
+        self.el_optimistic = el_optimistic;
+        self.el_offline = el_offline;
+        self.system_cores = system_cores;
+
+        self.syscall_read.clear();
+        self.syscall_write.clear();
+        self.syscall_futex.clear();
+        self.syscall_mmap.clear();
+        self.syscall_epoll_wait.clear();
+        self.syscall_fsync.clear();
+        self.syscall_fdatasync.clear();
+        self.syscall_pwrite.clear();
+        self.net_io.clear();
+        self.tcp_retransmit.clear();
+        self.tcp_tx.clear();
+        self.disk_io.clear();
+        self.block_merge.clear();
+        self.sched_on_cpu.clear();
+        self.cpu_on_core.clear();
+        self.sched_wait.clear();
+        self.page_fault_major.clear();
+        self.page_fault_minor.clear();
+        self.fd_ops.clear();
+        self.mem_reclaim.clear();
+        self.mem_compaction.clear();
+        self.swap_in.clear();
+        self.swap_out.clear();
+        self.oom_kill.clear();
+        self.process_exit.clear();
+        self.tcp_state_change.clear();
     }
 
     /// Adds a syscall latency event to the appropriate map.
@@ -811,5 +864,39 @@ mod tests {
 
         assert_eq!(map.get(&10), Some(&2));
         assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_buffer_reset_clears_aggregates_and_updates_metadata() {
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let slot_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12);
+        let mut buf = Buffer::new(start, 1, slot_start, false, false, false, 8);
+        let dim = BasicDimension::new(1, 1);
+
+        buf.add_syscall(EventType::SyscallRead, dim, 5_000);
+        buf.add_fd_open(dim);
+
+        let new_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        let new_slot_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(24);
+        buf.reset(new_start, 2, new_slot_start, true, true, true, 16);
+
+        assert_eq!(buf.start_time, new_start);
+        assert_eq!(buf.wallclock_slot, 2);
+        assert_eq!(buf.wallclock_slot_start, new_slot_start);
+        assert!(buf.cl_syncing);
+        assert!(buf.el_optimistic);
+        assert!(buf.el_offline);
+        assert_eq!(buf.system_cores, 16);
+        assert!(buf.syscall_read.is_empty());
+        assert!(buf.fd_ops.is_empty());
+
+        buf.add_syscall(EventType::SyscallRead, dim, 7_500);
+        let snap = buf
+            .syscall_read
+            .get(&dim)
+            .expect("entry exists after reset")
+            .snapshot();
+        assert_eq!(snap.count, 1);
+        assert_eq!(snap.sum, 7_500);
     }
 }
