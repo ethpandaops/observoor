@@ -565,48 +565,41 @@ impl AggregatedSink {
         scheduler_state: Option<&mut SchedulerWindowState>,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
-        let pid = event.raw.pid;
-        let client_type = event.raw.client_type;
+        let pid = event.raw.pid();
+        let client_type = event.raw.client_type();
+        let basic_dim = BasicDimension::from_packed(event.raw.basic_dimension_key());
 
         match &event.typed {
             TypedEvent::SyscallRead(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_read, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_read, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallWrite(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_write, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_write, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFutex(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_futex, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_futex, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallMmap(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_mmap, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_mmap, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallEpollWait(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_epoll_wait, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_epoll_wait, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFsync(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_fsync, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_fsync, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFdatasync(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_fdatasync, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_fdatasync, basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallPwrite(e) => {
-                let dim = BasicDimension::new(pid, client_type);
-                record_latency(&mut buf.syscall_pwrite, dim, e.latency_ns);
+                record_latency(&mut buf.syscall_pwrite, basic_dim, e.latency_ns);
             }
 
             TypedEvent::NetIO(e) => {
@@ -652,7 +645,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::TcpState => {
-                buf.add_tcp_state_change(BasicDimension::new(pid, client_type));
+                buf.add_tcp_state_change(basic_dim);
             }
 
             TypedEvent::DiskIO(e) => {
@@ -667,22 +660,21 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                let dim = BasicDimension::new(pid, client_type);
                 if let Some(scheduler_state) = scheduler_state {
                     scheduler_state.handle_sched_switch(
                         buf,
                         event.raw.tid,
                         event.raw.timestamp_ns,
-                        dim,
+                        basic_dim,
                         e,
                     );
                 } else {
-                    buf.add_sched_switch(dim, e.on_cpu_ns, e.cpu_id);
+                    buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
                 }
             }
 
             TypedEvent::SchedCombined(e) => {
-                let prev_dim = BasicDimension::new(pid, client_type);
+                let prev_dim = basic_dim;
                 let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
                 let switch = crate::tracer::event::SchedEvent {
                     on_cpu_ns: e.on_cpu_ns,
@@ -717,55 +709,53 @@ impl AggregatedSink {
             }
 
             TypedEvent::SchedRunqueue(e) => {
-                let dim = BasicDimension::new(pid, client_type);
                 if let Some(scheduler_state) = scheduler_state {
                     scheduler_state.handle_sched_runqueue(
                         buf,
                         event.raw.tid,
                         event.raw.timestamp_ns,
-                        dim,
+                        basic_dim,
                         e,
                     );
                 } else {
-                    buf.add_sched_runqueue(dim, e.runqueue_ns, e.off_cpu_ns);
+                    buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
                 }
             }
 
             TypedEvent::PageFault(e) => {
-                buf.add_page_fault(BasicDimension::new(pid, client_type), e.major);
+                buf.add_page_fault(basic_dim, e.major);
             }
 
             TypedEvent::FDOpen => {
-                buf.add_fd_open(BasicDimension::new(pid, client_type));
+                buf.add_fd_open(basic_dim);
             }
 
             TypedEvent::FDClose => {
-                buf.add_fd_close(BasicDimension::new(pid, client_type));
+                buf.add_fd_close(basic_dim);
             }
 
             TypedEvent::MemReclaim(e) => {
-                buf.add_mem_reclaim(BasicDimension::new(pid, client_type), e.duration_ns);
+                buf.add_mem_reclaim(basic_dim, e.duration_ns);
             }
 
             TypedEvent::MemCompaction(e) => {
-                buf.add_mem_compaction(BasicDimension::new(pid, client_type), e.duration_ns);
+                buf.add_mem_compaction(basic_dim, e.duration_ns);
             }
 
             TypedEvent::SwapIn(e) => {
-                buf.add_swap_in(BasicDimension::new(pid, client_type), e.pages);
+                buf.add_swap_in(basic_dim, e.pages);
             }
 
             TypedEvent::SwapOut(e) => {
-                buf.add_swap_out(BasicDimension::new(pid, client_type), e.pages);
+                buf.add_swap_out(basic_dim, e.pages);
             }
 
             TypedEvent::OOMKill(_) => {
-                buf.add_oom_kill(BasicDimension::new(pid, client_type));
+                buf.add_oom_kill(basic_dim);
             }
 
             TypedEvent::ProcessExit(_) => {
-                let dim = BasicDimension::new(pid, client_type);
-                buf.add_process_exit(dim);
+                buf.add_process_exit(basic_dim);
                 if let Some(scheduler_state) = scheduler_state {
                     scheduler_state.handle_process_exit(buf, event.raw.tid, event.raw.timestamp_ns);
                 }
@@ -1535,13 +1525,7 @@ mod tests {
 
     fn make_event(event_type: EventType, typed: TypedEvent) -> ParsedEvent {
         ParsedEvent {
-            raw: Event {
-                timestamp_ns: 0,
-                pid: 123,
-                tid: 123,
-                event_type,
-                client_type: ClientType::Geth as u8,
-            },
+            raw: Event::new(0, 123, 123, event_type, ClientType::Geth as u8),
             typed,
         }
     }
@@ -1554,13 +1538,7 @@ mod tests {
         typed: TypedEvent,
     ) -> ParsedEvent {
         ParsedEvent {
-            raw: Event {
-                timestamp_ns,
-                pid,
-                tid,
-                event_type,
-                client_type: ClientType::Geth as u8,
-            },
+            raw: Event::new(timestamp_ns, pid, tid, event_type, ClientType::Geth as u8),
             typed,
         }
     }

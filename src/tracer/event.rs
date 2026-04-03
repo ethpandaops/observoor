@@ -346,11 +346,43 @@ impl fmt::Display for NetTransport {
 #[allow(dead_code)]
 pub struct Event {
     pub timestamp_ns: u64,
-    pub pid: u32,
+    basic_dimension: u64,
     pub tid: u32,
     pub event_type: EventType,
+}
+
+impl Event {
+    #[inline(always)]
+    pub fn new(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
+            tid,
+            event_type,
+        }
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.basic_dimension as u32
+    }
+
     /// Validated raw `ClientType` discriminant from the ring buffer.
-    pub client_type: u8,
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.basic_dimension >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn basic_dimension_key(self) -> u64 {
+        self.basic_dimension
+    }
 }
 
 /// Syscall event with latency measurement.

@@ -269,13 +269,13 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         }
     };
 
-    let event = Event {
-        timestamp_ns: u64::from_le(header.timestamp_ns),
-        pid: u32::from_le(header.pid),
-        tid: u32::from_le(header.tid),
+    let event = Event::new(
+        u64::from_le(header.timestamp_ns),
+        u32::from_le(header.pid),
+        u32::from_le(header.tid),
         event_type,
-        client_type: client_type_raw,
-    };
+        client_type_raw,
+    );
 
     Ok(ParsedEvent { raw: event, typed })
 }
@@ -549,10 +549,10 @@ mod tests {
 
     fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
-        assert_eq!(event.pid, pid);
+        assert_eq!(event.pid(), pid);
         assert_eq!(event.tid, tid);
         assert_eq!(event.event_type, et);
-        assert_eq!(event.client_type, ct);
+        assert_eq!(event.client_type(), ct);
     }
 
     // -- Error cases --
@@ -857,7 +857,7 @@ mod tests {
         let TypedEvent::FDOpen = &parsed.typed else {
             panic!("expected FDOpen");
         };
-        assert_eq!(parsed.raw.pid, 108);
+        assert_eq!(parsed.raw.pid(), 108);
     }
 
     #[test]

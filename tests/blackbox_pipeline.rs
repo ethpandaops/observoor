@@ -177,7 +177,9 @@ fn process_exit_payload(pid: u32, tid: u32, exit_code: u32) -> Vec<u8> {
 }
 
 fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
-    let basic_dim = BasicDimension::new(event.raw.pid, event.raw.client_type);
+    let pid = event.raw.pid();
+    let client_type = event.raw.client_type();
+    let basic_dim = BasicDimension::new(pid, client_type);
 
     match &event.typed {
         TypedEvent::SyscallRead(e) => {
@@ -205,23 +207,21 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             buf.add_syscall(EventType::SyscallPwrite, basic_dim, e.latency_ns);
         }
         TypedEvent::DiskIO(e) => {
-            let disk = DiskDimension::new(event.raw.pid, event.raw.client_type, e.device_id, e.rw);
+            let disk = DiskDimension::new(pid, client_type, e.device_id, e.rw);
             buf.add_disk_io(disk, e.latency_ns, e.bytes, e.queue_depth);
         }
         TypedEvent::NetIO(e) => {
             // In production, port_label is resolved via config's port_label_map.
             // Here we use 0 (Unknown) since we don't have a port map.
-            let net = NetworkDimension::new(event.raw.pid, event.raw.client_type, 0, e.direction);
+            let net = NetworkDimension::new(pid, client_type, 0, e.direction);
             buf.add_net_io(net, i64::from(e.bytes));
         }
         TypedEvent::NetIOTcpTxMetrics(e) => {
-            let net =
-                NetworkDimension::new(event.raw.pid, event.raw.client_type, 0, Direction::TX as u8);
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
             buf.add_net_io_with_tcp_metrics(net, i64::from(e.bytes), e.srtt_us, e.cwnd);
         }
         TypedEvent::TcpRetransmit(e) => {
-            let net =
-                NetworkDimension::new(event.raw.pid, event.raw.client_type, 0, Direction::TX as u8);
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
@@ -245,7 +245,7 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             buf.add_fd_close(basic_dim);
         }
         TypedEvent::BlockMerge(e) => {
-            let disk = DiskDimension::new(event.raw.pid, event.raw.client_type, 0, e.rw);
+            let disk = DiskDimension::new(pid, client_type, 0, e.rw);
             buf.add_block_merge(disk, e.bytes);
         }
         TypedEvent::TcpState => {

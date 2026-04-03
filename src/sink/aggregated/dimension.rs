@@ -36,6 +36,11 @@ impl BasicDimension {
     }
 
     #[inline(always)]
+    pub(crate) fn from_packed(packed: u64) -> Self {
+        Self(packed)
+    }
+
+    #[inline(always)]
     pub fn new(pid: u32, client_type: u8) -> Self {
         Self(pack_basic(pid, client_type))
     }

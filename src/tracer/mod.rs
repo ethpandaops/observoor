@@ -82,7 +82,7 @@ impl ParsedEventBatch {
 
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
-        let client_idx = usize::from(event.raw.client_type);
+        let client_idx = usize::from(event.raw.client_type());
         debug_assert!(client_idx < CLIENT_TYPE_CARDINALITY);
 
         // Safety: the parser rejects out-of-range client types before events
@@ -197,23 +197,11 @@ mod tests {
         let mut batch = ParsedEventBatch::with_capacity(2);
 
         batch.push(ParsedEvent {
-            raw: Event {
-                timestamp_ns: 1,
-                pid: 100,
-                tid: 100,
-                event_type: EventType::FDOpen,
-                client_type: 1,
-            },
+            raw: Event::new(1, 100, 100, EventType::FDOpen, 1),
             typed: TypedEvent::FDOpen,
         });
         batch.push(ParsedEvent {
-            raw: Event {
-                timestamp_ns: 2,
-                pid: 200,
-                tid: 200,
-                event_type: EventType::FDClose,
-                client_type: 1,
-            },
+            raw: Event::new(2, 200, 200, EventType::FDClose, 1),
             typed: TypedEvent::FDClose,
         });
 
@@ -233,13 +221,7 @@ mod tests {
         let mut batch = ParsedEventBatch::with_capacity(1);
 
         batch.push(ParsedEvent {
-            raw: Event {
-                timestamp_ns: 1,
-                pid: 100,
-                tid: 101,
-                event_type: EventType::SchedSwitch,
-                client_type: 1,
-            },
+            raw: Event::new(1, 100, 101, EventType::SchedSwitch, 1),
             typed: TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 50,
                 voluntary: false,
@@ -268,13 +250,7 @@ mod tests {
         let mut batch = ParsedEventBatch::checkout(&pool);
 
         batch.push(ParsedEvent {
-            raw: Event {
-                timestamp_ns: 1,
-                pid: 100,
-                tid: 100,
-                event_type: EventType::FDOpen,
-                client_type: 1,
-            },
+            raw: Event::new(1, 100, 100, EventType::FDOpen, 1),
             typed: TypedEvent::FDOpen,
         });
 
