@@ -73,14 +73,13 @@ struct net_io_event {
     __u8  pad[3];
 };
 
-// TCP TX network I/O event with inline metrics (44 bytes total).
+// TCP TX network I/O event with inline metrics (40 bytes total).
+// Transport is implicitly TCP for this specialized event type.
 struct net_io_metrics_event {
     struct event_header hdr;
     __u32 bytes;
     __u16 sport;
     __u16 dport;
-    __u8  transport;    // 0=TCP, 1=UDP
-    __u8  pad[3];
     __u32 srtt_us;      // Smoothed RTT
     __u32 snd_cwnd;     // Congestion window
 };

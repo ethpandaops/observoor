@@ -56,6 +56,9 @@ struct RawNetIOPayload {
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct RawNetIOMetricsPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
     srtt_us: u32,
     cwnd: u32,
 }
@@ -341,8 +344,21 @@ fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     })
 }
 
-/// Net I/O TX event: type 7. Common payload: 12 bytes, optional TCP metrics tail: 8 bytes.
+/// Net I/O TX event: type 7. Payload is either:
+/// - 12-byte generic TX data with an explicit transport byte, or
+/// - 16-byte TCP metrics data where transport is implied by the payload shape.
 fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
+    if data.len() >= size_of::<RawNetIOMetricsPayload>() {
+        let metrics = read_payload::<RawNetIOMetricsPayload>(data, "net IO event")?;
+        return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+            bytes: u32::from_le(metrics.bytes),
+            src_port: u16::from_le(metrics.src_port),
+            dst_port: u16::from_le(metrics.dst_port),
+            srtt_us: u32::from_le(metrics.srtt_us),
+            cwnd: u32::from_le(metrics.cwnd),
+        }));
+    }
+
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = raw.transport;
     if transport_raw > NetTransport::Udp as u8 {
@@ -352,31 +368,10 @@ fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
         });
     }
 
-    let bytes = u32::from_le(raw.bytes);
-    let src_port = u16::from_le(raw.src_port);
-    let dst_port = u16::from_le(raw.dst_port);
-
-    if transport_raw == NetTransport::Tcp as u8
-        && data.len() >= size_of::<RawNetIOPayload>() + size_of::<RawNetIOMetricsPayload>()
-    {
-        let metrics = read_payload::<RawNetIOMetricsPayload>(
-            // Safety: length check above guarantees the metrics tail exists.
-            unsafe { data.get_unchecked(size_of::<RawNetIOPayload>()..) },
-            "net IO event",
-        )?;
-        return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
-            bytes,
-            src_port,
-            dst_port,
-            srtt_us: u32::from_le(metrics.srtt_us),
-            cwnd: u32::from_le(metrics.cwnd),
-        }));
-    }
-
     Ok(TypedEvent::NetIO(NetIOEvent {
-        bytes,
-        src_port,
-        dst_port,
+        bytes: u32::from_le(raw.bytes),
+        src_port: u16::from_le(raw.src_port),
+        dst_port: u16::from_le(raw.dst_port),
         direction: Direction::TX as u8,
         transport: transport_raw,
     }))
@@ -718,8 +713,6 @@ mod tests {
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&8080u16.to_le_bytes()); // sport
         data.extend_from_slice(&9090u16.to_le_bytes()); // dport
-        data.push(0); // TCP
-        data.extend_from_slice(&[0u8; 3]); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
 

@@ -63,9 +63,6 @@ fn net_payload() -> Vec<u8> {
     data.extend_from_slice(&1_500u32.to_le_bytes());
     data.extend_from_slice(&30_303u16.to_le_bytes());
     data.extend_from_slice(&9_000u16.to_le_bytes());
-    data.push(0);
-    data.push(1);
-    data.extend_from_slice(&[0u8; 2]);
     data.extend_from_slice(&95u32.to_le_bytes());
     data.extend_from_slice(&128_000u32.to_le_bytes());
     data

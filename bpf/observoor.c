@@ -740,8 +740,6 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
-    e->transport = val->transport;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
     e->srtt_us = val->srtt_us;
     e->snd_cwnd = val->snd_cwnd;
 

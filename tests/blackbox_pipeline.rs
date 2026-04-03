@@ -92,7 +92,7 @@ fn net_payload(
     bytes: u32,
     src_port: u16,
     dst_port: u16,
-    direction: Direction,
+    _direction: Direction,
     transport: NetTransport,
     has_metrics: bool,
     srtt_us: u32,
@@ -102,12 +102,14 @@ fn net_payload(
     data.extend_from_slice(&bytes.to_le_bytes());
     data.extend_from_slice(&src_port.to_le_bytes());
     data.extend_from_slice(&dst_port.to_le_bytes());
-    data.push(direction as u8);
-    data.push(u8::from(has_metrics));
-    data.push(transport as u8);
-    data.push(0);
-    data.extend_from_slice(&srtt_us.to_le_bytes());
-    data.extend_from_slice(&cwnd.to_le_bytes());
+    if event_type == EventType::NetTX && has_metrics {
+        debug_assert_eq!(transport, NetTransport::Tcp);
+        data.extend_from_slice(&srtt_us.to_le_bytes());
+        data.extend_from_slice(&cwnd.to_le_bytes());
+    } else {
+        data.push(transport as u8);
+        data.extend_from_slice(&[0u8; 3]);
+    }
     data
 }
 
