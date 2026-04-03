@@ -6,7 +6,7 @@ use std::fs;
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
-use super::aggregate::{CounterAggregate, LatencyAggregate};
+use super::aggregate::{CountAggregate, CounterAggregate, CounterSnapshot, LatencyAggregate};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
 use super::metric::{
@@ -79,6 +79,24 @@ struct EventSamplingMetadata {
 
 fn map_len<K, V>(map: &FastMap<K, V>) -> usize {
     map.len()
+}
+
+trait BasicCounterAggregate {
+    fn snapshot(&self) -> CounterSnapshot;
+}
+
+impl BasicCounterAggregate for CounterAggregate {
+    #[inline(always)]
+    fn snapshot(&self) -> CounterSnapshot {
+        CounterAggregate::snapshot(self)
+    }
+}
+
+impl BasicCounterAggregate for CountAggregate {
+    #[inline(always)]
+    fn snapshot(&self) -> CounterSnapshot {
+        CountAggregate::snapshot(self)
+    }
 }
 
 #[cfg(feature = "bpf")]
@@ -564,7 +582,7 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(EventType, &str, &FastMap<BasicDimension, CounterAggregate>)] = &[
+        let count_only_maps: &[(EventType, &str, &FastMap<BasicDimension, CountAggregate>)] = &[
             (
                 EventType::PageFault,
                 "page_fault_major",
@@ -575,8 +593,6 @@ impl Collector {
                 "page_fault_minor",
                 &buf.page_fault_minor,
             ),
-            (EventType::SwapIn, "swap_in", &buf.swap_in),
-            (EventType::SwapOut, "swap_out", &buf.swap_out),
             (EventType::OOMKill, "oom_kill", &buf.oom_kill),
             (EventType::FDOpen, "fd_open", &buf.fd_open),
             (EventType::FDClose, "fd_close", &buf.fd_close),
@@ -588,30 +604,51 @@ impl Collector {
             ),
         ];
 
-        for &(event_type, name, map) in maps {
-            let sampling = self.sampling_for_event(event_type);
-            for (dim, aggregate) in map.iter() {
-                let snap = aggregate.snapshot();
-                if snap.count == 0 {
-                    continue;
-                }
+        for &(event_type, name, map) in count_only_maps {
+            self.collect_basic_counter_map(batch, window, slot, event_type, name, map);
+        }
 
-                batch.counter.push(CounterMetric {
-                    metric_type: name,
-                    window,
-                    slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: None,
-                    rw: None,
-                    port_label: None,
-                    direction: None,
-                    sampling_mode: sampling.mode,
-                    sampling_rate: sampling.rate,
-                    sum: snap.sum,
-                    count: snap.count,
-                });
+        let value_maps: &[(EventType, &str, &FastMap<BasicDimension, CounterAggregate>)] = &[
+            (EventType::SwapIn, "swap_in", &buf.swap_in),
+            (EventType::SwapOut, "swap_out", &buf.swap_out),
+        ];
+
+        for &(event_type, name, map) in value_maps {
+            self.collect_basic_counter_map(batch, window, slot, event_type, name, map);
+        }
+    }
+
+    fn collect_basic_counter_map<A: BasicCounterAggregate>(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        event_type: EventType,
+        name: &'static str,
+        map: &FastMap<BasicDimension, A>,
+    ) {
+        let sampling = self.sampling_for_event(event_type);
+        for (dim, aggregate) in map.iter() {
+            let snap = aggregate.snapshot();
+            if snap.count == 0 {
+                continue;
             }
+
+            batch.counter.push(CounterMetric {
+                metric_type: name,
+                window,
+                slot,
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
+                device_id: None,
+                rw: None,
+                port_label: None,
+                direction: None,
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
         }
     }
 

@@ -10,7 +10,8 @@ use hashbrown::{
 use crate::tracer::event::EventType;
 
 use super::aggregate::{
-    CounterAggregate, DiskAggregate, LatencyAggregate, SchedWaitAggregate, TcpTxAggregate,
+    CountAggregate, CounterAggregate, DiskAggregate, LatencyAggregate, SchedWaitAggregate,
+    TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -240,7 +241,7 @@ where
 }
 
 #[inline(always)]
-fn add_counter_count<K>(map: &mut FastMap<K, CounterAggregate>, key: K, count: u32)
+fn add_count_only<K>(map: &mut FastMap<K, CountAggregate>, key: K, count: u32)
 where
     K: FastMapKey,
 {
@@ -337,22 +338,22 @@ pub struct Buffer {
     pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
     pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
 
-    // --- Page faults (BasicDimension -> CounterAggregate) ---
-    pub page_fault_major: FastMap<BasicDimension, CounterAggregate>,
-    pub page_fault_minor: FastMap<BasicDimension, CounterAggregate>,
+    // --- Page faults (BasicDimension -> CountAggregate) ---
+    pub page_fault_major: FastMap<BasicDimension, CountAggregate>,
+    pub page_fault_minor: FastMap<BasicDimension, CountAggregate>,
 
-    // --- FD operations (BasicDimension -> CounterAggregate) ---
-    pub fd_open: FastMap<BasicDimension, CounterAggregate>,
-    pub fd_close: FastMap<BasicDimension, CounterAggregate>,
+    // --- FD operations (BasicDimension -> CountAggregate) ---
+    pub fd_open: FastMap<BasicDimension, CountAggregate>,
+    pub fd_close: FastMap<BasicDimension, CountAggregate>,
 
     // --- Memory pressure ---
     pub mem_reclaim: FastMap<BasicDimension, LatencyAggregate>,
     pub mem_compaction: FastMap<BasicDimension, LatencyAggregate>,
     pub swap_in: FastMap<BasicDimension, CounterAggregate>,
     pub swap_out: FastMap<BasicDimension, CounterAggregate>,
-    pub oom_kill: FastMap<BasicDimension, CounterAggregate>,
-    pub process_exit: FastMap<BasicDimension, CounterAggregate>,
-    pub tcp_state_change: FastMap<BasicDimension, CounterAggregate>,
+    pub oom_kill: FastMap<BasicDimension, CountAggregate>,
+    pub process_exit: FastMap<BasicDimension, CountAggregate>,
+    pub tcp_state_change: FastMap<BasicDimension, CountAggregate>,
 }
 
 impl Buffer {
@@ -508,20 +509,20 @@ impl Buffer {
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
         if major {
-            add_counter_count(&mut self.page_fault_major, dim, 1);
+            add_count_only(&mut self.page_fault_major, dim, 1);
         } else {
-            add_counter_count(&mut self.page_fault_minor, dim, 1);
+            add_count_only(&mut self.page_fault_minor, dim, 1);
         }
     }
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        add_counter_count(&mut self.fd_open, dim, 1);
+        add_count_only(&mut self.fd_open, dim, 1);
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        add_counter_count(&mut self.fd_close, dim, 1);
+        add_count_only(&mut self.fd_close, dim, 1);
     }
 
     /// Adds a memory reclaim event.
@@ -546,17 +547,17 @@ impl Buffer {
 
     /// Adds an OOM kill event.
     pub fn add_oom_kill(&mut self, dim: BasicDimension) {
-        add_counter_count(&mut self.oom_kill, dim, 1);
+        add_count_only(&mut self.oom_kill, dim, 1);
     }
 
     /// Adds a process exit event.
     pub fn add_process_exit(&mut self, dim: BasicDimension) {
-        add_counter_count(&mut self.process_exit, dim, 1);
+        add_count_only(&mut self.process_exit, dim, 1);
     }
 
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
-        add_counter_count(&mut self.tcp_state_change, dim, 1);
+        add_count_only(&mut self.tcp_state_change, dim, 1);
     }
 }
 

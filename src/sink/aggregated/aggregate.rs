@@ -109,6 +109,38 @@ impl Default for CounterAggregate {
     }
 }
 
+/// Tracks only the count for counter metrics whose exported sum is always zero.
+/// Used for count-only events like FD operations and page faults.
+pub struct CountAggregate {
+    count: u32,
+}
+
+impl CountAggregate {
+    /// Creates a new count-only aggregate.
+    pub fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    /// Increments the count by n.
+    pub fn add_count(&mut self, n: u32) {
+        self.count += n;
+    }
+
+    /// Returns a point-in-time snapshot with a fixed zero sum.
+    pub fn snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.count,
+            sum: 0,
+        }
+    }
+}
+
+impl Default for CountAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Point-in-time view of counter statistics.
 #[derive(Debug, Clone)]
 pub struct CounterSnapshot {
@@ -426,6 +458,25 @@ mod tests {
     #[test]
     fn test_counter_aggregate_empty_snapshot() {
         let agg = CounterAggregate::new();
+        let snap = agg.snapshot();
+        assert_eq!(snap.count, 0);
+        assert_eq!(snap.sum, 0);
+    }
+
+    #[test]
+    fn test_count_aggregate_add_count() {
+        let mut agg = CountAggregate::new();
+        agg.add_count(5);
+        agg.add_count(3);
+
+        let snap = agg.snapshot();
+        assert_eq!(snap.count, 8);
+        assert_eq!(snap.sum, 0);
+    }
+
+    #[test]
+    fn test_count_aggregate_empty_snapshot() {
+        let agg = CountAggregate::new();
         let snap = agg.snapshot();
         assert_eq!(snap.count, 0);
         assert_eq!(snap.sum, 0);
