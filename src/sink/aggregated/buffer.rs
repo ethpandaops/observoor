@@ -575,11 +575,13 @@ impl Buffer {
 
     /// Adds per-core on-CPU time used for utilization aggregation.
     pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
-        add_counter_value(
-            &mut self.cpu_on_core,
-            CpuCoreDimension::from_basic(dim, cpu_id),
-            on_cpu_ns as i64,
-        );
+        self.add_cpu_on_core_dim(CpuCoreDimension::from_basic(dim, cpu_id), on_cpu_ns);
+    }
+
+    /// Adds per-core on-CPU time using an already packed core dimension.
+    #[inline(always)]
+    pub fn add_cpu_on_core_dim(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
+        add_counter_value(&mut self.cpu_on_core, dim, on_cpu_ns as i64);
     }
 
     /// Adds a scheduler switch event (on-CPU time).

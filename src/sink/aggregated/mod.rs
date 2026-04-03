@@ -29,7 +29,7 @@ use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 use self::buffer::{record_latency, Buffer};
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{BasicDimension, DiskDimension, NetworkDimension};
+use self::dimension::{BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
@@ -88,8 +88,9 @@ struct SlotRotation {
 
 #[derive(Clone, Copy, Debug)]
 struct RunningThread {
-    dim: BasicDimension,
-    cpu_id: u32,
+    // Scheduler events close and flush the same running slice repeatedly, so
+    // cache the packed per-core dimension once on switch-in.
+    cpu_dim: CpuCoreDimension,
     running_since_ns: u64,
 }
 
@@ -302,7 +303,7 @@ impl SchedulerWindowState {
                 continue;
             }
             let delta_ns = boundary_ns - running.running_since_ns;
-            buf.add_cpu_on_core(running.dim, running.cpu_id, delta_ns);
+            buf.add_cpu_on_core_dim(running.cpu_dim, delta_ns);
             running.running_since_ns = boundary_ns;
         }
     }
@@ -320,11 +321,7 @@ impl SchedulerWindowState {
         if let Some(idx) = self.running_by_tid.find_index(tid) {
             let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
             if timestamp_ns > running.running_since_ns {
-                buf.add_cpu_on_core(
-                    running.dim,
-                    running.cpu_id,
-                    timestamp_ns - running.running_since_ns,
-                );
+                buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
                 self.running_by_tid.swap_remove_entry(idx);
                 return;
             }
@@ -356,15 +353,14 @@ impl SchedulerWindowState {
         buf.add_sched_runqueue(dim, rq.runqueue_ns, rq.off_cpu_ns);
 
         let next_running = RunningThread {
-            dim,
-            cpu_id: rq.cpu_id,
+            cpu_dim: CpuCoreDimension::from_basic(dim, rq.cpu_id),
             running_since_ns: timestamp_ns,
         };
 
         if let Some(idx) = self.running_by_tid.find_index(tid) {
             let prev = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
             if timestamp_ns > prev.running_since_ns {
-                buf.add_cpu_on_core(prev.dim, prev.cpu_id, timestamp_ns - prev.running_since_ns);
+                buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
             }
             // Only move state forward (or replace at same instant).
             if timestamp_ns >= prev.running_since_ns {
@@ -379,11 +375,7 @@ impl SchedulerWindowState {
         if let Some(idx) = self.running_by_tid.find_index(tid) {
             let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
             if timestamp_ns > running.running_since_ns {
-                buf.add_cpu_on_core(
-                    running.dim,
-                    running.cpu_id,
-                    timestamp_ns - running.running_since_ns,
-                );
+                buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
             }
 
             if timestamp_ns >= running.running_since_ns {
@@ -1583,28 +1575,26 @@ mod tests {
     #[test]
     fn test_running_thread_store_repairs_stale_cached_index() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
         store.entries.push((
             10,
             RunningThread {
-                dim,
-                cpu_id: 0,
+                cpu_dim: cpu_dim(0),
                 running_since_ns: 100,
             },
         ));
         store.entries.push((
             20,
             RunningThread {
-                dim,
-                cpu_id: 1,
+                cpu_dim: cpu_dim(1),
                 running_since_ns: 200,
             },
         ));
         store.entries.push((
             30,
             RunningThread {
-                dim,
-                cpu_id: 2,
+                cpu_dim: cpu_dim(2),
                 running_since_ns: 300,
             },
         ));
@@ -1620,28 +1610,26 @@ mod tests {
     #[test]
     fn test_running_thread_store_keeps_cache_coherent_on_insert_and_remove() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
         store.push_entry(
             10,
             RunningThread {
-                dim,
-                cpu_id: 0,
+                cpu_dim: cpu_dim(0),
                 running_since_ns: 100,
             },
         );
         store.push_entry(
             20,
             RunningThread {
-                dim,
-                cpu_id: 1,
+                cpu_dim: cpu_dim(1),
                 running_since_ns: 200,
             },
         );
         store.push_entry(
             30,
             RunningThread {
-                dim,
-                cpu_id: 2,
+                cpu_dim: cpu_dim(2),
                 running_since_ns: 300,
             },
         );
