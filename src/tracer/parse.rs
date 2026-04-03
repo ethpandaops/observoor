@@ -75,8 +75,6 @@ struct RawSchedCombinedPayload {
     off_cpu_ns: u64,
     next_pid: u32,
     next_tid: u32,
-    next_client_type: u8,
-    _pad: [u8; 3],
 }
 
 #[repr(C)]
@@ -117,7 +115,7 @@ struct RawSwapPayload {
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
-const SCHED_COMBINED_PAYLOAD_SIZE: usize = 36;
+const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -436,13 +434,13 @@ fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, Parse
     })
 }
 
-/// Combined scheduler switch-out + switch-in payload: 36 bytes.
+/// Combined scheduler switch-out + switch-in payload: 32 bytes.
 fn parse_sched_combined(
     header: &RawEventHeader,
     data: &[u8],
 ) -> Result<SchedCombinedEvent, ParseError> {
     let raw = read_payload::<RawSchedCombinedPayload>(data, "sched combined event")?;
-    let next_client_type = raw.next_client_type;
+    let next_client_type = header.pad[5];
     if next_client_type > MAX_CLIENT_TYPE as u8 {
         return Err(ParseError::UnknownClientType {
             raw: next_client_type,
@@ -801,10 +799,9 @@ mod tests {
         data.extend_from_slice(&70_000u64.to_le_bytes());
         data.extend_from_slice(&303u32.to_le_bytes());
         data.extend_from_slice(&404u32.to_le_bytes());
-        data.push(2);
-        data.extend_from_slice(&[0u8; 3]);
         data[HEADER_PAD_OFFSET] = 1;
         set_header_pad_u32(&mut data, 1, 15);
+        data[HEADER_PAD_OFFSET + 5] = 2;
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::SchedCombined(e) = &parsed.typed else {

@@ -1107,13 +1107,12 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             __builtin_memset(combo->hdr.pad, 0, sizeof(combo->hdr.pad));
             combo->hdr.pad[0] = (ctx->prev_state == 0) ? 1 : 0;
             encode_u32_le(&combo->hdr.pad[1], cpu_id);
+            combo->hdr.pad[5] = next_info->client_type;
             combo->on_cpu_ns = on_cpu_ns;
             combo->runqueue_ns = runqueue_ns;
             combo->off_cpu_ns = offcpu_ns;
             combo->next_pid = next_info->pid;
             combo->next_tid = next_tid;
-            combo->next_client_type = next_info->client_type;
-            __builtin_memset(combo->pad, 0, sizeof(combo->pad));
             bpf_ringbuf_submit(combo, 0);
             return 0;
         }
