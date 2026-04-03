@@ -141,6 +141,58 @@ impl Default for CountAggregate {
     }
 }
 
+/// Tracks FD open/close counters behind a single per-dimension map entry.
+pub struct FdAggregate {
+    open_count: u32,
+    close_count: u32,
+}
+
+impl FdAggregate {
+    /// Creates a new FD aggregate.
+    pub fn new() -> Self {
+        Self {
+            open_count: 0,
+            close_count: 0,
+        }
+    }
+
+    /// Records one FD open event.
+    #[inline(always)]
+    pub fn record_open(&mut self) {
+        self.open_count += 1;
+    }
+
+    /// Records one FD close event.
+    #[inline(always)]
+    pub fn record_close(&mut self) {
+        self.close_count += 1;
+    }
+
+    /// Returns a point-in-time snapshot of FD opens.
+    #[inline(always)]
+    pub fn open_snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.open_count,
+            sum: 0,
+        }
+    }
+
+    /// Returns a point-in-time snapshot of FD closes.
+    #[inline(always)]
+    pub fn close_snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.close_count,
+            sum: 0,
+        }
+    }
+}
+
+impl Default for FdAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Point-in-time view of counter statistics.
 #[derive(Debug, Clone)]
 pub struct CounterSnapshot {

@@ -356,8 +356,7 @@ impl Collector {
             + map_len(&buf.swap_in)
             + map_len(&buf.swap_out)
             + map_len(&buf.oom_kill)
-            + map_len(&buf.fd_open)
-            + map_len(&buf.fd_close)
+            + (map_len(&buf.fd_ops) * 2)
             + map_len(&buf.process_exit)
             + map_len(&buf.tcp_state_change)
             + map_len(&buf.net_io)
@@ -594,8 +593,6 @@ impl Collector {
                 &buf.page_fault_minor,
             ),
             (EventType::OOMKill, "oom_kill", &buf.oom_kill),
-            (EventType::FDOpen, "fd_open", &buf.fd_open),
-            (EventType::FDClose, "fd_close", &buf.fd_close),
             (EventType::ProcessExit, "process_exit", &buf.process_exit),
             (
                 EventType::TcpState,
@@ -607,6 +604,8 @@ impl Collector {
         for &(event_type, name, map) in count_only_maps {
             self.collect_basic_counter_map(batch, window, slot, event_type, name, map);
         }
+
+        self.collect_fd_counters(batch, buf, window, slot);
 
         let value_maps: &[(EventType, &str, &FastMap<BasicDimension, CounterAggregate>)] = &[
             (EventType::SwapIn, "swap_in", &buf.swap_in),
@@ -650,6 +649,70 @@ impl Collector {
                 count: snap.count,
             });
         }
+    }
+
+    fn collect_fd_counters(
+        &self,
+        batch: &mut MetricBatch,
+        buf: &Buffer,
+        window: WindowInfo,
+        slot: SlotInfo,
+    ) {
+        let open_sampling = self.sampling_for_event(EventType::FDOpen);
+        let close_sampling = self.sampling_for_event(EventType::FDClose);
+
+        for (dim, aggregate) in buf.fd_ops.iter() {
+            self.push_fd_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "fd_open",
+                open_sampling,
+                aggregate.open_snapshot(),
+            );
+            self.push_fd_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "fd_close",
+                close_sampling,
+                aggregate.close_snapshot(),
+            );
+        }
+    }
+
+    #[inline(always)]
+    fn push_fd_counter_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        dim: BasicDimension,
+        name: &'static str,
+        sampling: EventSamplingMetadata,
+        snap: CounterSnapshot,
+    ) {
+        if snap.count == 0 {
+            return;
+        }
+
+        batch.counter.push(CounterMetric {
+            metric_type: name,
+            window,
+            slot,
+            pid: dim.pid(),
+            client_type: client_type_from_u8(dim.client_type()),
+            device_id: None,
+            rw: None,
+            port_label: None,
+            direction: None,
+            sampling_mode: sampling.mode,
+            sampling_rate: sampling.rate,
+            sum: snap.sum,
+            count: snap.count,
+        });
     }
 
     /// Collects network metrics and emits all `tcp_tx`-backed rows in one pass.
@@ -1567,6 +1630,7 @@ mod tests {
         buf.add_page_fault(dim, true);
         buf.add_page_fault(dim, true);
         buf.add_fd_open(dim);
+        buf.add_fd_close(dim);
         buf.add_oom_kill(dim);
 
         let batch = collector.collect(&buf, test_meta());
@@ -1585,6 +1649,15 @@ mod tests {
             .filter(|m| m.metric_type == "fd_open")
             .collect();
         assert_eq!(fd_open.len(), 1);
+        assert_eq!(fd_open[0].count, 1);
+
+        let fd_close: Vec<_> = batch
+            .counter
+            .iter()
+            .filter(|m| m.metric_type == "fd_close")
+            .collect();
+        assert_eq!(fd_close.len(), 1);
+        assert_eq!(fd_close[0].count, 1);
 
         let oom: Vec<_> = batch
             .counter

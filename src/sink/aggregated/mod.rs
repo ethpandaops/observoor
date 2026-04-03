@@ -1800,8 +1800,7 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &open_event, &dims);
         AggregatedSink::process_event(&mut buf, &close_event, &dims);
 
-        assert!(!buf.fd_open.is_empty());
-        assert!(!buf.fd_close.is_empty());
+        assert!(!buf.fd_ops.is_empty());
     }
 
     #[test]

@@ -10,8 +10,8 @@ use hashbrown::{
 use crate::tracer::event::EventType;
 
 use super::aggregate::{
-    CountAggregate, CounterAggregate, DiskAggregate, LatencyAggregate, SchedWaitAggregate,
-    TcpTxAggregate,
+    CountAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
+    SchedWaitAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -259,6 +259,16 @@ fn record_sched_wait(
 }
 
 #[inline(always)]
+fn record_fd_open(map: &mut FastMap<BasicDimension, FdAggregate>, key: BasicDimension) {
+    get_or_default_mut(map, key).record_open();
+}
+
+#[inline(always)]
+fn record_fd_close(map: &mut FastMap<BasicDimension, FdAggregate>, key: BasicDimension) {
+    get_or_default_mut(map, key).record_close();
+}
+
+#[inline(always)]
 fn record_disk(
     map: &mut FastMap<DiskDimension, DiskAggregate>,
     key: DiskDimension,
@@ -343,8 +353,7 @@ pub struct Buffer {
     pub page_fault_minor: FastMap<BasicDimension, CountAggregate>,
 
     // --- FD operations (BasicDimension -> CountAggregate) ---
-    pub fd_open: FastMap<BasicDimension, CountAggregate>,
-    pub fd_close: FastMap<BasicDimension, CountAggregate>,
+    pub fd_ops: FastMap<BasicDimension, FdAggregate>,
 
     // --- Memory pressure ---
     pub mem_reclaim: FastMap<BasicDimension, LatencyAggregate>,
@@ -400,8 +409,7 @@ impl Buffer {
             page_fault_major: fast_map_with_capacity(16),
             page_fault_minor: fast_map_with_capacity(16),
             // FD operations.
-            fd_open: fast_map_with_capacity(16),
-            fd_close: fast_map_with_capacity(16),
+            fd_ops: fast_map_with_capacity(16),
             // Memory pressure.
             mem_reclaim: fast_map_with_capacity(8),
             mem_compaction: fast_map_with_capacity(8),
@@ -517,12 +525,12 @@ impl Buffer {
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        add_count_only(&mut self.fd_open, dim, 1);
+        record_fd_open(&mut self.fd_ops, dim);
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        add_count_only(&mut self.fd_close, dim, 1);
+        record_fd_close(&mut self.fd_ops, dim);
     }
 
     /// Adds a memory reclaim event.
@@ -728,10 +736,9 @@ mod tests {
         buf.add_fd_open(dim);
         buf.add_fd_close(dim);
 
-        let open = buf.fd_open.get(&dim).expect("open exists");
-        assert_eq!(open.snapshot().count, 2);
-        let close = buf.fd_close.get(&dim).expect("close exists");
-        assert_eq!(close.snapshot().count, 1);
+        let fd = buf.fd_ops.get(&dim).expect("fd aggregate exists");
+        assert_eq!(fd.open_snapshot().count, 2);
+        assert_eq!(fd.close_snapshot().count, 1);
     }
 
     #[test]
