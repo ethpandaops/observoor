@@ -1,5 +1,6 @@
 use std::hash::Hash;
 use std::hash::{BuildHasherDefault, Hasher};
+use std::ptr::NonNull;
 use std::time::SystemTime;
 
 use hashbrown::{
@@ -68,6 +69,19 @@ pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
 pub(crate) trait FastMapKey: Copy + Eq + Hash {
     fn precomputed_hash(self) -> u64;
 }
+
+#[derive(Clone, Copy)]
+struct FastMapCacheEntry<K, V> {
+    key: K,
+    value: NonNull<V>,
+}
+
+// Safety: the cached pointer always points into the owning hash map allocation
+// stored in the same `FastMap`. The cache is private to `buffer.rs`, only
+// dereferenced through `&mut FastMap`, and the full `FastMap` moves together
+// with its backing allocation when sent across tasks.
+unsafe impl<K: Send, V: Send> Send for FastMapCacheEntry<K, V> {}
+unsafe impl<K: Sync, V: Sync> Sync for FastMapCacheEntry<K, V> {}
 
 #[inline(always)]
 fn precomputed_u32_hash(value: u32) -> u64 {
@@ -145,6 +159,9 @@ pub struct FastMap<K, V> {
     // Large aggregates stay out of the map object itself, which avoids the
     // inline/small-state cache pressure regressions seen in CPU benchmarks.
     inner: HashMap<K, V, FastHashBuilder>,
+    // Hot-path event streams often update the same dimension repeatedly.
+    // Cache the most recently resolved entry to bypass hashing/probing on hits.
+    last_hit: Option<FastMapCacheEntry<K, V>>,
 }
 
 pub type FastMapIter<'a, K, V> = HashMapIter<'a, K, V>;
@@ -155,6 +172,7 @@ impl<K, V> FastMap<K, V> {
     fn with_capacity(capacity: usize) -> Self {
         Self {
             inner: HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default()),
+            last_hit: None,
         }
     }
 
@@ -212,16 +230,30 @@ where
     K: FastMapKey,
     V: Default,
 {
+    if let Some(cached) = map.last_hit.as_ref() {
+        if cached.key == key {
+            let value = cached.value;
+            // Safety: `last_hit` is populated from references returned by
+            // `hashbrown` and invalidated on any new insertion before reuse.
+            return unsafe { &mut *value.as_ptr() };
+        }
+    }
+
     let hash = key.precomputed_hash();
 
-    match map
+    let value = match map
         .inner
         .raw_entry_mut()
         .from_key_hashed_nocheck(hash, &key)
     {
         RawEntryMut::Occupied(entry) => entry.into_mut(),
         RawEntryMut::Vacant(entry) => entry.insert_hashed_nocheck(hash, key, V::default()).1,
-    }
+    };
+    map.last_hit = Some(FastMapCacheEntry {
+        key,
+        value: NonNull::from(&mut *value),
+    });
+    value
 }
 
 #[inline(always)]
@@ -636,6 +668,21 @@ mod tests {
             .expect("tcp metrics exist");
         assert_eq!(metrics.rtt_snapshot().sum, 100);
         assert_eq!(metrics.cwnd_snapshot().sum, 65535);
+    }
+
+    #[test]
+    fn test_get_or_default_mut_cache_handles_repeated_hits_and_new_keys() {
+        let mut map = fast_map_with_capacity::<BasicDimension, CountAggregate>(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        get_or_default_mut(&mut map, key1).add_count(1);
+        get_or_default_mut(&mut map, key1).add_count(2);
+        get_or_default_mut(&mut map, key2).add_count(3);
+        get_or_default_mut(&mut map, key1).add_count(4);
+
+        assert_eq!(map.get(&key1).expect("key1 exists").snapshot().count, 7);
+        assert_eq!(map.get(&key2).expect("key2 exists").snapshot().count, 3);
     }
 
     #[test]
