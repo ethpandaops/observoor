@@ -155,10 +155,6 @@ impl FastMapKey for DiskDimension {
 }
 
 pub struct FastMap<K, V> {
-    // Most aggregation maps in the hot path only see a single dimension per
-    // window. Keep that first entry inline and spill to the hash map only on
-    // the second distinct key.
-    inline_entry: Option<(K, V)>,
     // Keep one consistent heap-backed layout for all aggregation maps.
     // Large aggregates stay out of the map object itself, which avoids the
     // inline/small-state cache pressure regressions seen in CPU benchmarks.
@@ -168,39 +164,13 @@ pub struct FastMap<K, V> {
     last_hit: Option<FastMapCacheEntry<K, V>>,
 }
 
-pub struct FastMapIter<'a, K, V> {
-    inline_entry: Option<(&'a K, &'a V)>,
-    inner: HashMapIter<'a, K, V>,
-}
-
-impl<'a, K, V> Iterator for FastMapIter<'a, K, V> {
-    type Item = (&'a K, &'a V);
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inline_entry.take().or_else(|| self.inner.next())
-    }
-}
-
-pub struct FastMapIntoIter<K, V> {
-    inline_entry: Option<(K, V)>,
-    inner: HashMapIntoIter<K, V>,
-}
-
-impl<K, V> Iterator for FastMapIntoIter<K, V> {
-    type Item = (K, V);
-
-    #[inline(always)]
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inline_entry.take().or_else(|| self.inner.next())
-    }
-}
+pub type FastMapIter<'a, K, V> = HashMapIter<'a, K, V>;
+pub type FastMapIntoIter<K, V> = HashMapIntoIter<K, V>;
 
 impl<K, V> FastMap<K, V> {
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            inline_entry: None,
             inner: HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default()),
             last_hit: None,
         }
@@ -208,40 +178,24 @@ impl<K, V> FastMap<K, V> {
 
     #[inline(always)]
     pub(crate) fn len(&self) -> usize {
-        self.inner.len() + usize::from(self.inline_entry.is_some())
+        self.inner.len()
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn is_empty(&self) -> bool {
-        self.inline_entry.is_none() && self.inner.is_empty()
+        self.inner.is_empty()
     }
 
     #[inline(always)]
     pub(crate) fn clear(&mut self) {
-        self.inline_entry = None;
         self.last_hit = None;
         self.inner.clear();
     }
 
     #[inline(always)]
     pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
-        FastMapIter {
-            inline_entry: self.inline_entry.as_ref().map(|(key, value)| (key, value)),
-            inner: self.inner.iter(),
-        }
-    }
-
-    #[cfg(test)]
-    #[inline(always)]
-    fn uses_inline_storage(&self) -> bool {
-        self.inline_entry.is_some() && self.inner.is_empty()
-    }
-
-    #[cfg(test)]
-    #[inline(always)]
-    fn uses_hash_storage(&self) -> bool {
-        self.inline_entry.is_none() && !self.inner.is_empty()
+        self.inner.iter()
     }
 }
 
@@ -252,19 +206,13 @@ where
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
-        if let Some((inline_key, inline_value)) = self.inline_entry.as_ref() {
-            if inline_key == key {
-                return Some(inline_value);
-            }
-        }
-
         self.inner.get(key)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
     pub(crate) fn contains_key(&self, key: &K) -> bool {
-        self.get(key).is_some()
+        self.inner.contains_key(key)
     }
 }
 
@@ -274,10 +222,7 @@ impl<K, V> IntoIterator for FastMap<K, V> {
 
     #[inline(always)]
     fn into_iter(self) -> Self::IntoIter {
-        FastMapIntoIter {
-            inline_entry: self.inline_entry,
-            inner: self.inner.into_iter(),
-        }
+        self.inner.into_iter()
     }
 }
 
@@ -286,45 +231,11 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
 }
 
 #[inline(always)]
-fn spill_inline_entry<K, V>(map: &mut FastMap<K, V>)
-where
-    K: FastMapKey,
-{
-    let Some((key, value)) = map.inline_entry.take() else {
-        return;
-    };
-
-    let hash = key.precomputed_hash();
-    map.last_hit = None;
-
-    match map
-        .inner
-        .raw_entry_mut()
-        .from_key_hashed_nocheck(hash, &key)
-    {
-        RawEntryMut::Occupied(mut entry) => {
-            *entry.get_mut() = value;
-        }
-        RawEntryMut::Vacant(entry) => {
-            entry.insert_hashed_nocheck(hash, key, value);
-        }
-    }
-}
-
-#[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
     K: FastMapKey,
     V: Default,
 {
-    if matches!(map.inline_entry.as_ref(), Some((inline_key, _)) if *inline_key == key) {
-        return &mut map
-            .inline_entry
-            .as_mut()
-            .expect("inline entry present on key match")
-            .1;
-    }
-
     if let Some(cached) = map.last_hit.as_ref() {
         if cached.key == key {
             let value = cached.value;
@@ -332,19 +243,6 @@ where
             // `hashbrown` and invalidated on any new insertion before reuse.
             return unsafe { &mut *value.as_ptr() };
         }
-    }
-
-    if map.inline_entry.is_none() && map.inner.is_empty() {
-        map.inline_entry = Some((key, V::default()));
-        return &mut map
-            .inline_entry
-            .as_mut()
-            .expect("inline entry inserted")
-            .1;
-    }
-
-    if map.inline_entry.is_some() {
-        spill_inline_entry(map);
     }
 
     let hash = key.precomputed_hash();
@@ -960,7 +858,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fast_map_single_entry_stays_inline() {
+    fn test_fast_map_single_entry_reuses_hash_storage() {
         let mut map = fast_map_with_capacity::<u32, u32>(4);
 
         *get_or_default_mut(&mut map, 10) += 1;
@@ -968,20 +866,6 @@ mod tests {
 
         assert_eq!(map.get(&10), Some(&2));
         assert_eq!(map.len(), 1);
-        assert!(map.uses_inline_storage());
-    }
-
-    #[test]
-    fn test_fast_map_spills_inline_entry_on_second_key() {
-        let mut map = fast_map_with_capacity::<u32, u32>(4);
-
-        *get_or_default_mut(&mut map, 10) += 1;
-        *get_or_default_mut(&mut map, 20) += 2;
-
-        assert_eq!(map.get(&10), Some(&1));
-        assert_eq!(map.get(&20), Some(&2));
-        assert_eq!(map.len(), 2);
-        assert!(map.uses_hash_storage());
     }
 
     #[test]
