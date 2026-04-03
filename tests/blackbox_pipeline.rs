@@ -5,9 +5,7 @@ use observoor::config::NetworkDimensionsConfig;
 use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
-use observoor::sink::aggregated::dimension::{
-    BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
-};
+use observoor::sink::aggregated::dimension::{BasicDimension, DiskDimension, NetworkDimension};
 use observoor::sink::aggregated::metric::{BatchMetadata, MetricBatch};
 use observoor::tracer::event::{
     ClientType, Direction, EventType, NetTransport, ParsedEvent, TypedEvent,
@@ -219,10 +217,11 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             // Here we use 0 (Unknown) since we don't have a port map.
             let net = NetworkDimension::new(event.raw.pid, event.raw.client_type, 0, e.direction);
             buf.add_net_io(net, i64::from(e.bytes));
-            if e.has_metrics && e.transport == NetTransport::Tcp as u8 {
-                let tcp = TCPMetricsDimension::new(event.raw.pid, event.raw.client_type, 0);
-                buf.add_tcp_metrics(tcp, e.srtt_us, e.cwnd);
-            }
+        }
+        TypedEvent::NetIOTcpTxMetrics(e) => {
+            let net =
+                NetworkDimension::new(event.raw.pid, event.raw.client_type, 0, Direction::TX as u8);
+            buf.add_net_io_with_tcp_metrics(net, i64::from(e.bytes), e.srtt_us, e.cwnd);
         }
         TypedEvent::TcpRetransmit(e) => {
             let net =

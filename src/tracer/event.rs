@@ -376,8 +376,7 @@ pub struct DiskIOEvent {
     pub device_id: u32,
 }
 
-/// Network send/receive event.
-/// When `has_metrics` is true, `srtt_us` and `cwnd` contain inline TCP metrics.
+/// Network send/receive event without inline TCP metrics.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct NetIOEvent {
@@ -388,7 +387,15 @@ pub struct NetIOEvent {
     pub direction: u8,
     /// Validated raw `NetTransport` discriminant from the ring buffer.
     pub transport: u8,
-    pub has_metrics: bool,
+}
+
+/// TCP transmit event carrying inline RTT and CWND metrics.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct NetIOTcpTxMetricsEvent {
+    pub bytes: u32,
+    pub src_port: u16,
+    pub dst_port: u16,
     pub srtt_us: u32,
     pub cwnd: u32,
 }
@@ -518,6 +525,7 @@ pub enum TypedEvent {
     SyscallPwrite(SyscallEvent),
     DiskIO(DiskIOEvent),
     NetIO(NetIOEvent),
+    NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent),
     Sched(SchedEvent),
     SchedCombined(SchedCombinedEvent),
     SchedRunqueue(SchedRunqueueEvent),

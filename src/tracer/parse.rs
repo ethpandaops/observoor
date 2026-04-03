@@ -10,9 +10,9 @@ use thiserror::Error;
 
 use super::event::{
     BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
-    NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent, ProcessExitEvent, SchedCombinedEvent,
-    SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TcpStateEvent,
-    TypedEvent, MAX_CLIENT_TYPE,
+    NetIOTcpTxMetricsEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
+    ProcessExitEvent, SchedCombinedEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent,
+    TcpRetransmitEvent, TcpStateEvent, TypedEvent, MAX_CLIENT_TYPE,
 };
 
 #[repr(C)]
@@ -208,10 +208,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
             EventType::DiskIO,
             TypedEvent::DiskIO(parse_disk_io(payload)?),
         ),
-        7 => (
-            EventType::NetTX,
-            TypedEvent::NetIO(parse_net_io(payload, Direction::TX as u8)?),
-        ),
+        7 => (EventType::NetTX, parse_net_tx(payload)?),
         8 => (
             EventType::NetRX,
             TypedEvent::NetIO(parse_net_io(payload, Direction::RX as u8)?),
@@ -357,7 +354,48 @@ fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     })
 }
 
-/// Net I/O event: types 7-8. Common payload: 12 bytes, TCP-TX metrics tail: 8 bytes.
+/// Net I/O TX event: type 7. Common payload: 12 bytes, optional TCP metrics tail: 8 bytes.
+fn parse_net_tx(data: &[u8]) -> Result<TypedEvent, ParseError> {
+    let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
+    let transport_raw = raw.transport;
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(ParseError::InvalidNetTransport {
+            event_name: "net IO event",
+            raw: transport_raw,
+        });
+    }
+
+    let bytes = u32::from_le(raw.bytes);
+    let src_port = u16::from_le(raw.src_port);
+    let dst_port = u16::from_le(raw.dst_port);
+
+    if transport_raw == NetTransport::Tcp as u8
+        && data.len() >= size_of::<RawNetIOPayload>() + size_of::<RawNetIOMetricsPayload>()
+    {
+        let metrics = read_payload::<RawNetIOMetricsPayload>(
+            // Safety: length check above guarantees the metrics tail exists.
+            unsafe { data.get_unchecked(size_of::<RawNetIOPayload>()..) },
+            "net IO event",
+        )?;
+        return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+            bytes,
+            src_port,
+            dst_port,
+            srtt_us: u32::from_le(metrics.srtt_us),
+            cwnd: u32::from_le(metrics.cwnd),
+        }));
+    }
+
+    Ok(TypedEvent::NetIO(NetIOEvent {
+        bytes,
+        src_port,
+        dst_port,
+        direction: Direction::TX as u8,
+        transport: transport_raw,
+    }))
+}
+
+/// Net I/O event: type 8 for RX, or TX without inline TCP metrics.
 fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = raw.transport;
@@ -367,21 +405,6 @@ fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
             raw: transport_raw,
         });
     }
-    let (has_metrics, srtt_us, cwnd) =
-        if data.len() >= size_of::<RawNetIOPayload>() + size_of::<RawNetIOMetricsPayload>() {
-            let metrics = read_payload::<RawNetIOMetricsPayload>(
-                // Safety: length check above guarantees the metrics tail exists.
-                unsafe { data.get_unchecked(size_of::<RawNetIOPayload>()..) },
-                "net IO event",
-            )?;
-            (
-                true,
-                u32::from_le(metrics.srtt_us),
-                u32::from_le(metrics.cwnd),
-            )
-        } else {
-            (false, 0, 0)
-        };
 
     Ok(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
@@ -389,9 +412,6 @@ fn parse_net_io(data: &[u8], direction: u8) -> Result<NetIOEvent, ParseError> {
         dst_port: u16::from_le(raw.dst_port),
         direction,
         transport: transport_raw,
-        has_metrics,
-        srtt_us,
-        cwnd,
     })
 }
 
@@ -728,15 +748,12 @@ mod tests {
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::NetIO(e) = &parsed.typed else {
-            panic!("expected NetIO");
+        let TypedEvent::NetIOTcpTxMetrics(e) = &parsed.typed else {
+            panic!("expected NetIOTcpTxMetrics");
         };
         assert_eq!(e.bytes, 1024);
         assert_eq!(e.src_port, 8080);
         assert_eq!(e.dst_port, 9090);
-        assert_eq!(e.direction, Direction::TX as u8);
-        assert_eq!(e.transport, NetTransport::Tcp as u8);
-        assert!(e.has_metrics);
         assert_eq!(e.srtt_us, 50_000);
         assert_eq!(e.cwnd, 10);
     }
@@ -756,10 +773,7 @@ mod tests {
         };
         assert_eq!(e.direction, Direction::RX as u8);
         assert_eq!(e.transport, NetTransport::Udp as u8);
-        assert!(!e.has_metrics);
         assert_eq!(e.bytes, 2048);
-        assert_eq!(e.srtt_us, 0);
-        assert_eq!(e.cwnd, 0);
     }
 
     // -- Scheduler --

@@ -617,16 +617,25 @@ impl AggregatedSink {
                     dimensions,
                     port_label_cache,
                 );
+                buf.add_net_io(net_dim, i64::from(e.bytes));
+            }
 
-                // Inline metrics are valid only for TCP net_tx events.
-                if e.has_metrics
-                    && e.transport == NetTransport::Tcp as u8
-                    && e.direction == Direction::TX as u8
-                {
-                    buf.add_net_io_with_tcp_metrics(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
-                } else {
-                    buf.add_net_io(net_dim, i64::from(e.bytes));
-                }
+            TypedEvent::NetIOTcpTxMetrics(e) => {
+                let net_event = NetIOEvent {
+                    bytes: e.bytes,
+                    src_port: e.src_port,
+                    dst_port: e.dst_port,
+                    direction: Direction::TX as u8,
+                    transport: NetTransport::Tcp as u8,
+                };
+                let net_dim = build_network_dimension_cached(
+                    pid,
+                    client_type,
+                    &net_event,
+                    dimensions,
+                    port_label_cache,
+                );
+                buf.add_net_io_with_tcp_metrics(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
             }
 
             TypedEvent::TcpRetransmit(e) => {
@@ -1700,13 +1709,10 @@ mod tests {
 
         let event = make_event(
             EventType::NetTX,
-            TypedEvent::NetIO(NetIOEvent {
+            TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
                 bytes: 1024,
                 src_port: 8545,
                 dst_port: 30303,
-                direction: Direction::TX as u8,
-                transport: NetTransport::Tcp as u8,
-                has_metrics: true,
                 srtt_us: 100,
                 cwnd: 65535,
             }),
@@ -1736,13 +1742,10 @@ mod tests {
 
         let event = make_event(
             EventType::NetTX,
-            TypedEvent::NetIO(NetIOEvent {
+            TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
                 bytes: 1024,
                 src_port: 45_000,
                 dst_port: 30_303,
-                direction: Direction::TX as u8,
-                transport: NetTransport::Tcp as u8,
-                has_metrics: true,
                 srtt_us: 100,
                 cwnd: 65535,
             }),
@@ -2299,9 +2302,6 @@ mod tests {
             dst_port: 30303,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
         assert_eq!(local_port(&tx_event), 8545);
         assert_eq!(remote_port(&tx_event), 30303);
@@ -2312,9 +2312,6 @@ mod tests {
             dst_port: 8545,
             direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
         assert_eq!(local_port(&rx_event), 8545);
         assert_eq!(remote_port(&rx_event), 30303);
@@ -2333,9 +2330,6 @@ mod tests {
             dst_port: 13000,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
 
         let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
@@ -2356,9 +2350,6 @@ mod tests {
             dst_port: 13000,
             direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
 
         let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
@@ -2388,9 +2379,6 @@ mod tests {
             dst_port: 13000,
             direction: Direction::RX as u8,
             transport: NetTransport::Udp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
 
         let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
@@ -2430,9 +2418,6 @@ mod tests {
             dst_port: 30303,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
 
         let net_dim = build_network_dimension(1, 1, &net_event, &dims);
@@ -2455,9 +2440,6 @@ mod tests {
             dst_port: 45000,
             direction: Direction::TX as u8,
             transport: NetTransport::Udp as u8,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
         };
 
         let net_dim = build_network_dimension(1, ClientType::Unknown as u8, &net_event, &dims);
