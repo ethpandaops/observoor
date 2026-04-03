@@ -10,10 +10,7 @@ use hashbrown::{
 
 use crate::tracer::event::EventType;
 
-use super::aggregate::{
-    CountAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
-    SchedWaitAggregate, SyscallAggregate, TcpTxAggregate,
-};
+use super::aggregate::{BasicAggregate, CounterAggregate, DiskAggregate, TcpTxAggregate};
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
@@ -263,47 +260,11 @@ where
 }
 
 #[inline(always)]
-pub(crate) fn record_latency<K>(map: &mut FastMap<K, LatencyAggregate>, key: K, latency_ns: u64)
-where
-    K: FastMapKey,
-{
-    get_or_default_mut(map, key).record(latency_ns);
-}
-
-#[inline(always)]
 fn add_counter_value<K>(map: &mut FastMap<K, CounterAggregate>, key: K, value: i64)
 where
     K: FastMapKey,
 {
     get_or_default_mut(map, key).add(value);
-}
-
-#[inline(always)]
-fn add_count_only<K>(map: &mut FastMap<K, CountAggregate>, key: K, count: u32)
-where
-    K: FastMapKey,
-{
-    get_or_default_mut(map, key).add_count(count);
-}
-
-#[inline(always)]
-fn record_sched_wait(
-    map: &mut FastMap<BasicDimension, SchedWaitAggregate>,
-    key: BasicDimension,
-    runqueue_ns: u64,
-    off_cpu_ns: u64,
-) {
-    get_or_default_mut(map, key).record(runqueue_ns, off_cpu_ns);
-}
-
-#[inline(always)]
-fn record_fd_open(map: &mut FastMap<BasicDimension, FdAggregate>, key: BasicDimension) {
-    get_or_default_mut(map, key).record_open();
-}
-
-#[inline(always)]
-fn record_fd_close(map: &mut FastMap<BasicDimension, FdAggregate>, key: BasicDimension) {
-    get_or_default_mut(map, key).record_close();
 }
 
 #[inline(always)]
@@ -360,8 +321,8 @@ pub struct Buffer {
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
 
-    // --- Syscalls (BasicDimension -> SyscallAggregate) ---
-    pub syscalls: FastMap<BasicDimension, SyscallAggregate>,
+    // --- BasicDimension metrics (syscalls, scheduler, memory, process counters) ---
+    pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
     pub net_io: FastMap<NetworkDimension, CounterAggregate>,
@@ -374,26 +335,7 @@ pub struct Buffer {
     pub disk_io: FastMap<DiskDimension, DiskAggregate>,
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
-    // --- Scheduler (BasicDimension -> LatencyAggregate) ---
-    pub sched_on_cpu: FastMap<BasicDimension, LatencyAggregate>,
     pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
-    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
-
-    // --- Page faults (BasicDimension -> CountAggregate) ---
-    pub page_fault_major: FastMap<BasicDimension, CountAggregate>,
-    pub page_fault_minor: FastMap<BasicDimension, CountAggregate>,
-
-    // --- FD operations (BasicDimension -> CountAggregate) ---
-    pub fd_ops: FastMap<BasicDimension, FdAggregate>,
-
-    // --- Memory pressure ---
-    pub mem_reclaim: FastMap<BasicDimension, LatencyAggregate>,
-    pub mem_compaction: FastMap<BasicDimension, LatencyAggregate>,
-    pub swap_in: FastMap<BasicDimension, CounterAggregate>,
-    pub swap_out: FastMap<BasicDimension, CounterAggregate>,
-    pub oom_kill: FastMap<BasicDimension, CountAggregate>,
-    pub process_exit: FastMap<BasicDimension, CountAggregate>,
-    pub tcp_state_change: FastMap<BasicDimension, CountAggregate>,
 }
 
 impl Buffer {
@@ -415,8 +357,8 @@ impl Buffer {
             el_optimistic,
             el_offline,
             system_cores,
-            // Syscalls.
-            syscalls: fast_map_with_capacity(16),
+            // BasicDimension metrics.
+            basic_metrics: fast_map_with_capacity(16),
             // Network.
             net_io: fast_map_with_capacity(64),
             tcp_retransmit: fast_map_with_capacity(32),
@@ -426,22 +368,7 @@ impl Buffer {
             disk_io: fast_map_with_capacity(16),
             block_merge: fast_map_with_capacity(16),
             // Scheduler.
-            sched_on_cpu: fast_map_with_capacity(16),
             cpu_on_core: fast_map_with_capacity(64),
-            sched_wait: fast_map_with_capacity(16),
-            // Page faults.
-            page_fault_major: fast_map_with_capacity(16),
-            page_fault_minor: fast_map_with_capacity(16),
-            // FD operations.
-            fd_ops: fast_map_with_capacity(16),
-            // Memory pressure.
-            mem_reclaim: fast_map_with_capacity(8),
-            mem_compaction: fast_map_with_capacity(8),
-            swap_in: fast_map_with_capacity(8),
-            swap_out: fast_map_with_capacity(8),
-            oom_kill: fast_map_with_capacity(8),
-            process_exit: fast_map_with_capacity(8),
-            tcp_state_change: fast_map_with_capacity(8),
         }
     }
 
@@ -464,25 +391,13 @@ impl Buffer {
         self.el_offline = el_offline;
         self.system_cores = system_cores;
 
-        self.syscalls.clear();
+        self.basic_metrics.clear();
         self.net_io.clear();
         self.tcp_retransmit.clear();
         self.tcp_tx.clear();
         self.disk_io.clear();
         self.block_merge.clear();
-        self.sched_on_cpu.clear();
         self.cpu_on_core.clear();
-        self.sched_wait.clear();
-        self.page_fault_major.clear();
-        self.page_fault_minor.clear();
-        self.fd_ops.clear();
-        self.mem_reclaim.clear();
-        self.mem_compaction.clear();
-        self.swap_in.clear();
-        self.swap_out.clear();
-        self.oom_kill.clear();
-        self.process_exit.clear();
-        self.tcp_state_change.clear();
     }
 
     /// Adds a syscall latency event to the appropriate map.
@@ -502,42 +417,42 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_read(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_read(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_read(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_write(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_write(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_write(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_futex(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_futex(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_futex(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_mmap(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_mmap(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_mmap(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_epoll_wait(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_epoll_wait(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_epoll_wait(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_fsync(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_fsync(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_fsync(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_fdatasync(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_fdatasync(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_fdatasync(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_pwrite(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscalls, dim).record_pwrite(latency_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_pwrite(latency_ns);
     }
 
     /// Adds a network I/O event.
@@ -588,7 +503,7 @@ impl Buffer {
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
     pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        record_latency(&mut self.sched_on_cpu, dim, on_cpu_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_sched_on_cpu(on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
@@ -615,68 +530,66 @@ impl Buffer {
     /// Adds scheduler runqueue and off-CPU latency.
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
-            record_sched_wait(&mut self.sched_wait, dim, runqueue_ns, off_cpu_ns);
+            get_or_default_mut(&mut self.basic_metrics, dim)
+                .record_sched_wait(runqueue_ns, off_cpu_ns);
         }
     }
 
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
-        if major {
-            add_count_only(&mut self.page_fault_major, dim, 1);
-        } else {
-            add_count_only(&mut self.page_fault_minor, dim, 1);
-        }
+        get_or_default_mut(&mut self.basic_metrics, dim).record_page_fault(major);
     }
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        record_fd_open(&mut self.fd_ops, dim);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_fd_open();
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        record_fd_close(&mut self.fd_ops, dim);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_fd_close();
     }
 
     /// Adds a memory reclaim event.
     pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
-        record_latency(&mut self.mem_reclaim, dim, duration_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_mem_reclaim(duration_ns);
     }
 
     /// Adds a memory compaction event.
     pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
-        record_latency(&mut self.mem_compaction, dim, duration_ns);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_mem_compaction(duration_ns);
     }
 
     /// Adds a swap-in event.
     pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
-        add_counter_value(&mut self.swap_in, dim, pages as i64);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_swap_in(pages);
     }
 
     /// Adds a swap-out event.
     pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
-        add_counter_value(&mut self.swap_out, dim, pages as i64);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_swap_out(pages);
     }
 
     /// Adds an OOM kill event.
     pub fn add_oom_kill(&mut self, dim: BasicDimension) {
-        add_count_only(&mut self.oom_kill, dim, 1);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_oom_kill();
     }
 
     /// Adds a process exit event.
     pub fn add_process_exit(&mut self, dim: BasicDimension) {
-        add_count_only(&mut self.process_exit, dim, 1);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_process_exit();
     }
 
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
-        add_count_only(&mut self.tcp_state_change, dim, 1);
+        get_or_default_mut(&mut self.basic_metrics, dim).record_tcp_state_change();
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::aggregated::aggregate::CountAggregate;
 
     fn test_buffer() -> Buffer {
         Buffer::new(
@@ -698,8 +611,8 @@ mod tests {
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
 
-        let entry = buf.syscalls.get(&dim).expect("entry exists");
-        let snap = entry.read_snapshot();
+        let entry = buf.basic_metrics.get(&dim).expect("entry exists");
+        let snap = entry.syscalls().read_snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
     }
@@ -711,7 +624,7 @@ mod tests {
 
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
-        assert!(buf.syscalls.is_empty());
+        assert!(buf.basic_metrics.is_empty());
     }
 
     #[test]
@@ -793,8 +706,8 @@ mod tests {
         buf.add_sched_switch(dim, 2_000, 2);
         buf.add_sched_switch(dim, 500, 4);
 
-        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
-        let on_cpu_snap = on_cpu.snapshot();
+        let on_cpu = buf.basic_metrics.get(&dim).expect("sched_on_cpu exists");
+        let on_cpu_snap = on_cpu.sched_on_cpu_snapshot();
         assert_eq!(on_cpu_snap.count, 3);
         assert_eq!(on_cpu_snap.sum, 3_500);
 
@@ -821,15 +734,15 @@ mod tests {
         let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_runqueue(dim, 0, 5_000);
-        let first = buf.sched_wait.get(&dim).expect("sched wait exists");
-        assert_eq!(first.runqueue_snapshot().count, 0);
-        assert_eq!(first.off_cpu_snapshot().count, 1);
+        let first = buf.basic_metrics.get(&dim).expect("sched wait exists");
+        assert_eq!(first.sched_runqueue_snapshot().count, 0);
+        assert_eq!(first.sched_off_cpu_snapshot().count, 1);
 
         let mut buf2 = test_buffer();
         buf2.add_sched_runqueue(dim, 5_000, 0);
-        let second = buf2.sched_wait.get(&dim).expect("sched wait exists");
-        assert_eq!(second.runqueue_snapshot().count, 1);
-        assert_eq!(second.off_cpu_snapshot().count, 0);
+        let second = buf2.basic_metrics.get(&dim).expect("sched wait exists");
+        assert_eq!(second.sched_runqueue_snapshot().count, 1);
+        assert_eq!(second.sched_off_cpu_snapshot().count, 0);
     }
 
     #[test]
@@ -841,10 +754,9 @@ mod tests {
         buf.add_page_fault(dim, false);
         buf.add_page_fault(dim, false);
 
-        let major = buf.page_fault_major.get(&dim).expect("major exists");
-        assert_eq!(major.snapshot().count, 1);
-        let minor = buf.page_fault_minor.get(&dim).expect("minor exists");
-        assert_eq!(minor.snapshot().count, 2);
+        let page_faults = buf.basic_metrics.get(&dim).expect("page faults exist");
+        assert_eq!(page_faults.page_fault_major_snapshot().count, 1);
+        assert_eq!(page_faults.page_fault_minor_snapshot().count, 2);
     }
 
     #[test]
@@ -856,9 +768,9 @@ mod tests {
         buf.add_fd_open(dim);
         buf.add_fd_close(dim);
 
-        let fd = buf.fd_ops.get(&dim).expect("fd aggregate exists");
-        assert_eq!(fd.open_snapshot().count, 2);
-        assert_eq!(fd.close_snapshot().count, 1);
+        let fd = buf.basic_metrics.get(&dim).expect("fd aggregate exists");
+        assert_eq!(fd.fd_open_snapshot().count, 2);
+        assert_eq!(fd.fd_close_snapshot().count, 1);
     }
 
     #[test]
@@ -907,14 +819,14 @@ mod tests {
         assert!(buf.el_optimistic);
         assert!(buf.el_offline);
         assert_eq!(buf.system_cores, 16);
-        assert!(buf.syscalls.is_empty());
-        assert!(buf.fd_ops.is_empty());
+        assert!(buf.basic_metrics.is_empty());
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf
-            .syscalls
+            .basic_metrics
             .get(&dim)
             .expect("entry exists after reset")
+            .syscalls()
             .read_snapshot();
         assert_eq!(snap.count, 1);
         assert_eq!(snap.sum, 7_500);

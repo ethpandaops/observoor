@@ -1702,8 +1702,8 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
         let dim = BasicDimension::new(123, 1);
-        let entry = buf.syscalls.get(&dim).expect("entry exists");
-        assert_eq!(entry.read_snapshot().count, 1);
+        let entry = buf.basic_metrics.get(&dim).expect("entry exists");
+        assert_eq!(entry.syscalls().read_snapshot().count, 1);
     }
 
     #[test]
@@ -1823,7 +1823,7 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &open_event, &dims);
         AggregatedSink::process_event(&mut buf, &close_event, &dims);
 
-        assert!(!buf.fd_ops.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
     }
 
     #[test]
@@ -1849,7 +1849,7 @@ mod tests {
             }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.sched_on_cpu.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
         assert!(!buf.cpu_on_core.is_empty());
 
         // Page fault
@@ -1858,17 +1858,17 @@ mod tests {
             TypedEvent::PageFault(PageFaultEvent { major: true }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.page_fault_major.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
 
         // OOM kill
         let event = make_event(EventType::OOMKill, TypedEvent::OOMKill);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.oom_kill.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
 
         // Process exit
         let event = make_event(EventType::ProcessExit, TypedEvent::ProcessExit);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.process_exit.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
 
         // Mem reclaim
         let event = make_event(
@@ -1876,7 +1876,7 @@ mod tests {
             TypedEvent::MemReclaim(MemLatencyEvent { duration_ns: 5_000 }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.mem_reclaim.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
 
         // Swap in
         let event = make_event(
@@ -1884,12 +1884,12 @@ mod tests {
             TypedEvent::SwapIn(SwapEvent { pages: 1 }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.swap_in.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
 
         // TCP state
         let event = make_event(EventType::TcpState, TypedEvent::TcpState);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.tcp_state_change.is_empty());
+        assert!(!buf.basic_metrics.is_empty());
     }
 
     #[test]
@@ -1927,17 +1927,17 @@ mod tests {
         scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
         let prev_sched = buf
-            .sched_on_cpu
+            .basic_metrics
             .get(&BasicDimension::new(123, ClientType::Geth as u8))
             .expect("prev sched_on_cpu");
-        assert_eq!(prev_sched.snapshot().sum, 300);
+        assert_eq!(prev_sched.sched_on_cpu_snapshot().sum, 300);
 
         let next_wait = buf
-            .sched_wait
+            .basic_metrics
             .get(&BasicDimension::new(124, ClientType::Geth as u8))
             .expect("next sched_wait");
-        assert_eq!(next_wait.runqueue_snapshot().sum, 50);
-        assert_eq!(next_wait.off_cpu_snapshot().sum, 100);
+        assert_eq!(next_wait.sched_runqueue_snapshot().sum, 50);
+        assert_eq!(next_wait.sched_off_cpu_snapshot().sum, 100);
 
         let prev_core = buf
             .cpu_on_core
@@ -1989,10 +1989,10 @@ mod tests {
         assert_eq!(core1.snapshot().sum, 500);
 
         let rq = buf1
-            .sched_wait
+            .basic_metrics
             .get(&BasicDimension::new(123, 1))
             .expect("runqueue metric");
-        assert_eq!(rq.runqueue_snapshot().sum, 50);
+        assert_eq!(rq.sched_runqueue_snapshot().sum, 50);
 
         let mut buf2 = Buffer::new(
             SystemTime::now(),
@@ -2071,11 +2071,11 @@ mod tests {
         assert_eq!(core2.snapshot().sum, 500);
 
         let on_cpu = buf2
-            .sched_on_cpu
+            .basic_metrics
             .get(&BasicDimension::new(123, 1))
             .expect("sched_on_cpu recorded");
         // Latency distribution remains raw from sched_switch payload.
-        assert_eq!(on_cpu.snapshot().sum, 2_000);
+        assert_eq!(on_cpu.sched_on_cpu_snapshot().sum, 2_000);
     }
 
     #[test]

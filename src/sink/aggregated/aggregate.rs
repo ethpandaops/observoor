@@ -188,6 +188,233 @@ impl Default for SyscallAggregate {
     }
 }
 
+/// Tracks all BasicDimension-keyed metrics behind one per-dimension entry.
+///
+/// The hottest ingest workloads interleave syscalls, scheduler events, page
+/// faults, and FD activity for the same PID. Co-locating them lets the sink
+/// reuse one hash lookup and one last-hit cache entry across those event
+/// families instead of bouncing between multiple maps.
+pub struct BasicAggregate {
+    syscalls: SyscallAggregate,
+    sched_on_cpu: LatencyAggregate,
+    sched_wait: SchedWaitAggregate,
+    page_fault_major: CountAggregate,
+    page_fault_minor: CountAggregate,
+    fd_ops: FdAggregate,
+    mem_reclaim: LatencyAggregate,
+    mem_compaction: LatencyAggregate,
+    swap_in: CounterAggregate,
+    swap_out: CounterAggregate,
+    oom_kill: CountAggregate,
+    process_exit: CountAggregate,
+    tcp_state_change: CountAggregate,
+}
+
+impl BasicAggregate {
+    pub fn new() -> Self {
+        Self {
+            syscalls: SyscallAggregate::new(),
+            sched_on_cpu: LatencyAggregate::new(),
+            sched_wait: SchedWaitAggregate::new(),
+            page_fault_major: CountAggregate::new(),
+            page_fault_minor: CountAggregate::new(),
+            fd_ops: FdAggregate::new(),
+            mem_reclaim: LatencyAggregate::new(),
+            mem_compaction: LatencyAggregate::new(),
+            swap_in: CounterAggregate::new(),
+            swap_out: CounterAggregate::new(),
+            oom_kill: CountAggregate::new(),
+            process_exit: CountAggregate::new(),
+            tcp_state_change: CountAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_read(&mut self, latency_ns: u64) {
+        self.syscalls.record_read(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_write(&mut self, latency_ns: u64) {
+        self.syscalls.record_write(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_futex(&mut self, latency_ns: u64) {
+        self.syscalls.record_futex(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_mmap(&mut self, latency_ns: u64) {
+        self.syscalls.record_mmap(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_epoll_wait(&mut self, latency_ns: u64) {
+        self.syscalls.record_epoll_wait(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_fsync(&mut self, latency_ns: u64) {
+        self.syscalls.record_fsync(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_fdatasync(&mut self, latency_ns: u64) {
+        self.syscalls.record_fdatasync(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_pwrite(&mut self, latency_ns: u64) {
+        self.syscalls.record_pwrite(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
+        self.sched_on_cpu.record(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_sched_wait(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
+        self.sched_wait.record(runqueue_ns, off_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_page_fault(&mut self, major: bool) {
+        if major {
+            self.page_fault_major.add_count(1);
+        } else {
+            self.page_fault_minor.add_count(1);
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_fd_open(&mut self) {
+        self.fd_ops.record_open();
+    }
+
+    #[inline(always)]
+    pub fn record_fd_close(&mut self) {
+        self.fd_ops.record_close();
+    }
+
+    #[inline(always)]
+    pub fn record_mem_reclaim(&mut self, duration_ns: u64) {
+        self.mem_reclaim.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_mem_compaction(&mut self, duration_ns: u64) {
+        self.mem_compaction.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_in(&mut self, pages: u64) {
+        self.swap_in.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_out(&mut self, pages: u64) {
+        self.swap_out.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_oom_kill(&mut self) {
+        self.oom_kill.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_process_exit(&mut self) {
+        self.process_exit.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_tcp_state_change(&mut self) {
+        self.tcp_state_change.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn syscalls(&self) -> &SyscallAggregate {
+        &self.syscalls
+    }
+
+    #[inline(always)]
+    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_on_cpu.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn sched_runqueue_snapshot(&self) -> LatencySnapshot {
+        self.sched_wait.runqueue_snapshot()
+    }
+
+    #[inline(always)]
+    pub fn sched_off_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_wait.off_cpu_snapshot()
+    }
+
+    #[inline(always)]
+    pub fn page_fault_major_snapshot(&self) -> CounterSnapshot {
+        self.page_fault_major.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn page_fault_minor_snapshot(&self) -> CounterSnapshot {
+        self.page_fault_minor.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn fd_open_snapshot(&self) -> CounterSnapshot {
+        self.fd_ops.open_snapshot()
+    }
+
+    #[inline(always)]
+    pub fn fd_close_snapshot(&self) -> CounterSnapshot {
+        self.fd_ops.close_snapshot()
+    }
+
+    #[inline(always)]
+    pub fn mem_reclaim_snapshot(&self) -> LatencySnapshot {
+        self.mem_reclaim.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn mem_compaction_snapshot(&self) -> LatencySnapshot {
+        self.mem_compaction.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn swap_in_snapshot(&self) -> CounterSnapshot {
+        self.swap_in.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn swap_out_snapshot(&self) -> CounterSnapshot {
+        self.swap_out.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn oom_kill_snapshot(&self) -> CounterSnapshot {
+        self.oom_kill.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn process_exit_snapshot(&self) -> CounterSnapshot {
+        self.process_exit.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn tcp_state_change_snapshot(&self) -> CounterSnapshot {
+        self.tcp_state_change.snapshot()
+    }
+}
+
+impl Default for BasicAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tracks count and sum for counter-type metrics.
 /// Used for network bytes, FD operations, page faults, etc.
 pub struct CounterAggregate {
