@@ -26,7 +26,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
 use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
-use self::buffer::{record_latency, Buffer};
+use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension};
@@ -616,35 +616,35 @@ impl AggregatedSink {
 
         match &event.typed {
             TypedEvent::SyscallRead(e) => {
-                record_latency(&mut buf.syscall_read, basic_dim, e.latency_ns);
+                buf.add_syscall_read(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallWrite(e) => {
-                record_latency(&mut buf.syscall_write, basic_dim, e.latency_ns);
+                buf.add_syscall_write(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFutex(e) => {
-                record_latency(&mut buf.syscall_futex, basic_dim, e.latency_ns);
+                buf.add_syscall_futex(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallMmap(e) => {
-                record_latency(&mut buf.syscall_mmap, basic_dim, e.latency_ns);
+                buf.add_syscall_mmap(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallEpollWait(e) => {
-                record_latency(&mut buf.syscall_epoll_wait, basic_dim, e.latency_ns);
+                buf.add_syscall_epoll_wait(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFsync(e) => {
-                record_latency(&mut buf.syscall_fsync, basic_dim, e.latency_ns);
+                buf.add_syscall_fsync(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallFdatasync(e) => {
-                record_latency(&mut buf.syscall_fdatasync, basic_dim, e.latency_ns);
+                buf.add_syscall_fdatasync(basic_dim, e.latency_ns);
             }
 
             TypedEvent::SyscallPwrite(e) => {
-                record_latency(&mut buf.syscall_pwrite, basic_dim, e.latency_ns);
+                buf.add_syscall_pwrite(basic_dim, e.latency_ns);
             }
 
             TypedEvent::NetIO(e) => {
@@ -1702,8 +1702,8 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
         let dim = BasicDimension::new(123, 1);
-        let entry = buf.syscall_read.get(&dim).expect("entry exists");
-        assert_eq!(entry.snapshot().count, 1);
+        let entry = buf.syscalls.get(&dim).expect("entry exists");
+        assert_eq!(entry.read_snapshot().count, 1);
     }
 
     #[test]

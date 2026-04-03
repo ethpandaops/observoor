@@ -12,7 +12,7 @@ use crate::tracer::event::EventType;
 
 use super::aggregate::{
     CountAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
-    SchedWaitAggregate, TcpTxAggregate,
+    SchedWaitAggregate, SyscallAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -360,15 +360,8 @@ pub struct Buffer {
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
 
-    // --- Syscalls (BasicDimension -> LatencyAggregate) ---
-    pub syscall_read: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_write: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_futex: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_epoll_wait: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fdatasync: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_pwrite: FastMap<BasicDimension, LatencyAggregate>,
+    // --- Syscalls (BasicDimension -> SyscallAggregate) ---
+    pub syscalls: FastMap<BasicDimension, SyscallAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
     pub net_io: FastMap<NetworkDimension, CounterAggregate>,
@@ -423,14 +416,7 @@ impl Buffer {
             el_offline,
             system_cores,
             // Syscalls.
-            syscall_read: fast_map_with_capacity(16),
-            syscall_write: fast_map_with_capacity(16),
-            syscall_futex: fast_map_with_capacity(16),
-            syscall_mmap: fast_map_with_capacity(16),
-            syscall_epoll_wait: fast_map_with_capacity(16),
-            syscall_fsync: fast_map_with_capacity(16),
-            syscall_fdatasync: fast_map_with_capacity(16),
-            syscall_pwrite: fast_map_with_capacity(16),
+            syscalls: fast_map_with_capacity(16),
             // Network.
             net_io: fast_map_with_capacity(64),
             tcp_retransmit: fast_map_with_capacity(32),
@@ -478,14 +464,7 @@ impl Buffer {
         self.el_offline = el_offline;
         self.system_cores = system_cores;
 
-        self.syscall_read.clear();
-        self.syscall_write.clear();
-        self.syscall_futex.clear();
-        self.syscall_mmap.clear();
-        self.syscall_epoll_wait.clear();
-        self.syscall_fsync.clear();
-        self.syscall_fdatasync.clear();
-        self.syscall_pwrite.clear();
+        self.syscalls.clear();
         self.net_io.clear();
         self.tcp_retransmit.clear();
         self.tcp_tx.clear();
@@ -508,18 +487,57 @@ impl Buffer {
 
     /// Adds a syscall latency event to the appropriate map.
     pub fn add_syscall(&mut self, event_type: EventType, dim: BasicDimension, latency_ns: u64) {
-        let map = match event_type {
-            EventType::SyscallRead => &mut self.syscall_read,
-            EventType::SyscallWrite => &mut self.syscall_write,
-            EventType::SyscallFutex => &mut self.syscall_futex,
-            EventType::SyscallMmap => &mut self.syscall_mmap,
-            EventType::SyscallEpollWait => &mut self.syscall_epoll_wait,
-            EventType::SyscallFsync => &mut self.syscall_fsync,
-            EventType::SyscallFdatasync => &mut self.syscall_fdatasync,
-            EventType::SyscallPwrite => &mut self.syscall_pwrite,
+        match event_type {
+            EventType::SyscallRead => self.add_syscall_read(dim, latency_ns),
+            EventType::SyscallWrite => self.add_syscall_write(dim, latency_ns),
+            EventType::SyscallFutex => self.add_syscall_futex(dim, latency_ns),
+            EventType::SyscallMmap => self.add_syscall_mmap(dim, latency_ns),
+            EventType::SyscallEpollWait => self.add_syscall_epoll_wait(dim, latency_ns),
+            EventType::SyscallFsync => self.add_syscall_fsync(dim, latency_ns),
+            EventType::SyscallFdatasync => self.add_syscall_fdatasync(dim, latency_ns),
+            EventType::SyscallPwrite => self.add_syscall_pwrite(dim, latency_ns),
             _ => return,
-        };
-        record_latency(map, dim, latency_ns);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_read(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_read(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_write(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_write(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_futex(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_futex(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_mmap(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_mmap(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_epoll_wait(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_epoll_wait(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_fsync(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_fsync(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_fdatasync(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_fdatasync(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_pwrite(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.syscalls, dim).record_pwrite(latency_ns);
     }
 
     /// Adds a network I/O event.
@@ -680,8 +698,8 @@ mod tests {
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
 
-        let entry = buf.syscall_read.get(&dim).expect("entry exists");
-        let snap = entry.snapshot();
+        let entry = buf.syscalls.get(&dim).expect("entry exists");
+        let snap = entry.read_snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
     }
@@ -693,7 +711,7 @@ mod tests {
 
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
-        assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscalls.is_empty());
     }
 
     #[test]
@@ -889,15 +907,15 @@ mod tests {
         assert!(buf.el_optimistic);
         assert!(buf.el_offline);
         assert_eq!(buf.system_cores, 16);
-        assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscalls.is_empty());
         assert!(buf.fd_ops.is_empty());
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf
-            .syscall_read
+            .syscalls
             .get(&dim)
             .expect("entry exists after reset")
-            .snapshot();
+            .read_snapshot();
         assert_eq!(snap.count, 1);
         assert_eq!(snap.sum, 7_500);
     }

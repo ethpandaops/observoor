@@ -6,7 +6,10 @@ use std::fs;
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
-use super::aggregate::{CountAggregate, CounterAggregate, CounterSnapshot, LatencyAggregate};
+use super::aggregate::{
+    CountAggregate, CounterAggregate, CounterSnapshot, LatencyAggregate, LatencySnapshot,
+    SyscallAggregate,
+};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
 use super::metric::{
@@ -335,14 +338,7 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.syscall_read)
-            + map_len(&buf.syscall_write)
-            + map_len(&buf.syscall_futex)
-            + map_len(&buf.syscall_mmap)
-            + map_len(&buf.syscall_epoll_wait)
-            + map_len(&buf.syscall_fsync)
-            + map_len(&buf.syscall_fdatasync)
-            + map_len(&buf.syscall_pwrite)
+        (map_len(&buf.syscalls) * 8)
             + map_len(&buf.sched_on_cpu)
             + (map_len(&buf.sched_wait) * 2)
             + map_len(&buf.mem_reclaim)
@@ -402,27 +398,69 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        let maps: &[(EventType, &str, &FastMap<BasicDimension, LatencyAggregate>)] = &[
-            (EventType::SyscallRead, "syscall_read", &buf.syscall_read),
-            (EventType::SyscallWrite, "syscall_write", &buf.syscall_write),
-            (EventType::SyscallFutex, "syscall_futex", &buf.syscall_futex),
-            (EventType::SyscallMmap, "syscall_mmap", &buf.syscall_mmap),
+        let syscall_sampling = [
+            (
+                EventType::SyscallRead,
+                "syscall_read",
+                SyscallAggregate::read_snapshot as fn(&SyscallAggregate) -> LatencySnapshot,
+            ),
+            (
+                EventType::SyscallWrite,
+                "syscall_write",
+                SyscallAggregate::write_snapshot,
+            ),
+            (
+                EventType::SyscallFutex,
+                "syscall_futex",
+                SyscallAggregate::futex_snapshot,
+            ),
+            (
+                EventType::SyscallMmap,
+                "syscall_mmap",
+                SyscallAggregate::mmap_snapshot,
+            ),
             (
                 EventType::SyscallEpollWait,
                 "syscall_epoll_wait",
-                &buf.syscall_epoll_wait,
+                SyscallAggregate::epoll_wait_snapshot,
             ),
-            (EventType::SyscallFsync, "syscall_fsync", &buf.syscall_fsync),
+            (
+                EventType::SyscallFsync,
+                "syscall_fsync",
+                SyscallAggregate::fsync_snapshot,
+            ),
             (
                 EventType::SyscallFdatasync,
                 "syscall_fdatasync",
-                &buf.syscall_fdatasync,
+                SyscallAggregate::fdatasync_snapshot,
             ),
             (
                 EventType::SyscallPwrite,
                 "syscall_pwrite",
-                &buf.syscall_pwrite,
+                SyscallAggregate::pwrite_snapshot,
             ),
+        ];
+
+        for (dim, aggregate) in buf.syscalls.iter() {
+            let pid = dim.pid();
+            let client_type = client_type_from_u8(dim.client_type());
+            for &(event_type, name, snapshot_fn) in &syscall_sampling {
+                self.push_latency_metric(
+                    batch,
+                    window,
+                    slot,
+                    pid,
+                    client_type,
+                    None,
+                    None,
+                    name,
+                    self.sampling_for_event(event_type),
+                    snapshot_fn(aggregate),
+                );
+            }
+        }
+
+        let maps: &[(EventType, &str, &FastMap<BasicDimension, LatencyAggregate>)] = &[
             (EventType::SchedSwitch, "sched_on_cpu", &buf.sched_on_cpu),
             (EventType::MemReclaim, "mem_reclaim", &buf.mem_reclaim),
             (
@@ -435,27 +473,18 @@ impl Collector {
         for &(event_type, name, map) in maps {
             let sampling = self.sampling_for_event(event_type);
             for (dim, aggregate) in map.iter() {
-                let snap = aggregate.snapshot();
-                if snap.count == 0 {
-                    continue;
-                }
-
-                batch.latency.push(LatencyMetric {
-                    metric_type: name,
+                self.push_latency_metric(
+                    batch,
                     window,
                     slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: None,
-                    rw: None,
-                    sampling_mode: sampling.mode,
-                    sampling_rate: sampling.rate,
-                    sum: snap.sum,
-                    count: snap.count,
-                    min: snap.min,
-                    max: snap.max,
-                    histogram: snap.histogram,
-                });
+                    dim.pid(),
+                    client_type_from_u8(dim.client_type()),
+                    None,
+                    None,
+                    name,
+                    sampling,
+                    aggregate.snapshot(),
+                );
             }
         }
 
@@ -501,6 +530,42 @@ impl Collector {
                 });
             }
         }
+    }
+
+    #[inline(always)]
+    fn push_latency_metric(
+        &self,
+        batch: &mut MetricBatch,
+        window: WindowInfo,
+        slot: SlotInfo,
+        pid: u32,
+        client_type: ClientType,
+        device_id: Option<u32>,
+        rw: Option<&'static str>,
+        name: &'static str,
+        sampling: EventSamplingMetadata,
+        snap: LatencySnapshot,
+    ) {
+        if snap.count == 0 {
+            return;
+        }
+
+        batch.latency.push(LatencyMetric {
+            metric_type: name,
+            window,
+            slot,
+            pid,
+            client_type,
+            device_id,
+            rw,
+            sampling_mode: sampling.mode,
+            sampling_rate: sampling.rate,
+            sum: snap.sum,
+            count: snap.count,
+            min: snap.min,
+            max: snap.max,
+            histogram: snap.histogram,
+        });
     }
 
     /// Collects disk latency, byte, and queue-depth metrics.

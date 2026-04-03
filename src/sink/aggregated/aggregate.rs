@@ -70,6 +70,124 @@ pub struct LatencySnapshot {
     pub histogram: [u32; NUM_BUCKETS],
 }
 
+/// Tracks all syscall latency families behind a single per-dimension map entry.
+///
+/// Mixed syscall workloads often bounce between multiple syscall types for the
+/// same PID, so co-locating the aggregates lets the hot path reuse one map
+/// lookup and one last-hit cache entry across all syscall variants.
+pub struct SyscallAggregate {
+    read: LatencyAggregate,
+    write: LatencyAggregate,
+    futex: LatencyAggregate,
+    mmap: LatencyAggregate,
+    epoll_wait: LatencyAggregate,
+    fsync: LatencyAggregate,
+    fdatasync: LatencyAggregate,
+    pwrite: LatencyAggregate,
+}
+
+impl SyscallAggregate {
+    /// Creates a new aggregate for all syscall latency metrics.
+    pub fn new() -> Self {
+        Self {
+            read: LatencyAggregate::new(),
+            write: LatencyAggregate::new(),
+            futex: LatencyAggregate::new(),
+            mmap: LatencyAggregate::new(),
+            epoll_wait: LatencyAggregate::new(),
+            fsync: LatencyAggregate::new(),
+            fdatasync: LatencyAggregate::new(),
+            pwrite: LatencyAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_read(&mut self, latency_ns: u64) {
+        self.read.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_write(&mut self, latency_ns: u64) {
+        self.write.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_futex(&mut self, latency_ns: u64) {
+        self.futex.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_mmap(&mut self, latency_ns: u64) {
+        self.mmap.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_epoll_wait(&mut self, latency_ns: u64) {
+        self.epoll_wait.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_fsync(&mut self, latency_ns: u64) {
+        self.fsync.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_fdatasync(&mut self, latency_ns: u64) {
+        self.fdatasync.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_pwrite(&mut self, latency_ns: u64) {
+        self.pwrite.record(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn read_snapshot(&self) -> LatencySnapshot {
+        self.read.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn write_snapshot(&self) -> LatencySnapshot {
+        self.write.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn futex_snapshot(&self) -> LatencySnapshot {
+        self.futex.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn mmap_snapshot(&self) -> LatencySnapshot {
+        self.mmap.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn epoll_wait_snapshot(&self) -> LatencySnapshot {
+        self.epoll_wait.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn fsync_snapshot(&self) -> LatencySnapshot {
+        self.fsync.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn fdatasync_snapshot(&self) -> LatencySnapshot {
+        self.fdatasync.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn pwrite_snapshot(&self) -> LatencySnapshot {
+        self.pwrite.snapshot()
+    }
+}
+
+impl Default for SyscallAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tracks count and sum for counter-type metrics.
 /// Used for network bytes, FD operations, page faults, etc.
 pub struct CounterAggregate {
