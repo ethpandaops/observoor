@@ -303,6 +303,39 @@ fn port_label_cache_slot(key: u64) -> usize {
     ((key ^ key.rotate_left(25)) as usize) & (PORT_LABEL_CACHE_SIZE - 1)
 }
 
+// Resolve immutable dimension toggles once so ingest only branches on event data.
+#[derive(Clone, Copy)]
+struct ResolvedDimensions<'a> {
+    network_direction_mask: u8,
+    network_port_label_map: Option<&'a crate::agent::ports::PortLabelMap>,
+    disk_device_mask: u32,
+    disk_rw_mask: u8,
+}
+
+impl<'a> ResolvedDimensions<'a> {
+    #[inline(always)]
+    fn from_config(dims: &'a DimensionsConfig) -> Self {
+        Self {
+            network_direction_mask: if dims.network.include_direction {
+                u8::MAX
+            } else {
+                0
+            },
+            network_port_label_map: if dims.network.include_port {
+                dims.network.port_label_map.as_ref()
+            } else {
+                None
+            },
+            disk_device_mask: if dims.disk.include_device {
+                u32::MAX
+            } else {
+                0
+            },
+            disk_rw_mask: if dims.disk.include_rw { u8::MAX } else { 0 },
+        }
+    }
+}
+
 impl SchedulerWindowState {
     fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
         for running in self.running_by_tid.iter_mut() {
@@ -575,7 +608,7 @@ impl AggregatedSink {
     fn process_event_inner(
         buf: &mut Buffer,
         event: &ParsedEvent,
-        dimensions: &DimensionsConfig,
+        dimensions: &ResolvedDimensions<'_>,
         scheduler_state: Option<&mut SchedulerWindowState>,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
@@ -776,7 +809,14 @@ impl AggregatedSink {
     #[cfg(test)]
     fn process_event(buf: &mut Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
         let mut port_label_cache = PortLabelResolveCache::default();
-        Self::process_event_inner(buf, event, dimensions, None, &mut port_label_cache);
+        let resolved_dimensions = ResolvedDimensions::from_config(dimensions);
+        Self::process_event_inner(
+            buf,
+            event,
+            &resolved_dimensions,
+            None,
+            &mut port_label_cache,
+        );
     }
 
     /// Routes a parsed event while maintaining carried scheduler state for
@@ -784,7 +824,7 @@ impl AggregatedSink {
     fn process_event_with_scheduler_state(
         buf: &mut Buffer,
         event: &ParsedEvent,
-        dimensions: &DimensionsConfig,
+        dimensions: &ResolvedDimensions<'_>,
         scheduler_state: &mut SchedulerWindowState,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
@@ -800,7 +840,7 @@ impl AggregatedSink {
     fn process_event_batch_with_scheduler_state(
         buf: &mut Buffer,
         events: &EventBatch,
-        dimensions: &DimensionsConfig,
+        dimensions: &ResolvedDimensions<'_>,
         scheduler_state: &mut SchedulerWindowState,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
@@ -887,6 +927,7 @@ impl Sink for AggregatedSink {
         let slot_aligned = self.cfg.resolution.slot_aligned;
 
         let run_task = tokio::spawn(async move {
+            let resolved_dimensions = ResolvedDimensions::from_config(&dimensions);
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
@@ -948,7 +989,7 @@ impl Sink for AggregatedSink {
                             AggregatedSink::process_event_batch_with_scheduler_state(
                                 &mut current_buf,
                                 &events,
-                                &dimensions,
+                                &resolved_dimensions,
                                 &mut scheduler_state,
                                 &mut port_label_cache,
                             );
@@ -1036,7 +1077,7 @@ impl Sink for AggregatedSink {
                         AggregatedSink::process_event_batch_with_scheduler_state(
                             &mut current_buf,
                             &events,
-                            &dimensions,
+                            &resolved_dimensions,
                             &mut scheduler_state,
                             &mut port_label_cache,
                         );
@@ -1049,7 +1090,7 @@ impl Sink for AggregatedSink {
                                     AggregatedSink::process_event_batch_with_scheduler_state(
                                         &mut current_buf,
                                         &events,
-                                        &dimensions,
+                                        &resolved_dimensions,
                                         &mut scheduler_state,
                                         &mut port_label_cache,
                                     );
@@ -1345,13 +1386,14 @@ fn build_network_dimension(
     e: &NetIOEvent,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
+    let resolved_dims = ResolvedDimensions::from_config(dims);
     build_network_dimension_from_parts_uncached(
         BasicDimension::new(pid, client_type),
         e.direction,
         e.transport,
         e.src_port,
         e.dst_port,
-        dims,
+        &resolved_dims,
     )
 }
 
@@ -1362,31 +1404,23 @@ fn build_network_dimension_from_parts_cached(
     transport: u8,
     src_port: u16,
     dst_port: u16,
-    dims: &DimensionsConfig,
+    dims: &ResolvedDimensions<'_>,
     port_label_cache: &mut PortLabelResolveCache,
 ) -> NetworkDimension {
-    let direction = if dims.network.include_direction {
-        raw_direction
-    } else {
-        0
-    };
-    let port_label = if dims.network.include_port {
-        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
-                (src_port, dst_port)
-            } else {
-                (dst_port, src_port)
-            };
-            port_label_cache.resolve(
-                port_label_map,
-                basic.client_type(),
-                transport,
-                primary_port,
-                secondary_port,
-            )
+    let direction = raw_direction & dims.network_direction_mask;
+    let port_label = if let Some(port_label_map) = dims.network_port_label_map {
+        let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
+            (src_port, dst_port)
         } else {
-            0
-        }
+            (dst_port, src_port)
+        };
+        port_label_cache.resolve(
+            port_label_map,
+            basic.client_type(),
+            transport,
+            primary_port,
+            secondary_port,
+        )
     } else {
         0
     };
@@ -1403,13 +1437,14 @@ fn build_network_dimension_from_tcp_retransmit(
     dst_port: u16,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
+    let resolved_dims = ResolvedDimensions::from_config(dims);
     build_network_dimension_from_parts_uncached(
         BasicDimension::new(pid, client_type),
         Direction::TX as u8,
         NetTransport::Tcp as u8,
         src_port,
         dst_port,
-        dims,
+        &resolved_dims,
     )
 }
 
@@ -1420,31 +1455,22 @@ fn build_network_dimension_from_parts_uncached(
     transport: u8,
     src_port: u16,
     dst_port: u16,
-    dims: &DimensionsConfig,
+    dims: &ResolvedDimensions<'_>,
 ) -> NetworkDimension {
-    let direction = if dims.network.include_direction {
-        raw_direction
-    } else {
-        0
-    };
-
-    let port_label = if dims.network.include_port {
-        if let Some(port_label_map) = dims.network.port_label_map.as_ref() {
-            let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
-                (src_port, dst_port)
-            } else {
-                (dst_port, src_port)
-            };
-            resolve_network_port_label_uncached(
-                basic.client_type(),
-                transport,
-                primary_port,
-                secondary_port,
-                port_label_map,
-            )
+    let direction = raw_direction & dims.network_direction_mask;
+    let port_label = if let Some(port_label_map) = dims.network_port_label_map {
+        let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
+            (src_port, dst_port)
         } else {
-            0
-        }
+            (dst_port, src_port)
+        };
+        resolve_network_port_label_uncached(
+            basic.client_type(),
+            transport,
+            primary_port,
+            secondary_port,
+            port_label_map,
+        )
     } else {
         0
     };
@@ -1498,7 +1524,13 @@ fn build_disk_dimension(
     rw: u8,
     dims: &DimensionsConfig,
 ) -> DiskDimension {
-    build_disk_dimension_from_basic(BasicDimension::new(pid, client_type), device_id, rw, dims)
+    let resolved_dims = ResolvedDimensions::from_config(dims);
+    build_disk_dimension_from_basic(
+        BasicDimension::new(pid, client_type),
+        device_id,
+        rw,
+        &resolved_dims,
+    )
 }
 
 #[inline(always)]
@@ -1506,16 +1538,12 @@ fn build_disk_dimension_from_basic(
     basic: BasicDimension,
     device_id: u32,
     rw: u8,
-    dims: &DimensionsConfig,
+    dims: &ResolvedDimensions<'_>,
 ) -> DiskDimension {
     DiskDimension::from_basic(
         basic,
-        if dims.disk.include_device {
-            device_id
-        } else {
-            0
-        },
-        if dims.disk.include_rw { rw } else { 0 },
+        device_id & dims.disk_device_mask,
+        rw & dims.disk_rw_mask,
     )
 }
 
@@ -1570,10 +1598,11 @@ mod tests {
         scheduler_state: &mut SchedulerWindowState,
     ) {
         let mut port_label_cache = PortLabelResolveCache::default();
+        let resolved_dimensions = ResolvedDimensions::from_config(dims);
         AggregatedSink::process_event_with_scheduler_state(
             buf,
             event,
-            dims,
+            &resolved_dimensions,
             scheduler_state,
             &mut port_label_cache,
         );
