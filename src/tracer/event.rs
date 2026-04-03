@@ -349,6 +349,8 @@ pub struct Event {
     basic_dimension: u64,
     pub tid: u32,
     pub event_type: EventType,
+    secondary_event_type: u8,
+    secondary_client_type: u8,
 }
 
 impl Event {
@@ -365,7 +367,20 @@ impl Event {
             basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
             tid,
             event_type,
+            secondary_event_type: 0,
+            secondary_client_type: 0,
         }
+    }
+
+    #[inline(always)]
+    pub fn with_secondary_logical_event(
+        mut self,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        self.secondary_event_type = event_type as u8;
+        self.secondary_client_type = client_type;
+        self
     }
 
     #[inline(always)]
@@ -382,6 +397,16 @@ impl Event {
     #[inline(always)]
     pub fn basic_dimension_key(self) -> u64 {
         self.basic_dimension
+    }
+
+    #[inline(always)]
+    pub fn secondary_event_type_raw(self) -> u8 {
+        self.secondary_event_type
+    }
+
+    #[inline(always)]
+    pub fn secondary_client_type_raw(self) -> u8 {
+        self.secondary_client_type
     }
 }
 

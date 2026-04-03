@@ -174,90 +174,117 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
     // dispatch to avoid a second hot-path match on `EventType`.
     // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
     let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
-    let (event_type, typed) = match event_type_raw {
+    let (event_type, secondary_logical_event, typed) = match event_type_raw {
         1 => (
             EventType::SyscallRead,
+            None,
             TypedEvent::SyscallRead(parse_syscall(payload)?),
         ),
         2 => (
             EventType::SyscallWrite,
+            None,
             TypedEvent::SyscallWrite(parse_syscall(payload)?),
         ),
         3 => (
             EventType::SyscallFutex,
+            None,
             TypedEvent::SyscallFutex(parse_syscall(payload)?),
         ),
         4 => (
             EventType::SyscallMmap,
+            None,
             TypedEvent::SyscallMmap(parse_syscall(payload)?),
         ),
         5 => (
             EventType::SyscallEpollWait,
+            None,
             TypedEvent::SyscallEpollWait(parse_syscall(payload)?),
         ),
         6 => (
             EventType::DiskIO,
+            None,
             TypedEvent::DiskIO(parse_disk_io(payload)?),
         ),
-        7 => (EventType::NetTX, parse_net_tx(&header, payload)?),
+        7 => (EventType::NetTX, None, parse_net_tx(&header, payload)?),
         8 => (
             EventType::NetRX,
+            None,
             TypedEvent::NetIO(parse_net_io(&header, payload, Direction::RX as u8)?),
         ),
-        9 => (
-            EventType::SchedSwitch,
-            parse_sched_variant(&header, payload)?,
-        ),
+        9 => match parse_sched_variant(&header, payload)? {
+            TypedEvent::SchedCombined(event) => (
+                EventType::SchedSwitch,
+                Some((EventType::SchedRunqueue, event.next_client_type)),
+                TypedEvent::SchedCombined(event),
+            ),
+            typed => (EventType::SchedSwitch, None, typed),
+        },
         10 => (
             EventType::PageFault,
+            None,
             TypedEvent::PageFault(parse_page_fault(&header)),
         ),
-        11 => (EventType::FDOpen, TypedEvent::FDOpen),
-        12 => (EventType::FDClose, TypedEvent::FDClose),
+        11 => (EventType::FDOpen, None, TypedEvent::FDOpen),
+        12 => (EventType::FDClose, None, TypedEvent::FDClose),
         13 => (
             EventType::SyscallFsync,
+            None,
             TypedEvent::SyscallFsync(parse_syscall(payload)?),
         ),
         14 => (
             EventType::SyscallFdatasync,
+            None,
             TypedEvent::SyscallFdatasync(parse_syscall(payload)?),
         ),
         15 => (
             EventType::SyscallPwrite,
+            None,
             TypedEvent::SyscallPwrite(parse_syscall(payload)?),
         ),
         16 => (
             EventType::SchedRunqueue,
+            None,
             TypedEvent::SchedRunqueue(parse_sched_runqueue(&header, payload)?),
         ),
         17 => (
             EventType::BlockMerge,
+            None,
             TypedEvent::BlockMerge(parse_block_merge(payload)?),
         ),
         18 => (
             EventType::TcpRetransmit,
+            None,
             TypedEvent::TcpRetransmit(parse_tcp_retransmit(payload)?),
         ),
-        19 => (EventType::TcpState, TypedEvent::TcpState),
+        19 => (EventType::TcpState, None, TypedEvent::TcpState),
         20 => (
             EventType::MemReclaim,
+            None,
             TypedEvent::MemReclaim(parse_mem_latency(payload)?),
         ),
         21 => (
             EventType::MemCompaction,
+            None,
             TypedEvent::MemCompaction(parse_mem_latency(payload)?),
         ),
-        22 => (EventType::SwapIn, TypedEvent::SwapIn(parse_swap(payload)?)),
+        22 => (
+            EventType::SwapIn,
+            None,
+            TypedEvent::SwapIn(parse_swap(payload)?),
+        ),
         23 => (
             EventType::SwapOut,
+            None,
             TypedEvent::SwapOut(parse_swap(payload)?),
         ),
         24 => (
             EventType::OOMKill,
+            None,
             TypedEvent::OOMKill(parse_oom_kill(payload)?),
         ),
         25 => (
             EventType::ProcessExit,
+            None,
             TypedEvent::ProcessExit(parse_process_exit(payload)?),
         ),
         _ => {
@@ -274,6 +301,12 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         event_type,
         client_type_raw,
     );
+    let event = if let Some((secondary_event_type, secondary_client_type)) = secondary_logical_event
+    {
+        event.with_secondary_logical_event(secondary_event_type, secondary_client_type)
+    } else {
+        event
+    };
 
     Ok(ParsedEvent { raw: event, typed })
 }
@@ -823,6 +856,11 @@ mod tests {
         assert_eq!(e.next_client_type, 2);
         assert!(e.voluntary);
         assert_eq!(e.cpu_id, 15);
+        assert_eq!(
+            parsed.raw.secondary_event_type_raw(),
+            EventType::SchedRunqueue as u8
+        );
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
     }
 
     #[test]

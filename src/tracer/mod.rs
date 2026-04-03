@@ -12,7 +12,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use self::event::{ClientType, EventType, ParsedEvent, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
+use self::event::{ClientType, ParsedEvent, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
 
 /// Ring buffer usage statistics.
 #[derive(Debug, Clone, Copy, Default)]
@@ -83,37 +83,28 @@ impl ParsedEventBatch {
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
         let client_idx = usize::from(event.raw.client_type());
+        let event_type_idx = event.raw.event_type as usize;
+        let secondary_event_type_idx = usize::from(event.raw.secondary_event_type_raw());
         debug_assert!(client_idx < CLIENT_TYPE_CARDINALITY);
+        debug_assert!(event_type_idx <= MAX_EVENT_TYPE);
 
         // Safety: the parser rejects out-of-range client types before events
-        // reach this hot path.
+        // reach this hot path, and secondary logical-event metadata is either
+        // zeroed or populated from already-validated parser state.
         unsafe {
             *self.client_totals.get_unchecked_mut(client_idx) += 1;
+            *self.event_type_totals.get_unchecked_mut(event_type_idx) += 1;
+            if secondary_event_type_idx != 0 {
+                debug_assert!(secondary_event_type_idx <= MAX_EVENT_TYPE);
+                *self
+                    .event_type_totals
+                    .get_unchecked_mut(secondary_event_type_idx) += 1;
+                *self
+                    .client_totals
+                    .get_unchecked_mut(usize::from(event.raw.secondary_client_type_raw())) += 1;
+            }
         }
 
-        match &event.typed {
-            self::event::TypedEvent::SchedCombined(sched) => {
-                debug_assert!(usize::from(sched.next_client_type) < CLIENT_TYPE_CARDINALITY);
-                unsafe {
-                    *self
-                        .event_type_totals
-                        .get_unchecked_mut(EventType::SchedSwitch as usize) += 1;
-                    *self
-                        .event_type_totals
-                        .get_unchecked_mut(EventType::SchedRunqueue as usize) += 1;
-                    *self
-                        .client_totals
-                        .get_unchecked_mut(usize::from(sched.next_client_type)) += 1;
-                }
-            }
-            _ => {
-                let event_type_idx = event.raw.event_type as usize;
-                debug_assert!(event_type_idx <= MAX_EVENT_TYPE);
-                unsafe {
-                    *self.event_type_totals.get_unchecked_mut(event_type_idx) += 1;
-                }
-            }
-        }
         self.events.push(event);
     }
 
@@ -221,7 +212,8 @@ mod tests {
         let mut batch = ParsedEventBatch::with_capacity(1);
 
         batch.push(ParsedEvent {
-            raw: Event::new(1, 100, 101, EventType::SchedSwitch, 1),
+            raw: Event::new(1, 100, 101, EventType::SchedSwitch, 1)
+                .with_secondary_logical_event(EventType::SchedRunqueue, 2),
             typed: TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 50,
                 voluntary: false,
