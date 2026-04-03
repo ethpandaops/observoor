@@ -1367,7 +1367,6 @@ int trace_oom_kill(struct trace_event_raw_oom_kill_local *ctx)
     fill_header(&e->hdr, EVENT_OOM_KILL, ct);
     e->hdr.pid = target_pid;
     e->hdr.tid = tid;
-    e->target_pid = target_pid;
 
     bpf_ringbuf_submit(e, 0);
     return 0;
@@ -1376,6 +1375,7 @@ int trace_oom_kill(struct trace_event_raw_oom_kill_local *ctx)
 SEC("kprobe/do_exit")
 int BPF_KPROBE(kprobe_do_exit, long code)
 {
+    (void)code;
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     __u32 pid = pid_tgid >> 32;
     __u8 ct;
@@ -1392,7 +1392,6 @@ int BPF_KPROBE(kprobe_do_exit, long code)
         return 0;
 
     fill_header(&e->hdr, EVENT_PROCESS_EXIT, ct);
-    e->exit_code = (u32)code;
 
     bpf_ringbuf_submit(e, 0);
     return 0;

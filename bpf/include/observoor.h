@@ -158,18 +158,17 @@ struct swap_event {
     __u64 pages;
 };
 
-// OOM kill event (32 bytes total).
+// OOM kill event (24 bytes total).
+// The aggregated pipeline only counts OOM kills, so this stays header-only.
 struct oom_kill_event {
     struct event_header hdr;
-    __u32 target_pid;
-    __u8  pad[4];
 };
 
-// Process exit event (32 bytes total).
+// Process exit event (24 bytes total).
+// The aggregated pipeline only counts exits and uses the header TID for
+// scheduler cleanup, so no extra payload is required.
 struct process_exit_event {
     struct event_header hdr;
-    __u32 exit_code;
-    __u8  pad[4];
 };
 
 // Syscall entry tracking key.

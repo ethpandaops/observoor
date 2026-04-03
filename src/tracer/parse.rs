@@ -10,9 +10,9 @@ use thiserror::Error;
 
 use super::event::{
     BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
-    NetIOTcpTxMetricsEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
-    ProcessExitEvent, SchedCombinedEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent,
-    TcpRetransmitEvent, TypedEvent, MAX_CLIENT_TYPE,
+    NetIOTcpTxMetricsEvent, NetTransport, PageFaultEvent, ParsedEvent, SchedCombinedEvent,
+    SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TypedEvent,
+    MAX_CLIENT_TYPE,
 };
 
 #[repr(C)]
@@ -113,20 +113,6 @@ struct RawMemLatencyPayload {
 #[derive(Clone, Copy)]
 struct RawSwapPayload {
     pages: u64,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawOOMKillPayload {
-    target_pid: u32,
-    _pad: [u8; 4],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawProcessExitPayload {
-    exit_code: u32,
-    _pad: [u8; 4],
 }
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
@@ -277,16 +263,8 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
             None,
             TypedEvent::SwapOut(parse_swap(payload)?),
         ),
-        24 => (
-            EventType::OOMKill,
-            None,
-            TypedEvent::OOMKill(parse_oom_kill(payload)?),
-        ),
-        25 => (
-            EventType::ProcessExit,
-            None,
-            TypedEvent::ProcessExit(parse_process_exit(payload)?),
-        ),
+        24 => (EventType::OOMKill, None, TypedEvent::OOMKill),
+        25 => (EventType::ProcessExit, None, TypedEvent::ProcessExit),
         _ => {
             return Err(ParseError::UnknownEventType {
                 raw: event_type_raw,
@@ -536,22 +514,6 @@ fn parse_swap(data: &[u8]) -> Result<SwapEvent, ParseError> {
     let raw = read_payload::<RawSwapPayload>(data, "swap event")?;
     Ok(SwapEvent {
         pages: u64::from_le(raw.pages),
-    })
-}
-
-/// OOM kill event: type 24. Payload: 8 bytes.
-fn parse_oom_kill(data: &[u8]) -> Result<OOMKillEvent, ParseError> {
-    let raw = read_payload::<RawOOMKillPayload>(data, "oom kill event")?;
-    Ok(OOMKillEvent {
-        target_pid: u32::from_le(raw.target_pid),
-    })
-}
-
-/// Process exit event: type 25. Payload: 8 bytes.
-fn parse_process_exit(data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
-    let raw = read_payload::<RawProcessExitPayload>(data, "process exit event")?;
-    Ok(ProcessExitEvent {
-        exit_code: u32::from_le(raw.exit_code),
     })
 }
 
@@ -1036,30 +998,26 @@ mod tests {
 
     #[test]
     fn test_oom_kill() {
-        let mut data = header(18_000_000, 117, 217, 24, 1); // OOMKill, Geth
-        data.extend_from_slice(&999u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
+        let data = header(18_000_000, 117, 217, 24, 1); // OOMKill, Geth
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::OOMKill(e) = &parsed.typed else {
+        let TypedEvent::OOMKill = &parsed.typed else {
             panic!("expected OOMKill");
         };
-        assert_eq!(e.target_pid, 999);
+        assert_eq!(parsed.raw.pid(), 117);
     }
 
     // -- Process exit --
 
     #[test]
     fn test_process_exit() {
-        let mut data = header(19_000_000, 118, 218, 25, 5); // ProcessExit, Erigon
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
+        let data = header(19_000_000, 118, 218, 25, 5); // ProcessExit, Erigon
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::ProcessExit(e) = &parsed.typed else {
+        let TypedEvent::ProcessExit = &parsed.typed else {
             panic!("expected ProcessExit");
         };
-        assert_eq!(e.exit_code, 1);
+        assert_eq!(parsed.raw.tid, 218);
     }
 
     // -- Edge cases --
@@ -1088,14 +1046,12 @@ mod tests {
 
     #[test]
     fn test_exactly_minimum_payload() {
-        // OOM kill needs exactly 8 bytes of payload.
-        let mut data = header(1000, 42, 43, 24, 1);
-        data.extend_from_slice(&[0u8; 8]);
+        // Header-only marker events should parse without a payload.
+        let data = header(1000, 42, 43, 24, 1);
         assert!(parse_event(&data).is_ok());
 
-        // One byte short should fail.
-        let mut data = header(1000, 42, 43, 24, 1);
-        data.extend_from_slice(&[0u8; 7]);
+        // One byte short of the common header should fail.
+        let data = vec![0u8; HEADER_SIZE - 1];
         assert!(parse_event(&data).is_err());
     }
 

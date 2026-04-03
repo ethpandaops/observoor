@@ -760,11 +760,11 @@ impl AggregatedSink {
                 buf.add_swap_out(basic_dim, e.pages);
             }
 
-            TypedEvent::OOMKill(_) => {
+            TypedEvent::OOMKill => {
                 buf.add_oom_kill(basic_dim);
             }
 
-            TypedEvent::ProcessExit(_) => {
+            TypedEvent::ProcessExit => {
                 buf.add_process_exit(basic_dim);
                 if let Some(scheduler_state) = scheduler_state {
                     scheduler_state.handle_process_exit(buf, event.raw.tid, event.raw.timestamp_ns);
@@ -1837,18 +1837,12 @@ mod tests {
         assert!(!buf.page_fault_major.is_empty());
 
         // OOM kill
-        let event = make_event(
-            EventType::OOMKill,
-            TypedEvent::OOMKill(OOMKillEvent { target_pid: 456 }),
-        );
+        let event = make_event(EventType::OOMKill, TypedEvent::OOMKill);
         AggregatedSink::process_event(&mut buf, &event, &dims);
         assert!(!buf.oom_kill.is_empty());
 
         // Process exit
-        let event = make_event(
-            EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent { exit_code: 0 }),
-        );
+        let event = make_event(EventType::ProcessExit, TypedEvent::ProcessExit);
         AggregatedSink::process_event(&mut buf, &event, &dims);
         assert!(!buf.process_exit.is_empty());
 
@@ -2129,7 +2123,7 @@ mod tests {
             123,
             50,
             EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent { exit_code: 0 }),
+            TypedEvent::ProcessExit,
         );
         process_event_with_scheduler_state(&mut buf, &exit_event, &dims, &mut scheduler_state);
         scheduler_state.flush_running_to_boundary(&mut buf, 2_000);
@@ -2250,7 +2244,7 @@ mod tests {
             123,
             70,
             EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent { exit_code: 0 }),
+            TypedEvent::ProcessExit,
         );
 
         process_event_with_scheduler_state(&mut buf, &rq, &dims, &mut scheduler_state);

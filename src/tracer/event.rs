@@ -373,11 +373,7 @@ impl Event {
     }
 
     #[inline(always)]
-    pub fn with_secondary_logical_event(
-        mut self,
-        event_type: EventType,
-        client_type: u8,
-    ) -> Self {
+    pub fn with_secondary_logical_event(mut self, event_type: EventType, client_type: u8) -> Self {
         self.secondary_event_type = event_type as u8;
         self.secondary_client_type = client_type;
         self
@@ -533,20 +529,6 @@ pub struct SwapEvent {
     pub pages: u64,
 }
 
-/// OOM kill event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct OOMKillEvent {
-    pub target_pid: u32,
-}
-
-/// Process exit event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct ProcessExitEvent {
-    pub exit_code: u32,
-}
-
 /// A parsed event wrapping the common header and a typed payload.
 #[derive(Debug, Clone)]
 pub struct ParsedEvent {
@@ -588,8 +570,9 @@ pub enum TypedEvent {
     MemCompaction(MemLatencyEvent),
     SwapIn(SwapEvent),
     SwapOut(SwapEvent),
-    OOMKill(OOMKillEvent),
-    ProcessExit(ProcessExitEvent),
+    // The aggregated sink only counts OOM kills and process exits.
+    OOMKill,
+    ProcessExit,
 }
 
 #[cfg(test)]

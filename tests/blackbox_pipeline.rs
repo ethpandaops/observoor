@@ -263,10 +263,10 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
         TypedEvent::SwapOut(e) => {
             buf.add_swap_out(basic_dim, e.pages);
         }
-        TypedEvent::OOMKill(_) => {
+        TypedEvent::OOMKill => {
             buf.add_oom_kill(basic_dim);
         }
-        TypedEvent::ProcessExit(_) => {
+        TypedEvent::ProcessExit => {
             buf.add_process_exit(basic_dim);
         }
     }
