@@ -337,6 +337,7 @@ impl<'a> ResolvedDimensions<'a> {
 }
 
 impl SchedulerWindowState {
+    #[inline(always)]
     fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
         for running in self.running_by_tid.iter_mut() {
             if boundary_ns <= running.running_since_ns {
@@ -348,15 +349,17 @@ impl SchedulerWindowState {
         }
     }
 
+    #[inline(always)]
     fn handle_sched_switch(
         &mut self,
         buf: &mut Buffer,
         tid: u32,
         timestamp_ns: u64,
         dim: BasicDimension,
-        sched: &crate::tracer::event::SchedEvent,
+        on_cpu_ns: u64,
+        cpu_id: u32,
     ) {
-        buf.add_sched_on_cpu(dim, sched.on_cpu_ns);
+        buf.add_sched_on_cpu(dim, on_cpu_ns);
 
         if let Some(idx) = self.running_by_tid.find_index(tid) {
             let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
@@ -374,26 +377,29 @@ impl SchedulerWindowState {
 
             // Out-of-order switch-out for an older slice. Keep newer running state
             // and still account this event via raw fallback.
-            buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+            buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
         } else {
             // Fallback for missing switch-in state (startup, drops): use
             // kernel-reported slice.
-            buf.add_cpu_on_core(dim, sched.cpu_id, sched.on_cpu_ns);
+            buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
         }
     }
 
+    #[inline(always)]
     fn handle_sched_runqueue(
         &mut self,
         buf: &mut Buffer,
         tid: u32,
         timestamp_ns: u64,
         dim: BasicDimension,
-        rq: &crate::tracer::event::SchedRunqueueEvent,
+        runqueue_ns: u64,
+        off_cpu_ns: u64,
+        cpu_id: u32,
     ) {
-        buf.add_sched_runqueue(dim, rq.runqueue_ns, rq.off_cpu_ns);
+        buf.add_sched_runqueue(dim, runqueue_ns, off_cpu_ns);
 
         let next_running = RunningThread {
-            cpu_dim: CpuCoreDimension::from_basic(dim, rq.cpu_id),
+            cpu_dim: CpuCoreDimension::from_basic(dim, cpu_id),
             running_since_ns: timestamp_ns,
         };
 
@@ -409,6 +415,32 @@ impl SchedulerWindowState {
         } else {
             self.running_by_tid.push_entry(tid, next_running);
         }
+    }
+
+    #[inline(always)]
+    fn handle_sched_combined(
+        &mut self,
+        buf: &mut Buffer,
+        prev_tid: u32,
+        next_tid: u32,
+        timestamp_ns: u64,
+        prev_dim: BasicDimension,
+        next_dim: BasicDimension,
+        on_cpu_ns: u64,
+        runqueue_ns: u64,
+        off_cpu_ns: u64,
+        cpu_id: u32,
+    ) {
+        self.handle_sched_switch(buf, prev_tid, timestamp_ns, prev_dim, on_cpu_ns, cpu_id);
+        self.handle_sched_runqueue(
+            buf,
+            next_tid,
+            timestamp_ns,
+            next_dim,
+            runqueue_ns,
+            off_cpu_ns,
+            cpu_id,
+        );
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
@@ -708,7 +740,8 @@ impl AggregatedSink {
                         event.raw.tid,
                         event.raw.timestamp_ns,
                         basic_dim,
-                        e,
+                        e.on_cpu_ns,
+                        e.cpu_id,
                     );
                 } else {
                     buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
@@ -718,30 +751,19 @@ impl AggregatedSink {
             TypedEvent::SchedCombined(e) => {
                 let prev_dim = basic_dim;
                 let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
-                let switch = crate::tracer::event::SchedEvent {
-                    on_cpu_ns: e.on_cpu_ns,
-                    cpu_id: e.cpu_id,
-                };
-                let runqueue = crate::tracer::event::SchedRunqueueEvent {
-                    runqueue_ns: e.runqueue_ns,
-                    off_cpu_ns: e.off_cpu_ns,
-                    cpu_id: e.cpu_id,
-                };
 
                 if let Some(scheduler_state) = scheduler_state {
-                    scheduler_state.handle_sched_switch(
+                    scheduler_state.handle_sched_combined(
                         buf,
                         event.raw.tid,
-                        event.raw.timestamp_ns,
-                        prev_dim,
-                        &switch,
-                    );
-                    scheduler_state.handle_sched_runqueue(
-                        buf,
                         e.next_tid,
                         event.raw.timestamp_ns,
+                        prev_dim,
                         next_dim,
-                        &runqueue,
+                        e.on_cpu_ns,
+                        e.runqueue_ns,
+                        e.off_cpu_ns,
+                        e.cpu_id,
                     );
                 } else {
                     buf.add_sched_switch(prev_dim, e.on_cpu_ns, e.cpu_id);
@@ -756,7 +778,9 @@ impl AggregatedSink {
                         event.raw.tid,
                         event.raw.timestamp_ns,
                         basic_dim,
-                        e,
+                        e.runqueue_ns,
+                        e.off_cpu_ns,
+                        e.cpu_id,
                     );
                 } else {
                     buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
