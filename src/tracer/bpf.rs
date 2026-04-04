@@ -340,8 +340,6 @@ impl Tracer for BpfTracer {
 // Ring buffer read loop
 // ---------------------------------------------------------------------------
 
-/// Report stats every N events to reduce overhead.
-const STATS_INTERVAL: u32 = 1000;
 async fn read_loop(
     ring_buf: RingBuf<aya::maps::MapData>,
     ring_buf_size: u32,
@@ -359,7 +357,18 @@ async fn read_loop(
         }
     };
 
-    let mut event_count: u32 = 0;
+    // `aya` does not expose live ring-buffer fill, so repeated callbacks would
+    // only rewrite the same zero-valued gauge on the event hot path.
+    if !stats_handlers.is_empty() {
+        let stats = RingbufStats {
+            used_bytes: 0,
+            size_bytes: ring_buf_size as usize,
+        };
+        for stats_handler in stats_handlers.iter() {
+            stats_handler(stats);
+        }
+    }
+
     let batch_pool = std::sync::Arc::new(ParsedEventBatchPool::default());
     let mut parsed_batch = ParsedEventBatch::checkout(&batch_pool);
     let single_batch_handler_only = event_handlers.is_empty() && event_batch_handlers.len() == 1;
@@ -393,18 +402,6 @@ async fn read_loop(
                             continue;
                         }
 
-                        event_count += 1;
-                        if event_count >= STATS_INTERVAL {
-                            let stats = RingbufStats {
-                                used_bytes: 0, // aya does not expose remaining/capacity
-                                size_bytes: ring_buf_size as usize,
-                            };
-                            for stats_handler in stats_handlers.iter() {
-                                stats_handler(stats);
-                            }
-                            event_count = 0;
-                        }
-
                         match parse_event(data) {
                             Ok(event) => {
                                 parsed_batch.push(event);
@@ -436,18 +433,6 @@ async fn read_loop(
                         if data.is_empty() {
                             tracing::warn!("ring buffer overflow detected");
                             continue;
-                        }
-
-                        event_count += 1;
-                        if event_count >= STATS_INTERVAL {
-                            let stats = RingbufStats {
-                                used_bytes: 0, // aya does not expose remaining/capacity
-                                size_bytes: ring_buf_size as usize,
-                            };
-                            for stats_handler in stats_handlers.iter() {
-                                stats_handler(stats);
-                            }
-                            event_count = 0;
                         }
 
                         match parse_event(data) {
