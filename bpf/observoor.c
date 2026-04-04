@@ -698,11 +698,9 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
     // We capture TCP metrics here because sk is only available on entry.
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct net_send_val val = {};
-    val.ts = bpf_ktime_get_ns();
     val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
     val.dport = __builtin_bswap16(
         BPF_CORE_READ(sk, __sk_common.skc_dport));
-    val.pid = pid;
     val.client_type = ct;
     val.transport = NET_TRANSPORT_TCP;
     {
@@ -736,7 +734,6 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
-    e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
@@ -771,11 +768,9 @@ int BPF_KPROBE(kprobe_tcp_recvmsg, struct sock *sk)
 
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct net_recv_val val = {};
-    val.ts = bpf_ktime_get_ns();
     val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
     val.dport = __builtin_bswap16(
         BPF_CORE_READ(sk, __sk_common.skc_dport));
-    val.pid = pid;
     val.client_type = ct;
     val.transport = NET_TRANSPORT_TCP;
     bpf_map_update_elem(&net_recv_start, &key, &val, BPF_ANY);
@@ -804,7 +799,6 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
 
     fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
     e->hdr.pad[0] = val->transport;
-    e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
@@ -829,11 +823,9 @@ int BPF_KPROBE(kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg,
 
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct net_send_val val = {};
-    val.ts = bpf_ktime_get_ns();
     val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
     val.dport = __builtin_bswap16(
         BPF_CORE_READ(sk, __sk_common.skc_dport));
-    val.pid = pid;
     val.client_type = ct;
     val.transport = NET_TRANSPORT_UDP;
     val.srtt_us = 0;
@@ -864,7 +856,6 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
 
     fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
     e->hdr.pad[0] = val->transport;
-    e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
@@ -888,11 +879,9 @@ int BPF_KPROBE(kprobe_udp_recvmsg, struct sock *sk)
 
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct net_recv_val val = {};
-    val.ts = bpf_ktime_get_ns();
     val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
     val.dport = __builtin_bswap16(
         BPF_CORE_READ(sk, __sk_common.skc_dport));
-    val.pid = pid;
     val.client_type = ct;
     val.transport = NET_TRANSPORT_UDP;
     bpf_map_update_elem(&net_recv_udp_start, &key, &val, BPF_ANY);
@@ -921,7 +910,6 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
 
     fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
     e->hdr.pad[0] = val->transport;
-    e->hdr.pid = val->pid;
     e->bytes = (__u32)ret;
     e->sport = val->sport;
     e->dport = val->dport;
