@@ -6,9 +6,11 @@ use std::fs;
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
 
-use super::aggregate::{CounterSnapshot, LatencySnapshot, SyscallAggregate};
+use super::aggregate::{CounterAggregate, CounterSnapshot, LatencySnapshot, SyscallAggregate};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
-use super::dimension::{direction_string, port_label_string, rw_string, BasicDimension};
+use super::dimension::{
+    direction_string, port_label_string, rw_string, BasicDimension, NetworkDimension,
+};
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
     SamplingMode, SlotInfo, WindowInfo,
@@ -325,7 +327,8 @@ impl Collector {
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
         (map_len(&buf.basic_metrics) * 4)
             + (map_len(&buf.basic_cold_metrics) * 5)
-            + map_len(&buf.net_io)
+            + map_len(&buf.net_io_tx)
+            + map_len(&buf.net_io_rx)
             + map_len(&buf.tcp_tx)
             + map_len(&buf.tcp_retransmit)
             + map_len(&buf.disk_io)
@@ -784,35 +787,8 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        for (dim, aggregate) in buf.net_io.iter() {
-            let snap = aggregate.snapshot();
-            if snap.count == 0 {
-                continue;
-            }
-
-            let source_event = if dim.direction() == 0 {
-                EventType::NetTX
-            } else {
-                EventType::NetRX
-            };
-            let sampling = self.sampling_for_event(source_event);
-
-            batch.counter.push(CounterMetric {
-                metric_type: "net_io",
-                window,
-                slot,
-                pid: dim.pid(),
-                client_type: client_type_from_u8(dim.client_type()),
-                device_id: None,
-                rw: None,
-                port_label: Some(port_label_string(dim.port_label())),
-                direction: Some(direction_string(dim.direction())),
-                sampling_mode: sampling.mode,
-                sampling_rate: sampling.rate,
-                sum: snap.sum,
-                count: snap.count,
-            });
-        }
+        self.collect_net_io_map(batch, &buf.net_io_tx, window, slot);
+        self.collect_net_io_map(batch, &buf.net_io_rx, window, slot);
 
         let sampling = self.sampling_for_event(EventType::NetTX);
         for (dim, aggregate) in buf.tcp_tx.iter() {
@@ -889,6 +865,45 @@ impl Collector {
 
             batch.counter.push(CounterMetric {
                 metric_type: "tcp_retransmit",
+                window,
+                slot,
+                pid: dim.pid(),
+                client_type: client_type_from_u8(dim.client_type()),
+                device_id: None,
+                rw: None,
+                port_label: Some(port_label_string(dim.port_label())),
+                direction: Some(direction_string(dim.direction())),
+                sampling_mode: sampling.mode,
+                sampling_rate: sampling.rate,
+                sum: snap.sum,
+                count: snap.count,
+            });
+        }
+    }
+
+    #[inline(always)]
+    fn collect_net_io_map(
+        &self,
+        batch: &mut MetricBatch,
+        map: &FastMap<NetworkDimension, CounterAggregate>,
+        window: WindowInfo,
+        slot: SlotInfo,
+    ) {
+        for (dim, aggregate) in map.iter() {
+            let snap = aggregate.snapshot();
+            if snap.count == 0 {
+                continue;
+            }
+
+            let source_event = if dim.direction() == 0 {
+                EventType::NetTX
+            } else {
+                EventType::NetRX
+            };
+            let sampling = self.sampling_for_event(source_event);
+
+            batch.counter.push(CounterMetric {
+                metric_type: "net_io",
                 window,
                 slot,
                 pid: dim.pid(),
@@ -1651,9 +1666,11 @@ mod tests {
     fn test_collect_network_counters() {
         let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
         let mut buf = test_buffer();
-        let dim = NetworkDimension::new(123, 1, 3, 0);
+        let tx = NetworkDimension::new(123, 1, 3, 0);
+        let rx = NetworkDimension::new(123, 1, 3, 1);
 
-        buf.add_net_io(dim, 1024);
+        buf.add_net_io(tx, 1024);
+        buf.add_net_io(rx, 2048);
 
         let batch = collector.collect(&buf, test_meta());
         let net: Vec<_> = batch
@@ -1661,10 +1678,21 @@ mod tests {
             .iter()
             .filter(|m| m.metric_type == "net_io")
             .collect();
-        assert_eq!(net.len(), 1);
-        assert_eq!(net[0].port_label, Some("el_json_rpc"));
-        assert_eq!(net[0].direction.as_deref(), Some("tx"));
-        assert_eq!(net[0].sum, 1024);
+        assert_eq!(net.len(), 2);
+
+        let tx_metric = net
+            .iter()
+            .find(|m| m.direction == Some("tx"))
+            .expect("tx metric exists");
+        assert_eq!(tx_metric.port_label, Some("el_json_rpc"));
+        assert_eq!(tx_metric.sum, 1024);
+
+        let rx_metric = net
+            .iter()
+            .find(|m| m.direction == Some("rx"))
+            .expect("rx metric exists");
+        assert_eq!(rx_metric.port_label, Some("el_json_rpc"));
+        assert_eq!(rx_metric.sum, 2048);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use hashbrown::{
     HashMap,
 };
 
-use crate::tracer::event::EventType;
+use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
     BasicAggregate, BasicColdAggregate, CounterAggregate, DiskAggregate, TcpTxAggregate,
@@ -328,7 +328,10 @@ pub struct Buffer {
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
-    pub net_io: FastMap<NetworkDimension, CounterAggregate>,
+    // Keep generic TX and RX counters in separate maps so alternating network
+    // streams retain independent last-hit cache entries.
+    pub net_io_tx: FastMap<NetworkDimension, CounterAggregate>,
+    pub net_io_rx: FastMap<NetworkDimension, CounterAggregate>,
     pub tcp_retransmit: FastMap<NetworkDimension, CounterAggregate>,
 
     // --- TCP TX bytes + metrics (NetworkDimension -> TcpTxAggregate) ---
@@ -364,7 +367,8 @@ impl Buffer {
             basic_metrics: fast_map_with_capacity(16),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
-            net_io: fast_map_with_capacity(64),
+            net_io_tx: fast_map_with_capacity(64),
+            net_io_rx: fast_map_with_capacity(64),
             tcp_retransmit: fast_map_with_capacity(32),
             // TCP TX bytes + metrics.
             tcp_tx: fast_map_with_capacity(32),
@@ -397,7 +401,8 @@ impl Buffer {
 
         self.basic_metrics.clear();
         self.basic_cold_metrics.clear();
-        self.net_io.clear();
+        self.net_io_tx.clear();
+        self.net_io_rx.clear();
         self.tcp_retransmit.clear();
         self.tcp_tx.clear();
         self.disk_io.clear();
@@ -462,7 +467,11 @@ impl Buffer {
 
     /// Adds a network I/O event.
     pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
-        add_counter_value(&mut self.net_io, dim, bytes);
+        if dim.direction() == Direction::RX as u8 {
+            add_counter_value(&mut self.net_io_rx, dim, bytes);
+        } else {
+            add_counter_value(&mut self.net_io_tx, dim, bytes);
+        }
     }
 
     /// Adds a TCP retransmit event.
@@ -640,10 +649,37 @@ mod tests {
         buf.add_net_io(dim, 1024);
         buf.add_net_io(dim, 2048);
 
-        let entry = buf.net_io.get(&dim).expect("entry exists");
+        let entry = buf.net_io_tx.get(&dim).expect("entry exists");
         let snap = entry.snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 3072);
+    }
+
+    #[test]
+    fn test_add_net_io_separates_tx_and_rx_maps() {
+        let mut buf = test_buffer();
+        let tx = NetworkDimension::new(1, 1, 3, Direction::TX as u8);
+        let rx = NetworkDimension::new(1, 1, 3, Direction::RX as u8);
+
+        buf.add_net_io(tx, 1024);
+        buf.add_net_io(rx, 2048);
+
+        assert_eq!(
+            buf.net_io_tx
+                .get(&tx)
+                .expect("tx entry exists")
+                .snapshot()
+                .sum,
+            1024
+        );
+        assert_eq!(
+            buf.net_io_rx
+                .get(&rx)
+                .expect("rx entry exists")
+                .snapshot()
+                .sum,
+            2048
+        );
     }
 
     #[test]
@@ -826,6 +862,8 @@ mod tests {
         assert_eq!(buf.system_cores, 16);
         assert!(buf.basic_metrics.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
+        assert!(buf.net_io_tx.is_empty());
+        assert!(buf.net_io_rx.is_empty());
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf
