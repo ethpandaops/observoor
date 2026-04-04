@@ -684,10 +684,9 @@ impl AggregatedSink {
             TypedEvent::NetIO(e) => {
                 let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
-                    e.direction,
                     e.transport,
-                    e.src_port,
-                    e.dst_port,
+                    e.local_port,
+                    e.remote_port,
                     dimensions,
                     port_label_cache,
                 );
@@ -701,10 +700,9 @@ impl AggregatedSink {
             TypedEvent::NetIOTcpTxMetrics(e) => {
                 let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
-                    Direction::TX as u8,
                     NetTransport::Tcp as u8,
-                    e.src_port,
-                    e.dst_port,
+                    e.local_port,
+                    e.remote_port,
                     dimensions,
                     port_label_cache,
                 );
@@ -714,10 +712,9 @@ impl AggregatedSink {
             TypedEvent::TcpRetransmit(e) => {
                 let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
-                    Direction::TX as u8,
                     NetTransport::Tcp as u8,
-                    e.src_port,
-                    e.dst_port,
+                    e.local_port,
+                    e.remote_port,
                     dimensions,
                     port_label_cache,
                 );
@@ -1420,8 +1417,8 @@ fn build_network_dimension(
         BasicDimension::new(pid, client_type),
         e.direction,
         e.transport,
-        e.src_port,
-        e.dst_port,
+        e.local_port,
+        e.remote_port,
         &resolved_dims,
     )
 }
@@ -1429,25 +1426,19 @@ fn build_network_dimension(
 #[inline(always)]
 fn build_tcp_metrics_dimension_from_parts_cached(
     basic: BasicDimension,
-    raw_direction: u8,
     transport: u8,
-    src_port: u16,
-    dst_port: u16,
+    local_port: u16,
+    remote_port: u16,
     dims: &ResolvedDimensions<'_>,
     port_label_cache: &mut PortLabelResolveCache,
 ) -> TCPMetricsDimension {
     let port_label = if let Some(port_label_map) = dims.network_port_label_map {
-        let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
-            (src_port, dst_port)
-        } else {
-            (dst_port, src_port)
-        };
         port_label_cache.resolve(
             port_label_map,
             basic.client_type(),
             transport,
-            primary_port,
-            secondary_port,
+            local_port,
+            remote_port,
         )
     } else {
         0
@@ -1481,22 +1472,17 @@ fn build_network_dimension_from_parts_uncached(
     basic: BasicDimension,
     raw_direction: u8,
     transport: u8,
-    src_port: u16,
-    dst_port: u16,
+    local_port: u16,
+    remote_port: u16,
     dims: &ResolvedDimensions<'_>,
 ) -> NetworkDimension {
     let direction = raw_direction & dims.network_direction_mask;
     let port_label = if let Some(port_label_map) = dims.network_port_label_map {
-        let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
-            (src_port, dst_port)
-        } else {
-            (dst_port, src_port)
-        };
         resolve_network_port_label_uncached(
             basic.client_type(),
             transport,
-            primary_port,
-            secondary_port,
+            local_port,
+            remote_port,
             port_label_map,
         )
     } else {
@@ -1523,24 +1509,16 @@ fn resolve_network_port_label_uncached(
 }
 
 /// Extracts the local port from a network event.
-/// For TX (outbound), source is local. For RX (inbound), dest is local.
+/// Ports are normalized during parsing, so this is just a field read.
 #[cfg_attr(not(test), allow(dead_code))]
 fn local_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX as u8 {
-        e.src_port
-    } else {
-        e.dst_port
-    }
+    e.local_port
 }
 
 /// Extracts the peer/remote port from a network event.
 #[cfg_attr(not(test), allow(dead_code))]
 fn remote_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX as u8 {
-        e.dst_port
-    } else {
-        e.src_port
-    }
+    e.remote_port
 }
 
 /// Creates a DiskDimension based on config.
@@ -1751,8 +1729,8 @@ mod tests {
             EventType::NetTX,
             TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
                 bytes: 1024,
-                src_port: 8545,
-                dst_port: 30303,
+                local_port: 8545,
+                remote_port: 30303,
                 srtt_us: 100,
                 cwnd: 65535,
             }),
@@ -1784,8 +1762,8 @@ mod tests {
             EventType::NetTX,
             TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
                 bytes: 1024,
-                src_port: 45_000,
-                dst_port: 30_303,
+                local_port: 45_000,
+                remote_port: 30_303,
                 srtt_us: 100,
                 cwnd: 65535,
             }),
@@ -2314,8 +2292,8 @@ mod tests {
     fn test_local_port_tx_vs_rx() {
         let tx_event = NetIOEvent {
             bytes: 100,
-            src_port: 8545,
-            dst_port: 30303,
+            local_port: 8545,
+            remote_port: 30303,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
@@ -2324,8 +2302,8 @@ mod tests {
 
         let rx_event = NetIOEvent {
             bytes: 100,
-            src_port: 30303,
-            dst_port: 8545,
+            local_port: 8545,
+            remote_port: 30303,
             direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
         };
@@ -2342,8 +2320,8 @@ mod tests {
 
         let net_event = NetIOEvent {
             bytes: 100,
-            src_port: 45432,
-            dst_port: 13000,
+            local_port: 45432,
+            remote_port: 13000,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
@@ -2362,8 +2340,8 @@ mod tests {
 
         let net_event = NetIOEvent {
             bytes: 100,
-            src_port: 13000,
-            dst_port: 13000,
+            local_port: 13000,
+            remote_port: 13000,
             direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
         };
@@ -2391,8 +2369,8 @@ mod tests {
 
         let net_event = NetIOEvent {
             bytes: 100,
-            src_port: 13000,
-            dst_port: 13000,
+            local_port: 13000,
+            remote_port: 13000,
             direction: Direction::RX as u8,
             transport: NetTransport::Udp as u8,
         };
@@ -2430,8 +2408,8 @@ mod tests {
 
         let net_event = NetIOEvent {
             bytes: 100,
-            src_port: 8545,
-            dst_port: 30303,
+            local_port: 8545,
+            remote_port: 30303,
             direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
@@ -2452,8 +2430,8 @@ mod tests {
 
         let net_event = NetIOEvent {
             bytes: 100,
-            src_port: 19999,
-            dst_port: 45000,
+            local_port: 19999,
+            remote_port: 45000,
             direction: Direction::TX as u8,
             transport: NetTransport::Udp as u8,
         };

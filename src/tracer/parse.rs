@@ -359,8 +359,8 @@ fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, Pars
         let metrics = read_payload::<RawNetIOMetricsPayload>(data, "net IO event")?;
         return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
             bytes: u32::from_le(metrics.bytes),
-            src_port: u16::from_le(metrics.src_port),
-            dst_port: u16::from_le(metrics.dst_port),
+            local_port: u16::from_le(metrics.src_port),
+            remote_port: u16::from_le(metrics.dst_port),
             srtt_us: u32::from_le(metrics.srtt_us),
             cwnd: u32::from_le(metrics.cwnd),
         }));
@@ -377,8 +377,8 @@ fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, Pars
 
     Ok(TypedEvent::NetIO(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
-        src_port: u16::from_le(raw.src_port),
-        dst_port: u16::from_le(raw.dst_port),
+        local_port: u16::from_le(raw.src_port),
+        remote_port: u16::from_le(raw.dst_port),
         direction: Direction::TX as u8,
         transport: transport_raw,
     }))
@@ -402,8 +402,16 @@ fn parse_net_io(
 
     Ok(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
-        src_port: u16::from_le(raw.src_port),
-        dst_port: u16::from_le(raw.dst_port),
+        local_port: if direction == Direction::TX as u8 {
+            u16::from_le(raw.src_port)
+        } else {
+            u16::from_le(raw.dst_port)
+        },
+        remote_port: if direction == Direction::TX as u8 {
+            u16::from_le(raw.dst_port)
+        } else {
+            u16::from_le(raw.src_port)
+        },
         direction,
         transport: transport_raw,
     })
@@ -492,8 +500,8 @@ fn parse_tcp_retransmit(data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
     let raw = read_payload::<RawTcpRetransmitPayload>(data, "tcp retransmit event")?;
     Ok(TcpRetransmitEvent {
         bytes: u32::from_le(raw.bytes),
-        src_port: u16::from_le(raw.src_port),
-        dst_port: u16::from_le(raw.dst_port),
+        local_port: u16::from_le(raw.src_port),
+        remote_port: u16::from_le(raw.dst_port),
     })
 }
 
@@ -714,8 +722,8 @@ mod tests {
             panic!("expected NetIOTcpTxMetrics");
         };
         assert_eq!(e.bytes, 1024);
-        assert_eq!(e.src_port, 8080);
-        assert_eq!(e.dst_port, 9090);
+        assert_eq!(e.local_port, 8080);
+        assert_eq!(e.remote_port, 9090);
         assert_eq!(e.srtt_us, 50_000);
         assert_eq!(e.cwnd, 10);
     }
@@ -735,8 +743,8 @@ mod tests {
         assert_eq!(e.direction, Direction::TX as u8);
         assert_eq!(e.transport, NetTransport::Udp as u8);
         assert_eq!(e.bytes, 1536);
-        assert_eq!(e.src_port, 30303);
-        assert_eq!(e.dst_port, 9000);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
     }
 
     #[test]
@@ -754,6 +762,8 @@ mod tests {
         assert_eq!(e.direction, Direction::RX as u8);
         assert_eq!(e.transport, NetTransport::Udp as u8);
         assert_eq!(e.bytes, 2048);
+        assert_eq!(e.local_port, 12345);
+        assert_eq!(e.remote_port, 443);
     }
 
     // -- Scheduler --
@@ -915,8 +925,8 @@ mod tests {
             panic!("expected TcpRetransmit");
         };
         assert_eq!(e.bytes, 512);
-        assert_eq!(e.src_port, 30303);
-        assert_eq!(e.dst_port, 30304);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 30304);
     }
 
     // -- TCP state --

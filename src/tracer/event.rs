@@ -434,8 +434,10 @@ pub struct DiskIOEvent {
 #[allow(dead_code)]
 pub struct NetIOEvent {
     pub bytes: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
+    /// Local socket port after direction normalization.
+    pub local_port: u16,
+    /// Peer socket port after direction normalization.
+    pub remote_port: u16,
     /// Validated raw `Direction` discriminant from the ring buffer.
     pub direction: u8,
     /// Validated raw `NetTransport` discriminant from the ring buffer.
@@ -447,8 +449,10 @@ pub struct NetIOEvent {
 #[allow(dead_code)]
 pub struct NetIOTcpTxMetricsEvent {
     pub bytes: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
+    /// Local socket port for this transmit event.
+    pub local_port: u16,
+    /// Peer socket port for this transmit event.
+    pub remote_port: u16,
     pub srtt_us: u32,
     pub cwnd: u32,
 }
@@ -509,8 +513,10 @@ pub struct BlockMergeEvent {
 #[allow(dead_code)]
 pub struct TcpRetransmitEvent {
     pub bytes: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
+    /// Local socket port for this retransmit.
+    pub local_port: u16,
+    /// Peer socket port for this retransmit.
+    pub remote_port: u16,
 }
 
 /// Memory reclaim/compaction latency event.
