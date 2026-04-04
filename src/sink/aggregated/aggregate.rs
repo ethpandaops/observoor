@@ -120,55 +120,6 @@ impl Default for PageFaultAggregate {
     }
 }
 
-/// Tracks scheduler latency metrics outside the hottest syscall/FD/page-fault maps.
-///
-/// Scheduler events still aggregate per BasicDimension, but moving them out of
-/// the hottest counter entries keeps those values smaller for syscall-heavy loads.
-pub struct BasicSchedulerAggregate {
-    sched_on_cpu: LatencyAggregate,
-    sched_wait: SchedWaitAggregate,
-}
-
-impl BasicSchedulerAggregate {
-    pub fn new() -> Self {
-        Self {
-            sched_on_cpu: LatencyAggregate::new(),
-            sched_wait: SchedWaitAggregate::new(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
-        self.sched_on_cpu.record(on_cpu_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_sched_wait(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
-        self.sched_wait.record(runqueue_ns, off_cpu_ns);
-    }
-
-    #[inline(always)]
-    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
-        self.sched_on_cpu.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn sched_runqueue_snapshot(&self) -> LatencySnapshot {
-        self.sched_wait.runqueue_snapshot()
-    }
-
-    #[inline(always)]
-    pub fn sched_off_cpu_snapshot(&self) -> LatencySnapshot {
-        self.sched_wait.off_cpu_snapshot()
-    }
-}
-
-impl Default for BasicSchedulerAggregate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 /// Tracks rarely-hit BasicDimension metrics outside the hottest map entry.
 ///
 /// Stress-bench spends most of its time in syscall, scheduler, FD, and page

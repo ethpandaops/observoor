@@ -1838,7 +1838,7 @@ mod tests {
             }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_sched_metrics.is_empty());
+        assert!(!buf.sched_on_cpu.is_empty());
         assert!(!buf.cpu_on_core.is_empty());
 
         // Page fault
@@ -1915,17 +1915,17 @@ mod tests {
         scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
         let prev_sched = buf
-            .basic_sched_metrics
+            .sched_on_cpu
             .get(&BasicDimension::new(123, ClientType::Geth as u8))
             .expect("prev sched_on_cpu");
-        assert_eq!(prev_sched.sched_on_cpu_snapshot().sum, 300);
+        assert_eq!(prev_sched.snapshot().sum, 300);
 
         let next_wait = buf
-            .basic_sched_metrics
+            .sched_wait
             .get(&BasicDimension::new(124, ClientType::Geth as u8))
             .expect("next sched_wait");
-        assert_eq!(next_wait.sched_runqueue_snapshot().sum, 50);
-        assert_eq!(next_wait.sched_off_cpu_snapshot().sum, 100);
+        assert_eq!(next_wait.runqueue_snapshot().sum, 50);
+        assert_eq!(next_wait.off_cpu_snapshot().sum, 100);
 
         let prev_core = buf
             .cpu_on_core
@@ -1977,10 +1977,10 @@ mod tests {
         assert_eq!(core1.snapshot().sum, 500);
 
         let rq = buf1
-            .basic_sched_metrics
+            .sched_wait
             .get(&BasicDimension::new(123, 1))
             .expect("runqueue metric");
-        assert_eq!(rq.sched_runqueue_snapshot().sum, 50);
+        assert_eq!(rq.runqueue_snapshot().sum, 50);
 
         let mut buf2 = Buffer::new(
             SystemTime::now(),
@@ -2058,11 +2058,11 @@ mod tests {
         assert_eq!(core2.snapshot().sum, 500);
 
         let on_cpu = buf2
-            .basic_sched_metrics
+            .sched_on_cpu
             .get(&BasicDimension::new(123, 1))
             .expect("sched_on_cpu recorded");
         // Latency distribution remains raw from sched_switch payload.
-        assert_eq!(on_cpu.sched_on_cpu_snapshot().sum, 2_000);
+        assert_eq!(on_cpu.snapshot().sum, 2_000);
     }
 
     #[test]

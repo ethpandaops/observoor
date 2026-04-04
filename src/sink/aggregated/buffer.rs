@@ -11,8 +11,8 @@ use hashbrown::{
 use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
-    BasicColdAggregate, BasicSchedulerAggregate, CounterAggregate, DiskAggregate, FdAggregate,
-    LatencyAggregate, PageFaultAggregate, TcpTxAggregate,
+    BasicColdAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
+    PageFaultAggregate, SchedWaitAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -343,7 +343,11 @@ pub struct Buffer {
     // them in their own smaller map entry instead of carrying page-fault state.
     pub fd_metrics: FastMap<BasicDimension, FdAggregate>,
     pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
-    pub basic_sched_metrics: FastMap<BasicDimension, BasicSchedulerAggregate>,
+    // `sched_switch` does not need the runqueue/off-CPU aggregates, so keep
+    // on-CPU latency in its own smaller entry and leave the paired wait
+    // metrics together for `sched_runqueue`.
+    pub sched_on_cpu: FastMap<BasicDimension, LatencyAggregate>,
+    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
     // --- Network (TCPMetricsDimension -> CounterAggregate) ---
@@ -394,7 +398,8 @@ impl Buffer {
             // BasicDimension counters.
             fd_metrics: fast_map_with_capacity(16),
             page_fault_metrics: fast_map_with_capacity(16),
-            basic_sched_metrics: fast_map_with_capacity(8),
+            sched_on_cpu: fast_map_with_capacity(8),
+            sched_wait: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
             net_io_tx: fast_map_with_capacity(64),
@@ -437,7 +442,8 @@ impl Buffer {
         self.syscall_fsync.clear();
         self.fd_metrics.clear();
         self.page_fault_metrics.clear();
-        self.basic_sched_metrics.clear();
+        self.sched_on_cpu.clear();
+        self.sched_wait.clear();
         self.basic_cold_metrics.clear();
         self.net_io_tx.clear();
         self.net_io_rx.clear();
@@ -585,7 +591,7 @@ impl Buffer {
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
     pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        get_or_default_mut(&mut self.basic_sched_metrics, dim).record_sched_on_cpu(on_cpu_ns);
+        get_or_default_mut(&mut self.sched_on_cpu, dim).record(on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
@@ -612,8 +618,7 @@ impl Buffer {
     /// Adds scheduler runqueue and off-CPU latency.
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
-            get_or_default_mut(&mut self.basic_sched_metrics, dim)
-                .record_sched_wait(runqueue_ns, off_cpu_ns);
+            get_or_default_mut(&mut self.sched_wait, dim).record(runqueue_ns, off_cpu_ns);
         }
     }
 
@@ -835,11 +840,8 @@ mod tests {
         buf.add_sched_switch(dim, 2_000, 2);
         buf.add_sched_switch(dim, 500, 4);
 
-        let on_cpu = buf
-            .basic_sched_metrics
-            .get(&dim)
-            .expect("sched_on_cpu exists");
-        let on_cpu_snap = on_cpu.sched_on_cpu_snapshot();
+        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
+        let on_cpu_snap = on_cpu.snapshot();
         assert_eq!(on_cpu_snap.count, 3);
         assert_eq!(on_cpu_snap.sum, 3_500);
 
@@ -866,21 +868,15 @@ mod tests {
         let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_runqueue(dim, 0, 5_000);
-        let first = buf
-            .basic_sched_metrics
-            .get(&dim)
-            .expect("sched wait exists");
-        assert_eq!(first.sched_runqueue_snapshot().count, 0);
-        assert_eq!(first.sched_off_cpu_snapshot().count, 1);
+        let first = buf.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(first.runqueue_snapshot().count, 0);
+        assert_eq!(first.off_cpu_snapshot().count, 1);
 
         let mut buf2 = test_buffer();
         buf2.add_sched_runqueue(dim, 5_000, 0);
-        let second = buf2
-            .basic_sched_metrics
-            .get(&dim)
-            .expect("sched wait exists");
-        assert_eq!(second.sched_runqueue_snapshot().count, 1);
-        assert_eq!(second.sched_off_cpu_snapshot().count, 0);
+        let second = buf2.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(second.runqueue_snapshot().count, 1);
+        assert_eq!(second.off_cpu_snapshot().count, 0);
     }
 
     #[test]
@@ -964,7 +960,8 @@ mod tests {
         assert!(buf.syscall_fsync.is_empty());
         assert!(buf.fd_metrics.is_empty());
         assert!(buf.page_fault_metrics.is_empty());
-        assert!(buf.basic_sched_metrics.is_empty());
+        assert!(buf.sched_on_cpu.is_empty());
+        assert!(buf.sched_wait.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
         assert!(buf.net_io_tx.is_empty());
         assert!(buf.net_io_rx.is_empty());

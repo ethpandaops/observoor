@@ -325,7 +325,8 @@ impl Collector {
             + map_len(&buf.syscall_futex)
             + map_len(&buf.syscall_mmap)
             + map_len(&buf.syscall_fsync)
-            + (map_len(&buf.basic_sched_metrics) * 3)
+            + map_len(&buf.sched_on_cpu)
+            + (map_len(&buf.sched_wait) * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.disk_io_read)
             + map_len(&buf.disk_io_write)
@@ -423,7 +424,7 @@ impl Collector {
 
         let sched_switch_sampling = self.sampling_for_event(EventType::SchedSwitch);
         let sched_runqueue_sampling = self.sampling_for_event(EventType::SchedRunqueue);
-        for (dim, aggregate) in buf.basic_sched_metrics.iter() {
+        for (dim, aggregate) in buf.sched_on_cpu.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
             self.push_latency_metric(
@@ -436,10 +437,14 @@ impl Collector {
                 None,
                 "sched_on_cpu",
                 sched_switch_sampling,
-                aggregate.sched_on_cpu_snapshot(),
+                aggregate.snapshot(),
             );
+        }
 
-            let off_cpu = aggregate.sched_off_cpu_snapshot();
+        for (dim, aggregate) in buf.sched_wait.iter() {
+            let pid = dim.pid();
+            let client_type = client_type_from_u8(dim.client_type());
+            let off_cpu = aggregate.off_cpu_snapshot();
             if off_cpu.count > 0 {
                 batch.latency.push(LatencyMetric {
                     metric_type: "sched_off_cpu",
@@ -459,7 +464,7 @@ impl Collector {
                 });
             }
 
-            let runqueue = aggregate.sched_runqueue_snapshot();
+            let runqueue = aggregate.runqueue_snapshot();
             if runqueue.count > 0 {
                 batch.latency.push(LatencyMetric {
                     metric_type: "sched_runqueue",
