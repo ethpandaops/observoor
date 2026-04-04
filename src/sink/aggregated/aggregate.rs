@@ -80,10 +80,8 @@ pub struct SyscallAggregate {
     write: LatencyAggregate,
     futex: LatencyAggregate,
     mmap: LatencyAggregate,
-    epoll_wait: LatencyAggregate,
     fsync: LatencyAggregate,
-    fdatasync: LatencyAggregate,
-    pwrite: LatencyAggregate,
+    epoll_wait: LatencyAggregate,
 }
 
 impl SyscallAggregate {
@@ -94,10 +92,8 @@ impl SyscallAggregate {
             write: LatencyAggregate::new(),
             futex: LatencyAggregate::new(),
             mmap: LatencyAggregate::new(),
-            epoll_wait: LatencyAggregate::new(),
             fsync: LatencyAggregate::new(),
-            fdatasync: LatencyAggregate::new(),
-            pwrite: LatencyAggregate::new(),
+            epoll_wait: LatencyAggregate::new(),
         }
     }
 
@@ -122,23 +118,13 @@ impl SyscallAggregate {
     }
 
     #[inline(always)]
-    pub fn record_epoll_wait(&mut self, latency_ns: u64) {
-        self.epoll_wait.record(latency_ns);
-    }
-
-    #[inline(always)]
     pub fn record_fsync(&mut self, latency_ns: u64) {
         self.fsync.record(latency_ns);
     }
 
     #[inline(always)]
-    pub fn record_fdatasync(&mut self, latency_ns: u64) {
-        self.fdatasync.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_pwrite(&mut self, latency_ns: u64) {
-        self.pwrite.record(latency_ns);
+    pub fn record_epoll_wait(&mut self, latency_ns: u64) {
+        self.epoll_wait.record(latency_ns);
     }
 
     #[inline(always)]
@@ -162,23 +148,13 @@ impl SyscallAggregate {
     }
 
     #[inline(always)]
-    pub fn epoll_wait_snapshot(&self) -> LatencySnapshot {
-        self.epoll_wait.snapshot()
-    }
-
-    #[inline(always)]
     pub fn fsync_snapshot(&self) -> LatencySnapshot {
         self.fsync.snapshot()
     }
 
     #[inline(always)]
-    pub fn fdatasync_snapshot(&self) -> LatencySnapshot {
-        self.fdatasync.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn pwrite_snapshot(&self) -> LatencySnapshot {
-        self.pwrite.snapshot()
+    pub fn epoll_wait_snapshot(&self) -> LatencySnapshot {
+        self.epoll_wait.snapshot()
     }
 }
 
@@ -243,16 +219,6 @@ impl BasicAggregate {
     #[inline(always)]
     pub fn record_syscall_fsync(&mut self, latency_ns: u64) {
         self.syscalls.record_fsync(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_fdatasync(&mut self, latency_ns: u64) {
-        self.syscalls.record_fdatasync(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_pwrite(&mut self, latency_ns: u64) {
-        self.syscalls.record_pwrite(latency_ns);
     }
 
     #[inline(always)]
@@ -334,10 +300,13 @@ impl Default for BasicAggregate {
 /// Tracks rarely-hit BasicDimension metrics outside the hottest map entry.
 ///
 /// Stress-bench spends most of its time in syscall, scheduler, FD, and page
-/// fault ingestion. Moving colder memory/process counters out of `BasicAggregate`
-/// shrinks the value stored behind `basic_metrics`, improving cache density on
-/// the hot path while keeping full aggregation coverage intact.
+/// fault ingestion. Moving colder memory/process counters and infrequent
+/// durability syscalls out of `BasicAggregate` shrinks the value stored behind
+/// `basic_metrics`, improving cache density on the hot path while keeping full
+/// aggregation coverage intact.
 pub struct BasicColdAggregate {
+    syscall_fdatasync: LatencyAggregate,
+    syscall_pwrite: LatencyAggregate,
     mem_reclaim: LatencyAggregate,
     mem_compaction: LatencyAggregate,
     swap_in: CounterAggregate,
@@ -350,6 +319,8 @@ pub struct BasicColdAggregate {
 impl BasicColdAggregate {
     pub fn new() -> Self {
         Self {
+            syscall_fdatasync: LatencyAggregate::new(),
+            syscall_pwrite: LatencyAggregate::new(),
             mem_reclaim: LatencyAggregate::new(),
             mem_compaction: LatencyAggregate::new(),
             swap_in: CounterAggregate::new(),
@@ -358,6 +329,16 @@ impl BasicColdAggregate {
             process_exit: CountAggregate::new(),
             tcp_state_change: CountAggregate::new(),
         }
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_fdatasync(&mut self, duration_ns: u64) {
+        self.syscall_fdatasync.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_pwrite(&mut self, duration_ns: u64) {
+        self.syscall_pwrite.record(duration_ns);
     }
 
     #[inline(always)]
@@ -393,6 +374,16 @@ impl BasicColdAggregate {
     #[inline(always)]
     pub fn record_tcp_state_change(&mut self) {
         self.tcp_state_change.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn syscall_fdatasync_snapshot(&self) -> LatencySnapshot {
+        self.syscall_fdatasync.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn syscall_pwrite_snapshot(&self) -> LatencySnapshot {
+        self.syscall_pwrite.snapshot()
     }
 
     #[inline(always)]

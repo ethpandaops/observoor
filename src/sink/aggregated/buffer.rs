@@ -323,7 +323,7 @@ pub struct Buffer {
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
 
-    // --- BasicDimension metrics (syscalls, scheduler, memory, process counters) ---
+    // --- BasicDimension metrics (hot path + cold syscall/memory/process counters) ---
     pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
@@ -452,12 +452,12 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_fdatasync(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_fdatasync(latency_ns);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_fdatasync(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_pwrite(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_pwrite(latency_ns);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_pwrite(latency_ns);
     }
 
     /// Adds a network I/O event.

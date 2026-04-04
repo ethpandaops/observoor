@@ -317,8 +317,8 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 11)
-            + (map_len(&buf.basic_cold_metrics) * 2)
+        (map_len(&buf.basic_metrics) * 9)
+            + (map_len(&buf.basic_cold_metrics) * 4)
             + map_len(&buf.disk_io)
     }
 
@@ -399,16 +399,6 @@ impl Collector {
                 "syscall_fsync",
                 SyscallAggregate::fsync_snapshot,
             ),
-            (
-                EventType::SyscallFdatasync,
-                "syscall_fdatasync",
-                SyscallAggregate::fdatasync_snapshot,
-            ),
-            (
-                EventType::SyscallPwrite,
-                "syscall_pwrite",
-                SyscallAggregate::pwrite_snapshot,
-            ),
         ];
 
         let sched_switch_sampling = self.sampling_for_event(EventType::SchedSwitch);
@@ -486,11 +476,37 @@ impl Collector {
             }
         }
 
+        let fdatasync_sampling = self.sampling_for_event(EventType::SyscallFdatasync);
+        let pwrite_sampling = self.sampling_for_event(EventType::SyscallPwrite);
         let mem_reclaim_sampling = self.sampling_for_event(EventType::MemReclaim);
         let mem_compaction_sampling = self.sampling_for_event(EventType::MemCompaction);
         for (dim, aggregate) in buf.basic_cold_metrics.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                pid,
+                client_type,
+                None,
+                None,
+                "syscall_fdatasync",
+                fdatasync_sampling,
+                aggregate.syscall_fdatasync_snapshot(),
+            );
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                pid,
+                client_type,
+                None,
+                None,
+                "syscall_pwrite",
+                pwrite_sampling,
+                aggregate.syscall_pwrite_snapshot(),
+            );
             self.push_latency_metric(
                 batch,
                 window,
@@ -1524,6 +1540,38 @@ mod tests {
         assert_eq!(m.max, 10_000);
         assert!(m.device_id.is_none());
         assert!(m.rw.is_none());
+    }
+
+    #[test]
+    fn test_collect_cold_syscall_latency() {
+        let collector = Collector::new(Duration::from_secs(1), &SamplingConfig::default());
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(123, 1);
+
+        buf.add_syscall(EventType::SyscallFdatasync, dim, 7_000);
+        buf.add_syscall(EventType::SyscallPwrite, dim, 9_000);
+
+        let batch = collector.collect(&buf, test_meta());
+
+        let fdatasync = batch
+            .latency
+            .iter()
+            .find(|m| m.metric_type == "syscall_fdatasync")
+            .expect("syscall_fdatasync metric should exist");
+        assert_eq!(fdatasync.pid, 123);
+        assert_eq!(fdatasync.client_type, ClientType::Geth);
+        assert_eq!(fdatasync.count, 1);
+        assert_eq!(fdatasync.sum, 7_000);
+
+        let pwrite = batch
+            .latency
+            .iter()
+            .find(|m| m.metric_type == "syscall_pwrite")
+            .expect("syscall_pwrite metric should exist");
+        assert_eq!(pwrite.pid, 123);
+        assert_eq!(pwrite.client_type, ClientType::Geth);
+        assert_eq!(pwrite.count, 1);
+        assert_eq!(pwrite.sum, 9_000);
     }
 
     #[test]
