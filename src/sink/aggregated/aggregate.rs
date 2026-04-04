@@ -76,24 +76,21 @@ pub struct LatencySnapshot {
     pub histogram: [u32; NUM_BUCKETS],
 }
 
-/// Tracks hot count-only BasicDimension metrics behind one per-dimension entry.
+/// Tracks page-fault counters behind their own compact per-dimension entry.
 ///
-/// Syscall latencies dominate the ingest path and are stored in dedicated maps
-/// so each event only touches one small latency aggregate. FD and page-fault
-/// counters stay together here because they are compact and often arrive in the
-/// same file-I/O burst.
-pub struct BasicAggregate {
+/// Stress-bench emits `fd_open`/`fd_close` on every iteration but page faults
+/// only around the mmap path. Keeping faults out of the FD map shrinks the
+/// hotter entry without changing aggregation behavior.
+pub struct PageFaultAggregate {
     page_fault_major: CountAggregate,
     page_fault_minor: CountAggregate,
-    fd_ops: FdAggregate,
 }
 
-impl BasicAggregate {
+impl PageFaultAggregate {
     pub fn new() -> Self {
         Self {
             page_fault_major: CountAggregate::new(),
             page_fault_minor: CountAggregate::new(),
-            fd_ops: FdAggregate::new(),
         }
     }
 
@@ -107,16 +104,6 @@ impl BasicAggregate {
     }
 
     #[inline(always)]
-    pub fn record_fd_open(&mut self) {
-        self.fd_ops.record_open();
-    }
-
-    #[inline(always)]
-    pub fn record_fd_close(&mut self) {
-        self.fd_ops.record_close();
-    }
-
-    #[inline(always)]
     pub fn page_fault_major_snapshot(&self) -> CounterSnapshot {
         self.page_fault_major.snapshot()
     }
@@ -125,28 +112,18 @@ impl BasicAggregate {
     pub fn page_fault_minor_snapshot(&self) -> CounterSnapshot {
         self.page_fault_minor.snapshot()
     }
-
-    #[inline(always)]
-    pub fn fd_open_snapshot(&self) -> CounterSnapshot {
-        self.fd_ops.open_snapshot()
-    }
-
-    #[inline(always)]
-    pub fn fd_close_snapshot(&self) -> CounterSnapshot {
-        self.fd_ops.close_snapshot()
-    }
 }
 
-impl Default for BasicAggregate {
+impl Default for PageFaultAggregate {
     fn default() -> Self {
         Self::new()
     }
 }
 
-/// Tracks scheduler latency metrics outside the hottest syscall/FD/page-fault map.
+/// Tracks scheduler latency metrics outside the hottest syscall/FD/page-fault maps.
 ///
 /// Scheduler events still aggregate per BasicDimension, but moving them out of
-/// `BasicAggregate` keeps the hottest value smaller for syscall-heavy loads.
+/// the hottest counter entries keeps those values smaller for syscall-heavy loads.
 pub struct BasicSchedulerAggregate {
     sched_on_cpu: LatencyAggregate,
     sched_wait: SchedWaitAggregate,
@@ -196,8 +173,8 @@ impl Default for BasicSchedulerAggregate {
 ///
 /// Stress-bench spends most of its time in syscall, scheduler, FD, and page
 /// fault ingestion. Moving colder memory/process counters and infrequent
-/// syscall families out of `BasicAggregate` shrinks the value stored behind
-/// `basic_metrics`, improving cache density on the hot path while keeping full
+/// syscall families out of the hot BasicDimension maps keeps those entries
+/// smaller, improving cache density on the hot path while keeping full
 /// aggregation coverage intact.
 pub struct BasicColdAggregate {
     syscall_epoll_wait: LatencyAggregate,

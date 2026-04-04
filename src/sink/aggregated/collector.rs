@@ -332,7 +332,8 @@ impl Collector {
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 4)
+        (map_len(&buf.fd_metrics) * 2)
+            + (map_len(&buf.page_fault_metrics) * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.net_io_tx)
             + map_len(&buf.net_io_rx)
@@ -712,7 +713,7 @@ impl Collector {
         let open_sampling = self.sampling_for_event(EventType::FDOpen);
         let close_sampling = self.sampling_for_event(EventType::FDClose);
         let page_fault_sampling = self.sampling_for_event(EventType::PageFault);
-        for (dim, aggregate) in buf.basic_metrics.iter() {
+        for (dim, aggregate) in buf.page_fault_metrics.iter() {
             self.push_basic_counter_metric(
                 batch,
                 window,
@@ -731,6 +732,9 @@ impl Collector {
                 page_fault_sampling,
                 aggregate.page_fault_minor_snapshot(),
             );
+        }
+
+        for (dim, aggregate) in buf.fd_metrics.iter() {
             self.push_basic_counter_metric(
                 batch,
                 window,
@@ -738,7 +742,7 @@ impl Collector {
                 *dim,
                 "fd_open",
                 open_sampling,
-                aggregate.fd_open_snapshot(),
+                aggregate.open_snapshot(),
             );
             self.push_basic_counter_metric(
                 batch,
@@ -747,7 +751,7 @@ impl Collector {
                 *dim,
                 "fd_close",
                 close_sampling,
-                aggregate.fd_close_snapshot(),
+                aggregate.close_snapshot(),
             );
         }
 

@@ -11,8 +11,8 @@ use hashbrown::{
 use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
-    BasicAggregate, BasicColdAggregate, BasicSchedulerAggregate, CounterAggregate, DiskAggregate,
-    LatencyAggregate, TcpTxAggregate,
+    BasicColdAggregate, BasicSchedulerAggregate, CounterAggregate, DiskAggregate, FdAggregate,
+    LatencyAggregate, PageFaultAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -338,8 +338,11 @@ pub struct Buffer {
     pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
     pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
 
-    // --- BasicDimension counters (page faults + FD activity) ---
-    pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
+    // --- BasicDimension counters ---
+    // `fd_open`/`fd_close` dominate this counter path in stress-bench, so keep
+    // them in their own smaller map entry instead of carrying page-fault state.
+    pub fd_metrics: FastMap<BasicDimension, FdAggregate>,
+    pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
     pub basic_sched_metrics: FastMap<BasicDimension, BasicSchedulerAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
@@ -389,7 +392,8 @@ impl Buffer {
             syscall_mmap: fast_map_with_capacity(16),
             syscall_fsync: fast_map_with_capacity(16),
             // BasicDimension counters.
-            basic_metrics: fast_map_with_capacity(16),
+            fd_metrics: fast_map_with_capacity(16),
+            page_fault_metrics: fast_map_with_capacity(16),
             basic_sched_metrics: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
@@ -431,7 +435,8 @@ impl Buffer {
         self.syscall_futex.clear();
         self.syscall_mmap.clear();
         self.syscall_fsync.clear();
-        self.basic_metrics.clear();
+        self.fd_metrics.clear();
+        self.page_fault_metrics.clear();
         self.basic_sched_metrics.clear();
         self.basic_cold_metrics.clear();
         self.net_io_tx.clear();
@@ -614,17 +619,17 @@ impl Buffer {
 
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_page_fault(major);
+        get_or_default_mut(&mut self.page_fault_metrics, dim).record_page_fault(major);
     }
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_fd_open();
+        get_or_default_mut(&mut self.fd_metrics, dim).record_open();
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_fd_close();
+        get_or_default_mut(&mut self.fd_metrics, dim).record_close();
     }
 
     /// Adds a memory reclaim event.
@@ -700,7 +705,8 @@ mod tests {
 
         buf.add_syscall(EventType::SyscallEpollWait, dim, 8_000);
 
-        assert!(buf.basic_metrics.get(&dim).is_none());
+        assert!(buf.fd_metrics.get(&dim).is_none());
+        assert!(buf.page_fault_metrics.get(&dim).is_none());
         let entry = buf.basic_cold_metrics.get(&dim).expect("cold entry exists");
         let snap = entry.syscall_epoll_wait_snapshot();
         assert_eq!(snap.count, 1);
@@ -714,7 +720,8 @@ mod tests {
 
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
-        assert!(buf.basic_metrics.is_empty());
+        assert!(buf.fd_metrics.is_empty());
+        assert!(buf.page_fault_metrics.is_empty());
         assert!(buf.syscall_read.is_empty());
         assert!(buf.syscall_write.is_empty());
         assert!(buf.syscall_futex.is_empty());
@@ -885,7 +892,7 @@ mod tests {
         buf.add_page_fault(dim, false);
         buf.add_page_fault(dim, false);
 
-        let page_faults = buf.basic_metrics.get(&dim).expect("page faults exist");
+        let page_faults = buf.page_fault_metrics.get(&dim).expect("page faults exist");
         assert_eq!(page_faults.page_fault_major_snapshot().count, 1);
         assert_eq!(page_faults.page_fault_minor_snapshot().count, 2);
     }
@@ -899,9 +906,9 @@ mod tests {
         buf.add_fd_open(dim);
         buf.add_fd_close(dim);
 
-        let fd = buf.basic_metrics.get(&dim).expect("fd aggregate exists");
-        assert_eq!(fd.fd_open_snapshot().count, 2);
-        assert_eq!(fd.fd_close_snapshot().count, 1);
+        let fd = buf.fd_metrics.get(&dim).expect("fd aggregate exists");
+        assert_eq!(fd.open_snapshot().count, 2);
+        assert_eq!(fd.close_snapshot().count, 1);
     }
 
     #[test]
@@ -955,7 +962,8 @@ mod tests {
         assert!(buf.syscall_futex.is_empty());
         assert!(buf.syscall_mmap.is_empty());
         assert!(buf.syscall_fsync.is_empty());
-        assert!(buf.basic_metrics.is_empty());
+        assert!(buf.fd_metrics.is_empty());
+        assert!(buf.page_fault_metrics.is_empty());
         assert!(buf.basic_sched_metrics.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
         assert!(buf.net_io_tx.is_empty());

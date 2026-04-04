@@ -1813,7 +1813,7 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &open_event, &dims);
         AggregatedSink::process_event(&mut buf, &close_event, &dims);
 
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.fd_metrics.is_empty());
     }
 
     #[test]
@@ -1847,7 +1847,7 @@ mod tests {
             TypedEvent::PageFault(PageFaultEvent { major: true }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.page_fault_metrics.is_empty());
 
         // OOM kill
         let event = make_event(EventType::OOMKill, TypedEvent::OOMKill);
