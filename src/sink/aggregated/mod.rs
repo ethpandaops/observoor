@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use smallvec::SmallVec;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
@@ -49,6 +50,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
 const RUNNING_TID_CACHE_SIZE: usize = 32;
+const RUNNING_TID_INLINE_CAPACITY: usize = 16;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -98,7 +100,9 @@ struct RunningThread {
 
 #[derive(Default)]
 struct RunningThreadStore {
-    entries: Vec<(u32, RunningThread)>,
+    // Scheduler state cardinality is bounded by concurrently running threads,
+    // so keep the common case inline to avoid a heap indirection on lookups.
+    entries: SmallVec<[(u32, RunningThread); RUNNING_TID_INLINE_CAPACITY]>,
     // Scheduler events repeatedly touch the same small set of runnable TIDs.
     // Cache the last resolved slot per TID to avoid rescanning `entries`.
     index_cache: [Option<RunningThreadCacheEntry>; RUNNING_TID_CACHE_SIZE],
@@ -114,7 +118,7 @@ impl RunningThreadStore {
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            entries: Vec::with_capacity(capacity),
+            entries: SmallVec::with_capacity(capacity.min(RUNNING_TID_INLINE_CAPACITY)),
             index_cache: [None; RUNNING_TID_CACHE_SIZE],
         }
     }
