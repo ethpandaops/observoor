@@ -10,7 +10,9 @@ use hashbrown::{
 
 use crate::tracer::event::EventType;
 
-use super::aggregate::{BasicAggregate, CounterAggregate, DiskAggregate, TcpTxAggregate};
+use super::aggregate::{
+    BasicAggregate, BasicColdAggregate, CounterAggregate, DiskAggregate, TcpTxAggregate,
+};
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
 };
@@ -323,6 +325,7 @@ pub struct Buffer {
 
     // --- BasicDimension metrics (syscalls, scheduler, memory, process counters) ---
     pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
+    pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
     // --- Network (NetworkDimension -> CounterAggregate) ---
     pub net_io: FastMap<NetworkDimension, CounterAggregate>,
@@ -359,6 +362,7 @@ impl Buffer {
             system_cores,
             // BasicDimension metrics.
             basic_metrics: fast_map_with_capacity(16),
+            basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
             net_io: fast_map_with_capacity(64),
             tcp_retransmit: fast_map_with_capacity(32),
@@ -392,6 +396,7 @@ impl Buffer {
         self.system_cores = system_cores;
 
         self.basic_metrics.clear();
+        self.basic_cold_metrics.clear();
         self.net_io.clear();
         self.tcp_retransmit.clear();
         self.tcp_tx.clear();
@@ -552,37 +557,37 @@ impl Buffer {
 
     /// Adds a memory reclaim event.
     pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_mem_reclaim(duration_ns);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_mem_reclaim(duration_ns);
     }
 
     /// Adds a memory compaction event.
     pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_mem_compaction(duration_ns);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_mem_compaction(duration_ns);
     }
 
     /// Adds a swap-in event.
     pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_swap_in(pages);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_swap_in(pages);
     }
 
     /// Adds a swap-out event.
     pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_swap_out(pages);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_swap_out(pages);
     }
 
     /// Adds an OOM kill event.
     pub fn add_oom_kill(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_oom_kill();
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_oom_kill();
     }
 
     /// Adds a process exit event.
     pub fn add_process_exit(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_process_exit();
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_process_exit();
     }
 
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_tcp_state_change();
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_tcp_state_change();
     }
 }
 
@@ -820,6 +825,7 @@ mod tests {
         assert!(buf.el_offline);
         assert_eq!(buf.system_cores, 16);
         assert!(buf.basic_metrics.is_empty());
+        assert!(buf.basic_cold_metrics.is_empty());
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf

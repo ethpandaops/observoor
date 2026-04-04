@@ -1861,12 +1861,12 @@ mod tests {
         // OOM kill
         let event = make_event(EventType::OOMKill, TypedEvent::OOMKill);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Process exit
         let event = make_event(EventType::ProcessExit, TypedEvent::ProcessExit);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Mem reclaim
         let event = make_event(
@@ -1874,7 +1874,7 @@ mod tests {
             TypedEvent::MemReclaim(MemLatencyEvent { duration_ns: 5_000 }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Swap in
         let event = make_event(
@@ -1882,12 +1882,12 @@ mod tests {
             TypedEvent::SwapIn(SwapEvent { pages: 1 }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // TCP state
         let event = make_event(EventType::TcpState, TypedEvent::TcpState);
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.basic_metrics.is_empty());
+        assert!(!buf.basic_cold_metrics.is_empty());
     }
 
     #[test]

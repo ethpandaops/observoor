@@ -317,11 +317,14 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 13) + map_len(&buf.disk_io)
+        (map_len(&buf.basic_metrics) * 11)
+            + (map_len(&buf.basic_cold_metrics) * 2)
+            + map_len(&buf.disk_io)
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 9)
+        (map_len(&buf.basic_metrics) * 4)
+            + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.net_io)
             + map_len(&buf.tcp_tx)
             + map_len(&buf.tcp_retransmit)
@@ -410,9 +413,6 @@ impl Collector {
 
         let sched_switch_sampling = self.sampling_for_event(EventType::SchedSwitch);
         let sched_runqueue_sampling = self.sampling_for_event(EventType::SchedRunqueue);
-        let mem_reclaim_sampling = self.sampling_for_event(EventType::MemReclaim);
-        let mem_compaction_sampling = self.sampling_for_event(EventType::MemCompaction);
-
         for (dim, aggregate) in buf.basic_metrics.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
@@ -443,30 +443,6 @@ impl Collector {
                 "sched_on_cpu",
                 sched_switch_sampling,
                 aggregate.sched_on_cpu_snapshot(),
-            );
-            self.push_latency_metric(
-                batch,
-                window,
-                slot,
-                pid,
-                client_type,
-                None,
-                None,
-                "mem_reclaim",
-                mem_reclaim_sampling,
-                aggregate.mem_reclaim_snapshot(),
-            );
-            self.push_latency_metric(
-                batch,
-                window,
-                slot,
-                pid,
-                client_type,
-                None,
-                None,
-                "mem_compaction",
-                mem_compaction_sampling,
-                aggregate.mem_compaction_snapshot(),
             );
 
             let off_cpu = aggregate.sched_off_cpu_snapshot();
@@ -508,6 +484,37 @@ impl Collector {
                     histogram: runqueue.histogram,
                 });
             }
+        }
+
+        let mem_reclaim_sampling = self.sampling_for_event(EventType::MemReclaim);
+        let mem_compaction_sampling = self.sampling_for_event(EventType::MemCompaction);
+        for (dim, aggregate) in buf.basic_cold_metrics.iter() {
+            let pid = dim.pid();
+            let client_type = client_type_from_u8(dim.client_type());
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                pid,
+                client_type,
+                None,
+                None,
+                "mem_reclaim",
+                mem_reclaim_sampling,
+                aggregate.mem_reclaim_snapshot(),
+            );
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                pid,
+                client_type,
+                None,
+                None,
+                "mem_compaction",
+                mem_compaction_sampling,
+                aggregate.mem_compaction_snapshot(),
+            );
         }
     }
 
@@ -628,12 +635,6 @@ impl Collector {
         let open_sampling = self.sampling_for_event(EventType::FDOpen);
         let close_sampling = self.sampling_for_event(EventType::FDClose);
         let page_fault_sampling = self.sampling_for_event(EventType::PageFault);
-        let swap_in_sampling = self.sampling_for_event(EventType::SwapIn);
-        let swap_out_sampling = self.sampling_for_event(EventType::SwapOut);
-        let oom_sampling = self.sampling_for_event(EventType::OOMKill);
-        let process_exit_sampling = self.sampling_for_event(EventType::ProcessExit);
-        let tcp_state_sampling = self.sampling_for_event(EventType::TcpState);
-
         for (dim, aggregate) in buf.basic_metrics.iter() {
             self.push_basic_counter_metric(
                 batch,
@@ -653,6 +654,32 @@ impl Collector {
                 page_fault_sampling,
                 aggregate.page_fault_minor_snapshot(),
             );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "fd_open",
+                open_sampling,
+                aggregate.fd_open_snapshot(),
+            );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "fd_close",
+                close_sampling,
+                aggregate.fd_close_snapshot(),
+            );
+        }
+
+        let swap_in_sampling = self.sampling_for_event(EventType::SwapIn);
+        let swap_out_sampling = self.sampling_for_event(EventType::SwapOut);
+        let oom_sampling = self.sampling_for_event(EventType::OOMKill);
+        let process_exit_sampling = self.sampling_for_event(EventType::ProcessExit);
+        let tcp_state_sampling = self.sampling_for_event(EventType::TcpState);
+        for (dim, aggregate) in buf.basic_cold_metrics.iter() {
             self.push_basic_counter_metric(
                 batch,
                 window,
@@ -697,24 +724,6 @@ impl Collector {
                 "tcp_state_change",
                 tcp_state_sampling,
                 aggregate.tcp_state_change_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "fd_open",
-                open_sampling,
-                aggregate.fd_open_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "fd_close",
-                close_sampling,
-                aggregate.fd_close_snapshot(),
             );
         }
     }

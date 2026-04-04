@@ -201,13 +201,6 @@ pub struct BasicAggregate {
     page_fault_major: CountAggregate,
     page_fault_minor: CountAggregate,
     fd_ops: FdAggregate,
-    mem_reclaim: LatencyAggregate,
-    mem_compaction: LatencyAggregate,
-    swap_in: CounterAggregate,
-    swap_out: CounterAggregate,
-    oom_kill: CountAggregate,
-    process_exit: CountAggregate,
-    tcp_state_change: CountAggregate,
 }
 
 impl BasicAggregate {
@@ -219,13 +212,6 @@ impl BasicAggregate {
             page_fault_major: CountAggregate::new(),
             page_fault_minor: CountAggregate::new(),
             fd_ops: FdAggregate::new(),
-            mem_reclaim: LatencyAggregate::new(),
-            mem_compaction: LatencyAggregate::new(),
-            swap_in: CounterAggregate::new(),
-            swap_out: CounterAggregate::new(),
-            oom_kill: CountAggregate::new(),
-            process_exit: CountAggregate::new(),
-            tcp_state_change: CountAggregate::new(),
         }
     }
 
@@ -299,41 +285,6 @@ impl BasicAggregate {
     }
 
     #[inline(always)]
-    pub fn record_mem_reclaim(&mut self, duration_ns: u64) {
-        self.mem_reclaim.record(duration_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_mem_compaction(&mut self, duration_ns: u64) {
-        self.mem_compaction.record(duration_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_swap_in(&mut self, pages: u64) {
-        self.swap_in.add(pages as i64);
-    }
-
-    #[inline(always)]
-    pub fn record_swap_out(&mut self, pages: u64) {
-        self.swap_out.add(pages as i64);
-    }
-
-    #[inline(always)]
-    pub fn record_oom_kill(&mut self) {
-        self.oom_kill.add_count(1);
-    }
-
-    #[inline(always)]
-    pub fn record_process_exit(&mut self) {
-        self.process_exit.add_count(1);
-    }
-
-    #[inline(always)]
-    pub fn record_tcp_state_change(&mut self) {
-        self.tcp_state_change.add_count(1);
-    }
-
-    #[inline(always)]
     pub fn syscalls(&self) -> &SyscallAggregate {
         &self.syscalls
     }
@@ -372,6 +323,77 @@ impl BasicAggregate {
     pub fn fd_close_snapshot(&self) -> CounterSnapshot {
         self.fd_ops.close_snapshot()
     }
+}
+
+impl Default for BasicAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks rarely-hit BasicDimension metrics outside the hottest map entry.
+///
+/// Stress-bench spends most of its time in syscall, scheduler, FD, and page
+/// fault ingestion. Moving colder memory/process counters out of `BasicAggregate`
+/// shrinks the value stored behind `basic_metrics`, improving cache density on
+/// the hot path while keeping full aggregation coverage intact.
+pub struct BasicColdAggregate {
+    mem_reclaim: LatencyAggregate,
+    mem_compaction: LatencyAggregate,
+    swap_in: CounterAggregate,
+    swap_out: CounterAggregate,
+    oom_kill: CountAggregate,
+    process_exit: CountAggregate,
+    tcp_state_change: CountAggregate,
+}
+
+impl BasicColdAggregate {
+    pub fn new() -> Self {
+        Self {
+            mem_reclaim: LatencyAggregate::new(),
+            mem_compaction: LatencyAggregate::new(),
+            swap_in: CounterAggregate::new(),
+            swap_out: CounterAggregate::new(),
+            oom_kill: CountAggregate::new(),
+            process_exit: CountAggregate::new(),
+            tcp_state_change: CountAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_mem_reclaim(&mut self, duration_ns: u64) {
+        self.mem_reclaim.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_mem_compaction(&mut self, duration_ns: u64) {
+        self.mem_compaction.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_in(&mut self, pages: u64) {
+        self.swap_in.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_out(&mut self, pages: u64) {
+        self.swap_out.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_oom_kill(&mut self) {
+        self.oom_kill.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_process_exit(&mut self) {
+        self.process_exit.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_tcp_state_change(&mut self) {
+        self.tcp_state_change.add_count(1);
+    }
 
     #[inline(always)]
     pub fn mem_reclaim_snapshot(&self) -> LatencySnapshot {
@@ -409,7 +431,7 @@ impl BasicAggregate {
     }
 }
 
-impl Default for BasicAggregate {
+impl Default for BasicColdAggregate {
     fn default() -> Self {
         Self::new()
     }
