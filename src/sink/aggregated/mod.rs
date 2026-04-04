@@ -49,8 +49,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 /// under sustained tracer load without letting the event loop run unbounded.
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
-const RUNNING_TID_CACHE_SIZE: usize = 32;
-const RUNNING_TID_INLINE_CAPACITY: usize = 16;
+const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -92,6 +91,7 @@ struct SlotRotation {
 
 #[derive(Clone, Copy, Debug)]
 struct RunningThread {
+    tid: u32,
     // Scheduler events close and flush the same running slice repeatedly, so
     // cache the packed per-core dimension once on switch-in.
     cpu_dim: CpuCoreDimension,
@@ -100,136 +100,70 @@ struct RunningThread {
 
 #[derive(Default)]
 struct RunningThreadStore {
-    // Scheduler state cardinality is bounded by concurrently running threads,
-    // so keep the common case inline to avoid a heap indirection on lookups.
-    entries: SmallVec<[(u32, RunningThread); RUNNING_TID_INLINE_CAPACITY]>,
-    // Scheduler events repeatedly touch the same small set of runnable TIDs.
-    // Cache the last resolved slot per TID to avoid rescanning `entries`.
-    index_cache: [Option<RunningThreadCacheEntry>; RUNNING_TID_CACHE_SIZE],
-}
-
-#[derive(Clone, Copy)]
-struct RunningThreadCacheEntry {
-    tid: u32,
-    index: usize,
+    // Active running state is naturally bounded by CPU count. Store one slot
+    // per observed CPU so sched_switch can resolve state by cpu_id directly.
+    entries: SmallVec<[Option<RunningThread>; RUNNING_CPU_INLINE_CAPACITY]>,
 }
 
 impl RunningThreadStore {
     #[inline(always)]
     fn with_capacity(capacity: usize) -> Self {
         Self {
-            entries: SmallVec::with_capacity(capacity.min(RUNNING_TID_INLINE_CAPACITY)),
-            index_cache: [None; RUNNING_TID_CACHE_SIZE],
+            entries: SmallVec::with_capacity(capacity.min(RUNNING_CPU_INLINE_CAPACITY)),
         }
     }
 
     #[inline(always)]
-    fn cache_index(&mut self, tid: u32, index: usize) {
-        self.index_cache[running_tid_cache_slot(tid)] =
-            Some(RunningThreadCacheEntry { tid, index });
-    }
-
-    #[inline(always)]
-    fn clear_cached_index(&mut self, tid: u32, index: usize) {
-        let slot = running_tid_cache_slot(tid);
-        if let Some(entry) = self.index_cache[slot] {
-            if entry.tid == tid && entry.index == index {
-                self.index_cache[slot] = None;
-            }
+    fn ensure_cpu_slot(&mut self, cpu_id: u32) {
+        let slot = cpu_id as usize;
+        while self.entries.len() <= slot {
+            self.entries.push(None);
         }
     }
 
     #[inline(always)]
-    fn find_index(&mut self, tid: u32) -> Option<usize> {
-        let slot = running_tid_cache_slot(tid);
-
-        if let Some(entry) = self.index_cache[slot] {
-            if entry.tid == tid {
-                if entry.index < self.entries.len() {
-                    let cached_tid = unsafe { self.entries.get_unchecked(entry.index).0 };
-                    if cached_tid == tid {
-                        return Some(entry.index);
-                    }
-                }
-            }
-        }
-
-        let len = self.entries.len();
-        let mut index = 0usize;
-        while index < len {
-            let running_tid = unsafe { self.entries.get_unchecked(index).0 };
-            if running_tid == tid {
-                self.index_cache[slot] = Some(RunningThreadCacheEntry { tid, index });
-                return Some(index);
-            }
-            index += 1;
-        }
-
-        None
+    fn cpu_slot_mut(&mut self, cpu_id: u32) -> &mut Option<RunningThread> {
+        self.ensure_cpu_slot(cpu_id);
+        // Safety: `ensure_cpu_slot` grows `entries` until `cpu_id` is in range.
+        unsafe { self.entries.get_unchecked_mut(cpu_id as usize) }
     }
 
     #[inline(always)]
-    fn push_entry(&mut self, tid: u32, running: RunningThread) {
-        let index = self.entries.len();
-        self.entries.push((tid, running));
-        self.cache_index(tid, index);
+    fn take_cpu(&mut self, cpu_id: u32) -> Option<RunningThread> {
+        if let Some(slot) = self.entries.get_mut(cpu_id as usize) {
+            slot.take()
+        } else {
+            None
+        }
     }
 
     #[inline(always)]
-    fn replace_entry(&mut self, index: usize, tid: u32, running: RunningThread) {
-        unsafe {
-            *self.entries.get_unchecked_mut(index) = (tid, running);
-        }
-        self.cache_index(tid, index);
-    }
-
-    #[inline(always)]
-    fn swap_remove_entry(&mut self, index: usize) -> (u32, RunningThread) {
-        let removed_tid = unsafe { self.entries.get_unchecked(index).0 };
-        self.clear_cached_index(removed_tid, index);
-
-        let removed = self.entries.swap_remove(index);
-        if let Some((moved_tid, _)) = self.entries.get(index) {
-            self.cache_index(*moved_tid, index);
-        }
-
-        removed
+    fn find_cpu_for_tid(&self, tid: u32) -> Option<usize> {
+        self.entries
+            .iter()
+            .position(|entry| entry.is_some_and(|running| running.tid == tid))
     }
 
     #[inline(always)]
     fn iter_mut(&mut self) -> impl Iterator<Item = &mut RunningThread> {
-        self.entries.iter_mut().map(|(_, running)| running)
+        self.entries.iter_mut().filter_map(Option::as_mut)
     }
 
     #[cfg(test)]
     #[inline(always)]
     fn is_empty(&self) -> bool {
-        self.entries.is_empty()
+        self.entries.iter().all(Option::is_none)
     }
 
     #[cfg(test)]
     #[inline(always)]
-    fn contains_tid(&mut self, tid: u32) -> bool {
-        self.find_index(tid).is_some()
+    fn contains_tid(&self, tid: u32) -> bool {
+        self.find_cpu_for_tid(tid).is_some()
     }
-
-    #[cfg(test)]
-    #[inline(always)]
-    fn cached_index(&self, tid: u32) -> Option<usize> {
-        let slot = running_tid_cache_slot(tid);
-        self.index_cache[slot]
-            .filter(|entry| entry.tid == tid)
-            .map(|entry| entry.index)
-    }
-}
-
-#[inline(always)]
-fn running_tid_cache_slot(tid: u32) -> usize {
-    ((tid ^ tid.rotate_left(13)) as usize) & (RUNNING_TID_CACHE_SIZE - 1)
 }
 
 struct SchedulerWindowState {
-    running_by_tid: RunningThreadStore,
+    running_by_cpu: RunningThreadStore,
 }
 
 impl Default for SchedulerWindowState {
@@ -237,7 +171,7 @@ impl Default for SchedulerWindowState {
         Self {
             // This state only tracks currently running threads, so cardinality
             // stays bounded by the number of active cores rather than total TIDs.
-            running_by_tid: RunningThreadStore::with_capacity(64),
+            running_by_cpu: RunningThreadStore::with_capacity(64),
         }
     }
 }
@@ -345,7 +279,7 @@ impl<'a> ResolvedDimensions<'a> {
 impl SchedulerWindowState {
     #[inline(always)]
     fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
-        for running in self.running_by_tid.iter_mut() {
+        for running in self.running_by_cpu.iter_mut() {
             if boundary_ns <= running.running_since_ns {
                 continue;
             }
@@ -367,28 +301,28 @@ impl SchedulerWindowState {
     ) {
         buf.add_sched_on_cpu(dim, on_cpu_ns);
 
-        if let Some(idx) = self.running_by_tid.find_index(tid) {
-            let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
-            if timestamp_ns > running.running_since_ns {
-                buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
-                self.running_by_tid.swap_remove_entry(idx);
-                return;
-            }
+        if let Some(running) = self.running_by_cpu.take_cpu(cpu_id) {
+            if running.tid == tid {
+                if timestamp_ns > running.running_since_ns {
+                    buf.add_cpu_on_core_dim(
+                        running.cpu_dim,
+                        timestamp_ns - running.running_since_ns,
+                    );
+                    return;
+                }
 
-            // Zero-length runtime for this slice; consume the running state.
-            if timestamp_ns == running.running_since_ns {
-                self.running_by_tid.swap_remove_entry(idx);
-                return;
+                // Zero-length runtime for this slice; consume the running state.
+                if timestamp_ns == running.running_since_ns {
+                    return;
+                }
+            } else {
+                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
             }
-
-            // Out-of-order switch-out for an older slice. Keep newer running state
-            // and still account this event via raw fallback.
-            buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
-        } else {
-            // Fallback for missing switch-in state (startup, drops): use
-            // kernel-reported slice.
-            buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
         }
+
+        // Fallback for missing switch-in state (startup, drops, or stale events):
+        // use the kernel-reported slice.
+        buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
     }
 
     #[inline(always)]
@@ -405,22 +339,41 @@ impl SchedulerWindowState {
         buf.add_sched_runqueue(dim, runqueue_ns, off_cpu_ns);
 
         let next_running = RunningThread {
+            tid,
             cpu_dim: CpuCoreDimension::from_basic(dim, cpu_id),
             running_since_ns: timestamp_ns,
         };
 
-        if let Some(idx) = self.running_by_tid.find_index(tid) {
-            let prev = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
+        let cpu_index = cpu_id as usize;
+        let mut reused_target_slot = false;
+
+        if let Some(prev_cpu) = self.running_by_cpu.find_cpu_for_tid(tid) {
+            let prev = self
+                .running_by_cpu
+                .take_cpu(prev_cpu as u32)
+                .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > prev.running_since_ns {
                 buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+            } else if timestamp_ns < prev.running_since_ns {
+                *self.running_by_cpu.cpu_slot_mut(prev_cpu as u32) = Some(prev);
+                return;
             }
-            // Only move state forward (or replace at same instant).
-            if timestamp_ns >= prev.running_since_ns {
-                self.running_by_tid.replace_entry(idx, tid, next_running);
-            }
-        } else {
-            self.running_by_tid.push_entry(tid, next_running);
+
+            reused_target_slot = prev_cpu == cpu_index;
         }
+
+        if !reused_target_slot {
+            if let Some(prev) = self.running_by_cpu.take_cpu(cpu_id) {
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                } else if timestamp_ns < prev.running_since_ns {
+                    *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
+                    return;
+                }
+            }
+        }
+
+        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(next_running);
     }
 
     #[inline(always)]
@@ -450,14 +403,16 @@ impl SchedulerWindowState {
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
-        if let Some(idx) = self.running_by_tid.find_index(tid) {
-            let running = unsafe { self.running_by_tid.entries.get_unchecked(idx).1 };
+        if let Some(cpu_id) = self.running_by_cpu.find_cpu_for_tid(tid) {
+            let running = self
+                .running_by_cpu
+                .take_cpu(cpu_id as u32)
+                .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > running.running_since_ns {
                 buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
             }
-
-            if timestamp_ns >= running.running_since_ns {
-                self.running_by_tid.swap_remove_entry(idx);
+            if timestamp_ns < running.running_since_ns {
+                *self.running_by_cpu.cpu_slot_mut(cpu_id as u32) = Some(running);
             }
         }
     }
@@ -1603,76 +1558,45 @@ mod tests {
     }
 
     #[test]
-    fn test_running_thread_store_repairs_stale_cached_index() {
+    fn test_running_thread_store_grows_cpu_slots() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
         let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
-        store.entries.push((
-            10,
-            RunningThread {
-                cpu_dim: cpu_dim(0),
-                running_since_ns: 100,
-            },
-        ));
-        store.entries.push((
-            20,
-            RunningThread {
-                cpu_dim: cpu_dim(1),
-                running_since_ns: 200,
-            },
-        ));
-        store.entries.push((
-            30,
-            RunningThread {
-                cpu_dim: cpu_dim(2),
-                running_since_ns: 300,
-            },
-        ));
+        *store.cpu_slot_mut(0) = Some(RunningThread {
+            tid: 10,
+            cpu_dim: cpu_dim(0),
+            running_since_ns: 100,
+        });
+        *store.cpu_slot_mut(2) = Some(RunningThread {
+            tid: 30,
+            cpu_dim: cpu_dim(2),
+            running_since_ns: 300,
+        });
 
-        assert_eq!(store.find_index(30), Some(2));
-
-        store.entries.swap_remove(1);
-
-        assert_eq!(store.find_index(30), Some(1));
+        assert_eq!(store.entries.len(), 3);
         assert!(store.contains_tid(30));
     }
 
     #[test]
-    fn test_running_thread_store_keeps_cache_coherent_on_insert_and_remove() {
+    fn test_running_thread_store_take_cpu_clears_slot() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
         let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
-        store.push_entry(
-            10,
-            RunningThread {
-                cpu_dim: cpu_dim(0),
-                running_since_ns: 100,
-            },
-        );
-        store.push_entry(
-            20,
-            RunningThread {
-                cpu_dim: cpu_dim(1),
-                running_since_ns: 200,
-            },
-        );
-        store.push_entry(
-            30,
-            RunningThread {
-                cpu_dim: cpu_dim(2),
-                running_since_ns: 300,
-            },
-        );
+        *store.cpu_slot_mut(0) = Some(RunningThread {
+            tid: 10,
+            cpu_dim: cpu_dim(0),
+            running_since_ns: 100,
+        });
+        *store.cpu_slot_mut(1) = Some(RunningThread {
+            tid: 20,
+            cpu_dim: cpu_dim(1),
+            running_since_ns: 200,
+        });
 
-        assert_eq!(store.cached_index(10), Some(0));
-        assert_eq!(store.cached_index(20), Some(1));
-        assert_eq!(store.cached_index(30), Some(2));
-
-        store.swap_remove_entry(1);
-
-        assert_eq!(store.cached_index(20), None);
-        assert_eq!(store.cached_index(30), Some(1));
-        assert_eq!(store.find_index(30), Some(1));
+        let removed = store.take_cpu(1).expect("cpu slot occupied");
+        assert_eq!(removed.tid, 20);
+        assert!(!store.contains_tid(20));
+        assert!(store.contains_tid(10));
     }
 
     #[test]
@@ -2143,7 +2067,7 @@ mod tests {
             .get(&CpuCoreDimension::new(123, 1, 4))
             .expect("process-exit accounted runtime");
         assert_eq!(core.snapshot().sum, 500);
-        assert!(scheduler_state.running_by_tid.is_empty());
+        assert!(scheduler_state.running_by_cpu.is_empty());
     }
 
     #[test]
@@ -2273,7 +2197,7 @@ mod tests {
             .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("stale switch fallback usage");
         assert_eq!(fallback_core.snapshot().sum, 50);
-        assert!(scheduler_state.running_by_tid.contains_tid(70));
+        assert!(scheduler_state.running_by_cpu.contains_tid(70));
     }
 
     #[test]
