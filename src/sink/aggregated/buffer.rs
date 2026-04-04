@@ -452,7 +452,7 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_epoll_wait(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_epoll_wait(latency_ns);
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_epoll_wait(latency_ns);
     }
 
     #[inline(always)]
@@ -659,6 +659,20 @@ mod tests {
         let snap = entry.syscalls().read_snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
+    }
+
+    #[test]
+    fn test_add_syscall_epoll_wait_uses_cold_basic_map() {
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
+
+        buf.add_syscall(EventType::SyscallEpollWait, dim, 8_000);
+
+        assert!(buf.basic_metrics.get(&dim).is_none());
+        let entry = buf.basic_cold_metrics.get(&dim).expect("cold entry exists");
+        let snap = entry.syscall_epoll_wait_snapshot();
+        assert_eq!(snap.count, 1);
+        assert_eq!(snap.sum, 8_000);
     }
 
     #[test]

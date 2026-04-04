@@ -85,7 +85,6 @@ pub struct SyscallAggregate {
     futex: LatencyAggregate,
     mmap: LatencyAggregate,
     fsync: LatencyAggregate,
-    epoll_wait: LatencyAggregate,
 }
 
 impl SyscallAggregate {
@@ -97,7 +96,6 @@ impl SyscallAggregate {
             futex: LatencyAggregate::new(),
             mmap: LatencyAggregate::new(),
             fsync: LatencyAggregate::new(),
-            epoll_wait: LatencyAggregate::new(),
         }
     }
 
@@ -127,11 +125,6 @@ impl SyscallAggregate {
     }
 
     #[inline(always)]
-    pub fn record_epoll_wait(&mut self, latency_ns: u64) {
-        self.epoll_wait.record(latency_ns);
-    }
-
-    #[inline(always)]
     pub fn read_snapshot(&self) -> LatencySnapshot {
         self.read.snapshot()
     }
@@ -154,11 +147,6 @@ impl SyscallAggregate {
     #[inline(always)]
     pub fn fsync_snapshot(&self) -> LatencySnapshot {
         self.fsync.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn epoll_wait_snapshot(&self) -> LatencySnapshot {
-        self.epoll_wait.snapshot()
     }
 }
 
@@ -213,11 +201,6 @@ impl BasicAggregate {
     #[inline(always)]
     pub fn record_syscall_mmap(&mut self, latency_ns: u64) {
         self.syscalls.record_mmap(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_epoll_wait(&mut self, latency_ns: u64) {
-        self.syscalls.record_epoll_wait(latency_ns);
     }
 
     #[inline(always)]
@@ -305,10 +288,11 @@ impl Default for BasicAggregate {
 ///
 /// Stress-bench spends most of its time in syscall, scheduler, FD, and page
 /// fault ingestion. Moving colder memory/process counters and infrequent
-/// durability syscalls out of `BasicAggregate` shrinks the value stored behind
+/// syscall families out of `BasicAggregate` shrinks the value stored behind
 /// `basic_metrics`, improving cache density on the hot path while keeping full
 /// aggregation coverage intact.
 pub struct BasicColdAggregate {
+    syscall_epoll_wait: LatencyAggregate,
     syscall_fdatasync: LatencyAggregate,
     syscall_pwrite: LatencyAggregate,
     mem_reclaim: LatencyAggregate,
@@ -323,6 +307,7 @@ pub struct BasicColdAggregate {
 impl BasicColdAggregate {
     pub fn new() -> Self {
         Self {
+            syscall_epoll_wait: LatencyAggregate::new(),
             syscall_fdatasync: LatencyAggregate::new(),
             syscall_pwrite: LatencyAggregate::new(),
             mem_reclaim: LatencyAggregate::new(),
@@ -333,6 +318,11 @@ impl BasicColdAggregate {
             process_exit: CountAggregate::new(),
             tcp_state_change: CountAggregate::new(),
         }
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_epoll_wait(&mut self, duration_ns: u64) {
+        self.syscall_epoll_wait.record(duration_ns);
     }
 
     #[inline(always)]
@@ -378,6 +368,11 @@ impl BasicColdAggregate {
     #[inline(always)]
     pub fn record_tcp_state_change(&mut self) {
         self.tcp_state_change.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn syscall_epoll_wait_snapshot(&self) -> LatencySnapshot {
+        self.syscall_epoll_wait.snapshot()
     }
 
     #[inline(always)]

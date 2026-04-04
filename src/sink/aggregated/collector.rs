@@ -319,8 +319,8 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 9)
-            + (map_len(&buf.basic_cold_metrics) * 4)
+        (map_len(&buf.basic_metrics) * 8)
+            + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.disk_io)
     }
 
@@ -391,11 +391,6 @@ impl Collector {
                 EventType::SyscallMmap,
                 "syscall_mmap",
                 SyscallAggregate::mmap_snapshot,
-            ),
-            (
-                EventType::SyscallEpollWait,
-                "syscall_epoll_wait",
-                SyscallAggregate::epoll_wait_snapshot,
             ),
             (
                 EventType::SyscallFsync,
@@ -479,6 +474,7 @@ impl Collector {
             }
         }
 
+        let epoll_wait_sampling = self.sampling_for_event(EventType::SyscallEpollWait);
         let fdatasync_sampling = self.sampling_for_event(EventType::SyscallFdatasync);
         let pwrite_sampling = self.sampling_for_event(EventType::SyscallPwrite);
         let mem_reclaim_sampling = self.sampling_for_event(EventType::MemReclaim);
@@ -486,6 +482,18 @@ impl Collector {
         for (dim, aggregate) in buf.basic_cold_metrics.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                pid,
+                client_type,
+                None,
+                None,
+                "syscall_epoll_wait",
+                epoll_wait_sampling,
+                aggregate.syscall_epoll_wait_snapshot(),
+            );
             self.push_latency_metric(
                 batch,
                 window,
@@ -1573,10 +1581,21 @@ mod tests {
         let mut buf = test_buffer();
         let dim = BasicDimension::new(123, 1);
 
+        buf.add_syscall(EventType::SyscallEpollWait, dim, 5_000);
         buf.add_syscall(EventType::SyscallFdatasync, dim, 7_000);
         buf.add_syscall(EventType::SyscallPwrite, dim, 9_000);
 
         let batch = collector.collect(&buf, test_meta());
+
+        let epoll_wait = batch
+            .latency
+            .iter()
+            .find(|m| m.metric_type == "syscall_epoll_wait")
+            .expect("syscall_epoll_wait metric should exist");
+        assert_eq!(epoll_wait.pid, 123);
+        assert_eq!(epoll_wait.client_type, ClientType::Geth);
+        assert_eq!(epoll_wait.count, 1);
+        assert_eq!(epoll_wait.sum, 5_000);
 
         let fdatasync = batch
             .latency
