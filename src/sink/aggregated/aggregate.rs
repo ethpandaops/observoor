@@ -28,8 +28,12 @@ impl LatencyAggregate {
         self.sum += val;
         self.count += 1;
         self.histogram.record(value_ns);
-        self.min = self.min.min(val);
-        self.max = self.max.max(val);
+        if val < self.min {
+            self.min = val;
+        }
+        if val > self.max {
+            self.max = val;
+        }
     }
 
     /// Returns a point-in-time snapshot of all statistics.
@@ -582,8 +586,12 @@ impl GaugeAggregate {
     pub fn record(&mut self, value: i64) {
         self.sum += value;
         self.count += 1;
-        self.min = self.min.min(value);
-        self.max = self.max.max(value);
+        if value < self.min {
+            self.min = value;
+        }
+        if value > self.max {
+            self.max = value;
+        }
     }
 
     /// Returns a point-in-time snapshot.
