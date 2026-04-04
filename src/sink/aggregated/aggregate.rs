@@ -160,14 +160,12 @@ impl Default for SyscallAggregate {
 
 /// Tracks all BasicDimension-keyed metrics behind one per-dimension entry.
 ///
-/// The hottest ingest workloads interleave syscalls, scheduler events, page
-/// faults, and FD activity for the same PID. Co-locating them lets the sink
-/// reuse one hash lookup and one last-hit cache entry across those event
-/// families instead of bouncing between multiple maps.
+/// Stress-bench spends most of its time in syscall, page-fault, and FD paths.
+/// Keep those together behind the hottest BasicDimension map entry so the
+/// common ingest path touches a smaller value than the full scheduler-aware
+/// aggregate.
 pub struct BasicAggregate {
     syscalls: SyscallAggregate,
-    sched_on_cpu: LatencyAggregate,
-    sched_wait: SchedWaitAggregate,
     page_fault_major: CountAggregate,
     page_fault_minor: CountAggregate,
     fd_ops: FdAggregate,
@@ -177,8 +175,6 @@ impl BasicAggregate {
     pub fn new() -> Self {
         Self {
             syscalls: SyscallAggregate::new(),
-            sched_on_cpu: LatencyAggregate::new(),
-            sched_wait: SchedWaitAggregate::new(),
             page_fault_major: CountAggregate::new(),
             page_fault_minor: CountAggregate::new(),
             fd_ops: FdAggregate::new(),
@@ -211,16 +207,6 @@ impl BasicAggregate {
     }
 
     #[inline(always)]
-    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
-        self.sched_on_cpu.record(on_cpu_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_sched_wait(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
-        self.sched_wait.record(runqueue_ns, off_cpu_ns);
-    }
-
-    #[inline(always)]
     pub fn record_page_fault(&mut self, major: bool) {
         if major {
             self.page_fault_major.add_count(1);
@@ -245,21 +231,6 @@ impl BasicAggregate {
     }
 
     #[inline(always)]
-    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
-        self.sched_on_cpu.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn sched_runqueue_snapshot(&self) -> LatencySnapshot {
-        self.sched_wait.runqueue_snapshot()
-    }
-
-    #[inline(always)]
-    pub fn sched_off_cpu_snapshot(&self) -> LatencySnapshot {
-        self.sched_wait.off_cpu_snapshot()
-    }
-
-    #[inline(always)]
     pub fn page_fault_major_snapshot(&self) -> CounterSnapshot {
         self.page_fault_major.snapshot()
     }
@@ -281,6 +252,55 @@ impl BasicAggregate {
 }
 
 impl Default for BasicAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks scheduler latency metrics outside the hottest syscall/FD/page-fault map.
+///
+/// Scheduler events still aggregate per BasicDimension, but moving them out of
+/// `BasicAggregate` keeps the hottest value smaller for syscall-heavy loads.
+pub struct BasicSchedulerAggregate {
+    sched_on_cpu: LatencyAggregate,
+    sched_wait: SchedWaitAggregate,
+}
+
+impl BasicSchedulerAggregate {
+    pub fn new() -> Self {
+        Self {
+            sched_on_cpu: LatencyAggregate::new(),
+            sched_wait: SchedWaitAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
+        self.sched_on_cpu.record(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_sched_wait(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
+        self.sched_wait.record(runqueue_ns, off_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_on_cpu.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn sched_runqueue_snapshot(&self) -> LatencySnapshot {
+        self.sched_wait.runqueue_snapshot()
+    }
+
+    #[inline(always)]
+    pub fn sched_off_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_wait.off_cpu_snapshot()
+    }
+}
+
+impl Default for BasicSchedulerAggregate {
     fn default() -> Self {
         Self::new()
     }

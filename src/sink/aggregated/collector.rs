@@ -320,7 +320,8 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.basic_metrics) * 8)
+        (map_len(&buf.basic_metrics) * 5)
+            + (map_len(&buf.basic_sched_metrics) * 3)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.disk_io_read)
             + map_len(&buf.disk_io_write)
@@ -422,7 +423,11 @@ impl Collector {
                     snapshot_fn(syscalls),
                 );
             }
+        }
 
+        for (dim, aggregate) in buf.basic_sched_metrics.iter() {
+            let pid = dim.pid();
+            let client_type = client_type_from_u8(dim.client_type());
             self.push_latency_metric(
                 batch,
                 window,

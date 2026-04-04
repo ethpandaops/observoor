@@ -11,7 +11,8 @@ use hashbrown::{
 use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
-    BasicAggregate, BasicColdAggregate, CounterAggregate, DiskAggregate, TcpTxAggregate,
+    BasicAggregate, BasicColdAggregate, BasicSchedulerAggregate, CounterAggregate, DiskAggregate,
+    TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -330,6 +331,7 @@ pub struct Buffer {
 
     // --- BasicDimension metrics (hot path + cold syscall/memory/process counters) ---
     pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
+    pub basic_sched_metrics: FastMap<BasicDimension, BasicSchedulerAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
     // --- Network (TCPMetricsDimension -> CounterAggregate) ---
@@ -373,6 +375,7 @@ impl Buffer {
             system_cores,
             // BasicDimension metrics.
             basic_metrics: fast_map_with_capacity(16),
+            basic_sched_metrics: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
             net_io_tx: fast_map_with_capacity(64),
@@ -409,6 +412,7 @@ impl Buffer {
         self.system_cores = system_cores;
 
         self.basic_metrics.clear();
+        self.basic_sched_metrics.clear();
         self.basic_cold_metrics.clear();
         self.net_io_tx.clear();
         self.net_io_rx.clear();
@@ -556,7 +560,7 @@ impl Buffer {
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
     pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_sched_on_cpu(on_cpu_ns);
+        get_or_default_mut(&mut self.basic_sched_metrics, dim).record_sched_on_cpu(on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
@@ -583,7 +587,7 @@ impl Buffer {
     /// Adds scheduler runqueue and off-CPU latency.
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
-            get_or_default_mut(&mut self.basic_metrics, dim)
+            get_or_default_mut(&mut self.basic_sched_metrics, dim)
                 .record_sched_wait(runqueue_ns, off_cpu_ns);
         }
     }
@@ -800,7 +804,10 @@ mod tests {
         buf.add_sched_switch(dim, 2_000, 2);
         buf.add_sched_switch(dim, 500, 4);
 
-        let on_cpu = buf.basic_metrics.get(&dim).expect("sched_on_cpu exists");
+        let on_cpu = buf
+            .basic_sched_metrics
+            .get(&dim)
+            .expect("sched_on_cpu exists");
         let on_cpu_snap = on_cpu.sched_on_cpu_snapshot();
         assert_eq!(on_cpu_snap.count, 3);
         assert_eq!(on_cpu_snap.sum, 3_500);
@@ -828,13 +835,19 @@ mod tests {
         let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_runqueue(dim, 0, 5_000);
-        let first = buf.basic_metrics.get(&dim).expect("sched wait exists");
+        let first = buf
+            .basic_sched_metrics
+            .get(&dim)
+            .expect("sched wait exists");
         assert_eq!(first.sched_runqueue_snapshot().count, 0);
         assert_eq!(first.sched_off_cpu_snapshot().count, 1);
 
         let mut buf2 = test_buffer();
         buf2.add_sched_runqueue(dim, 5_000, 0);
-        let second = buf2.basic_metrics.get(&dim).expect("sched wait exists");
+        let second = buf2
+            .basic_sched_metrics
+            .get(&dim)
+            .expect("sched wait exists");
         assert_eq!(second.sched_runqueue_snapshot().count, 1);
         assert_eq!(second.sched_off_cpu_snapshot().count, 0);
     }
@@ -914,6 +927,7 @@ mod tests {
         assert!(buf.el_offline);
         assert_eq!(buf.system_cores, 16);
         assert!(buf.basic_metrics.is_empty());
+        assert!(buf.basic_sched_metrics.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
         assert!(buf.net_io_tx.is_empty());
         assert!(buf.net_io_rx.is_empty());
