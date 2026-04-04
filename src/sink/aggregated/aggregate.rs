@@ -23,6 +23,7 @@ impl LatencyAggregate {
     }
 
     /// Records a latency value in nanoseconds.
+    #[inline(always)]
     pub fn record(&mut self, value_ns: u64) {
         let val = value_ns as i64;
         self.sum += val;
@@ -37,6 +38,7 @@ impl LatencyAggregate {
     }
 
     /// Returns a point-in-time snapshot of all statistics.
+    #[inline(always)]
     pub fn snapshot(&self) -> LatencySnapshot {
         let count = self.count;
         let mut min_val = self.min;
@@ -441,17 +443,20 @@ impl CounterAggregate {
     }
 
     /// Records a value (typically bytes), incrementing count by 1.
+    #[inline(always)]
     pub fn add(&mut self, value: i64) {
         self.count += 1;
         self.sum += value;
     }
 
     /// Increments only the count by n.
+    #[inline(always)]
     pub fn add_count(&mut self, n: u32) {
         self.count += n;
     }
 
     /// Returns a point-in-time snapshot.
+    #[inline(always)]
     pub fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {
             count: self.count,
@@ -479,11 +484,13 @@ impl CountAggregate {
     }
 
     /// Increments the count by n.
+    #[inline(always)]
     pub fn add_count(&mut self, n: u32) {
         self.count += n;
     }
 
     /// Returns a point-in-time snapshot with a fixed zero sum.
+    #[inline(always)]
     pub fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {
             count: self.count,
@@ -578,6 +585,7 @@ impl GaugeAggregate {
     }
 
     /// Records a gauge value.
+    #[inline(always)]
     pub fn record(&mut self, value: i64) {
         self.sum += value;
         self.count += 1;
@@ -590,6 +598,7 @@ impl GaugeAggregate {
     }
 
     /// Returns a point-in-time snapshot.
+    #[inline(always)]
     pub fn snapshot(&self) -> GaugeSnapshot {
         let count = self.count;
         let mut min_val = self.min;
@@ -643,6 +652,7 @@ impl DiskAggregate {
     }
 
     /// Records all per-disk metrics emitted by one disk I/O event.
+    #[inline(always)]
     pub fn record(&mut self, latency_ns: u64, bytes: u32, queue_depth: u32) {
         self.latency.record(latency_ns);
         self.bytes.add(i64::from(bytes));
@@ -650,16 +660,19 @@ impl DiskAggregate {
     }
 
     /// Returns a point-in-time snapshot of disk latency.
+    #[inline(always)]
     pub fn latency_snapshot(&self) -> LatencySnapshot {
         self.latency.snapshot()
     }
 
     /// Returns a point-in-time snapshot of disk bytes.
+    #[inline(always)]
     pub fn bytes_snapshot(&self) -> CounterSnapshot {
         self.bytes.snapshot()
     }
 
     /// Returns a point-in-time snapshot of disk queue depth.
+    #[inline(always)]
     pub fn queue_depth_snapshot(&self) -> GaugeSnapshot {
         self.queue_depth.snapshot()
     }
@@ -688,17 +701,20 @@ impl TcpMetricsAggregate {
     }
 
     /// Records both gauge values emitted by one TCP event.
+    #[inline(always)]
     pub fn record(&mut self, rtt_us: u32, cwnd: u32) {
         self.rtt.record(i64::from(rtt_us));
         self.cwnd.record(i64::from(cwnd));
     }
 
     /// Returns a point-in-time snapshot of RTT.
+    #[inline(always)]
     pub fn rtt_snapshot(&self) -> GaugeSnapshot {
         self.rtt.snapshot()
     }
 
     /// Returns a point-in-time snapshot of CWND.
+    #[inline(always)]
     pub fn cwnd_snapshot(&self) -> GaugeSnapshot {
         self.cwnd.snapshot()
     }
@@ -721,6 +737,7 @@ impl SchedWaitAggregate {
     }
 
     /// Records both wait components emitted by one scheduler event.
+    #[inline(always)]
     pub fn record(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 {
             self.runqueue.record(runqueue_ns);
@@ -731,11 +748,13 @@ impl SchedWaitAggregate {
     }
 
     /// Returns a point-in-time snapshot of runqueue latency.
+    #[inline(always)]
     pub fn runqueue_snapshot(&self) -> LatencySnapshot {
         self.runqueue.snapshot()
     }
 
     /// Returns a point-in-time snapshot of off-CPU latency.
+    #[inline(always)]
     pub fn off_cpu_snapshot(&self) -> LatencySnapshot {
         self.off_cpu.snapshot()
     }
@@ -771,6 +790,7 @@ impl TcpTxAggregate {
     }
 
     /// Records bytes plus inline TCP gauge metrics from one transmit event.
+    #[inline(always)]
     pub fn record(&mut self, bytes: i64, rtt_us: u32, cwnd: u32) {
         self.bytes.add(bytes);
         self.metrics.record(rtt_us, cwnd);
@@ -779,21 +799,25 @@ impl TcpTxAggregate {
     /// Records only the inline TCP gauge metrics.
     ///
     /// Kept for compatibility helpers that still build a TCP-only dimension.
+    #[inline(always)]
     pub fn record_metrics(&mut self, rtt_us: u32, cwnd: u32) {
         self.metrics.record(rtt_us, cwnd);
     }
 
     /// Returns a point-in-time snapshot of TX bytes.
+    #[inline(always)]
     pub fn bytes_snapshot(&self) -> CounterSnapshot {
         self.bytes.snapshot()
     }
 
     /// Returns a point-in-time snapshot of RTT.
+    #[inline(always)]
     pub fn rtt_snapshot(&self) -> GaugeSnapshot {
         self.metrics.rtt_snapshot()
     }
 
     /// Returns a point-in-time snapshot of CWND.
+    #[inline(always)]
     pub fn cwnd_snapshot(&self) -> GaugeSnapshot {
         self.metrics.cwnd_snapshot()
     }
