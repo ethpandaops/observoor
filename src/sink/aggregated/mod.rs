@@ -643,6 +643,7 @@ impl AggregatedSink {
         }
     }
 
+    #[inline(always)]
     fn process_event_inner(
         buf: &mut Buffer,
         event: &ParsedEvent,
@@ -849,24 +850,7 @@ impl AggregatedSink {
         );
     }
 
-    /// Routes a parsed event while maintaining carried scheduler state for
-    /// exact per-core window accounting across buffer rotations.
-    fn process_event_with_scheduler_state(
-        buf: &mut Buffer,
-        event: &ParsedEvent,
-        dimensions: &ResolvedDimensions<'_>,
-        scheduler_state: &mut SchedulerWindowState,
-        port_label_cache: &mut PortLabelResolveCache,
-    ) {
-        Self::process_event_inner(
-            buf,
-            event,
-            dimensions,
-            Some(scheduler_state),
-            port_label_cache,
-        );
-    }
-
+    #[inline(always)]
     fn process_event_batch_with_scheduler_state(
         buf: &mut Buffer,
         events: &EventBatch,
@@ -875,11 +859,11 @@ impl AggregatedSink {
         port_label_cache: &mut PortLabelResolveCache,
     ) {
         for event in &events.events {
-            Self::process_event_with_scheduler_state(
+            Self::process_event_inner(
                 buf,
                 event,
                 dimensions,
-                scheduler_state,
+                Some(&mut *scheduler_state),
                 port_label_cache,
             );
         }
@@ -1609,11 +1593,11 @@ mod tests {
     ) {
         let mut port_label_cache = PortLabelResolveCache::default();
         let resolved_dimensions = ResolvedDimensions::from_config(dims);
-        AggregatedSink::process_event_with_scheduler_state(
+        AggregatedSink::process_event_inner(
             buf,
             event,
             &resolved_dimensions,
-            scheduler_state,
+            Some(scheduler_state),
             &mut port_label_cache,
         );
     }
