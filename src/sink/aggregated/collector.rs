@@ -4,12 +4,12 @@ use std::time::Duration;
 use std::fs;
 
 use crate::config::{EventSamplingMode, SamplingConfig};
-use crate::tracer::event::{ClientType, EventType, MAX_EVENT_TYPE};
+use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
 
 use super::aggregate::{CounterAggregate, CounterSnapshot, LatencySnapshot, SyscallAggregate};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{
-    direction_string, port_label_string, rw_string, BasicDimension, NetworkDimension,
+    direction_string, port_label_string, rw_string, BasicDimension, TCPMetricsDimension,
 };
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
@@ -787,14 +787,28 @@ impl Collector {
         window: WindowInfo,
         slot: SlotInfo,
     ) {
-        self.collect_net_io_map(batch, &buf.net_io_tx, window, slot);
-        self.collect_net_io_map(batch, &buf.net_io_rx, window, slot);
+        self.collect_net_io_map(
+            batch,
+            &buf.net_io_tx,
+            window,
+            slot,
+            EventType::NetTX,
+            Direction::TX as u8,
+        );
+        self.collect_net_io_map(
+            batch,
+            &buf.net_io_rx,
+            window,
+            slot,
+            EventType::NetRX,
+            Direction::RX as u8,
+        );
 
         let sampling = self.sampling_for_event(EventType::NetTX);
         for (dim, aggregate) in buf.tcp_tx.iter() {
             let client_type = client_type_from_u8(dim.client_type());
             let port_label = Some(port_label_string(dim.port_label()));
-            let direction = Some(direction_string(dim.direction()));
+            let direction = Some(direction_string(Direction::TX as u8));
 
             let bytes = aggregate.bytes_snapshot();
             if bytes.count > 0 {
@@ -872,7 +886,7 @@ impl Collector {
                 device_id: None,
                 rw: None,
                 port_label: Some(port_label_string(dim.port_label())),
-                direction: Some(direction_string(dim.direction())),
+                direction: Some(direction_string(Direction::TX as u8)),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
                 sum: snap.sum,
@@ -885,22 +899,18 @@ impl Collector {
     fn collect_net_io_map(
         &self,
         batch: &mut MetricBatch,
-        map: &FastMap<NetworkDimension, CounterAggregate>,
+        map: &FastMap<TCPMetricsDimension, CounterAggregate>,
         window: WindowInfo,
         slot: SlotInfo,
+        source_event: EventType,
+        direction: u8,
     ) {
+        let sampling = self.sampling_for_event(source_event);
         for (dim, aggregate) in map.iter() {
             let snap = aggregate.snapshot();
             if snap.count == 0 {
                 continue;
             }
-
-            let source_event = if dim.direction() == 0 {
-                EventType::NetTX
-            } else {
-                EventType::NetRX
-            };
-            let sampling = self.sampling_for_event(source_event);
 
             batch.counter.push(CounterMetric {
                 metric_type: "net_io",
@@ -911,7 +921,7 @@ impl Collector {
                 device_id: None,
                 rw: None,
                 port_label: Some(port_label_string(dim.port_label())),
-                direction: Some(direction_string(dim.direction())),
+                direction: Some(direction_string(direction)),
                 sampling_mode: sampling.mode,
                 sampling_rate: sampling.rate,
                 sum: snap.sum,

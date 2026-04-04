@@ -282,8 +282,8 @@ fn record_disk(
 
 #[inline(always)]
 fn record_tcp_tx(
-    map: &mut FastMap<NetworkDimension, TcpTxAggregate>,
-    key: NetworkDimension,
+    map: &mut FastMap<TCPMetricsDimension, TcpTxAggregate>,
+    key: TCPMetricsDimension,
     bytes: i64,
     rtt_us: u32,
     cwnd: u32,
@@ -293,12 +293,17 @@ fn record_tcp_tx(
 
 #[inline(always)]
 fn record_tcp_metrics(
-    map: &mut FastMap<NetworkDimension, TcpTxAggregate>,
-    key: NetworkDimension,
+    map: &mut FastMap<TCPMetricsDimension, TcpTxAggregate>,
+    key: TCPMetricsDimension,
     rtt_us: u32,
     cwnd: u32,
 ) {
     get_or_default_mut(map, key).record_metrics(rtt_us, cwnd);
+}
+
+#[inline(always)]
+fn tcp_metrics_key_for_network(dim: NetworkDimension) -> TCPMetricsDimension {
+    TCPMetricsDimension::new(dim.pid(), dim.client_type(), dim.port_label())
 }
 
 /// Aggregation buffer that collects events and aggregates them by dimension
@@ -327,15 +332,15 @@ pub struct Buffer {
     pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
-    // --- Network (NetworkDimension -> CounterAggregate) ---
-    // Keep generic TX and RX counters in separate maps so alternating network
-    // streams retain independent last-hit cache entries.
-    pub net_io_tx: FastMap<NetworkDimension, CounterAggregate>,
-    pub net_io_rx: FastMap<NetworkDimension, CounterAggregate>,
-    pub tcp_retransmit: FastMap<NetworkDimension, CounterAggregate>,
+    // --- Network (TCPMetricsDimension -> CounterAggregate) ---
+    // TX/RX already live in separate maps, so the hot-path network key only
+    // needs pid/client/port-label and can skip packing direction entirely.
+    pub net_io_tx: FastMap<TCPMetricsDimension, CounterAggregate>,
+    pub net_io_rx: FastMap<TCPMetricsDimension, CounterAggregate>,
+    pub tcp_retransmit: FastMap<TCPMetricsDimension, CounterAggregate>,
 
-    // --- TCP TX bytes + metrics (NetworkDimension -> TcpTxAggregate) ---
-    pub tcp_tx: FastMap<NetworkDimension, TcpTxAggregate>,
+    // --- TCP TX bytes + metrics (TCPMetricsDimension -> TcpTxAggregate) ---
+    pub tcp_tx: FastMap<TCPMetricsDimension, TcpTxAggregate>,
 
     // --- Disk (DiskDimension) ---
     pub disk_io: FastMap<DiskDimension, DiskAggregate>,
@@ -468,14 +473,29 @@ impl Buffer {
     /// Adds a network I/O event.
     pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
         if dim.direction() == Direction::RX as u8 {
-            add_counter_value(&mut self.net_io_rx, dim, bytes);
+            self.add_net_io_rx(tcp_metrics_key_for_network(dim), bytes);
         } else {
-            add_counter_value(&mut self.net_io_tx, dim, bytes);
+            self.add_net_io_tx(tcp_metrics_key_for_network(dim), bytes);
         }
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_tx(&mut self, dim: TCPMetricsDimension, bytes: i64) {
+        add_counter_value(&mut self.net_io_tx, dim, bytes);
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_rx(&mut self, dim: TCPMetricsDimension, bytes: i64) {
+        add_counter_value(&mut self.net_io_rx, dim, bytes);
     }
 
     /// Adds a TCP retransmit event.
     pub fn add_tcp_retransmit(&mut self, dim: NetworkDimension, bytes: i64) {
+        self.add_tcp_retransmit_dim(tcp_metrics_key_for_network(dim), bytes);
+    }
+
+    #[inline(always)]
+    pub fn add_tcp_retransmit_dim(&mut self, dim: TCPMetricsDimension, bytes: i64) {
         add_counter_value(&mut self.tcp_retransmit, dim, bytes);
     }
 
@@ -483,6 +503,17 @@ impl Buffer {
     pub fn add_net_io_with_tcp_metrics(
         &mut self,
         dim: NetworkDimension,
+        bytes: i64,
+        rtt_us: u32,
+        cwnd: u32,
+    ) {
+        self.add_net_io_with_tcp_metrics_dim(tcp_metrics_key_for_network(dim), bytes, rtt_us, cwnd);
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_with_tcp_metrics_dim(
+        &mut self,
+        dim: TCPMetricsDimension,
         bytes: i64,
         rtt_us: u32,
         cwnd: u32,
@@ -495,8 +526,7 @@ impl Buffer {
     /// Kept for tests and compatibility helpers that still construct a
     /// TCP-only dimension directly.
     pub fn add_tcp_metrics(&mut self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
-        let tx_dim = NetworkDimension::new(dim.pid(), dim.client_type(), dim.port_label(), 0);
-        record_tcp_metrics(&mut self.tcp_tx, tx_dim, rtt_us, cwnd);
+        record_tcp_metrics(&mut self.tcp_tx, dim, rtt_us, cwnd);
     }
 
     /// Adds a disk I/O event with latency, bytes, and queue depth.
@@ -645,11 +675,12 @@ mod tests {
     fn test_add_net_io() {
         let mut buf = test_buffer();
         let dim = NetworkDimension::new(1, 1, 3, 0);
+        let key = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_net_io(dim, 1024);
         buf.add_net_io(dim, 2048);
 
-        let entry = buf.net_io_tx.get(&dim).expect("entry exists");
+        let entry = buf.net_io_tx.get(&key).expect("entry exists");
         let snap = entry.snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 3072);
@@ -660,13 +691,14 @@ mod tests {
         let mut buf = test_buffer();
         let tx = NetworkDimension::new(1, 1, 3, Direction::TX as u8);
         let rx = NetworkDimension::new(1, 1, 3, Direction::RX as u8);
+        let key = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_net_io(tx, 1024);
         buf.add_net_io(rx, 2048);
 
         assert_eq!(
             buf.net_io_tx
-                .get(&tx)
+                .get(&key)
                 .expect("tx entry exists")
                 .snapshot()
                 .sum,
@@ -674,7 +706,7 @@ mod tests {
         );
         assert_eq!(
             buf.net_io_rx
-                .get(&rx)
+                .get(&key)
                 .expect("rx entry exists")
                 .snapshot()
                 .sum,
@@ -689,10 +721,7 @@ mod tests {
 
         buf.add_tcp_metrics(dim, 100, 65535);
 
-        let metrics = buf
-            .tcp_tx
-            .get(&NetworkDimension::new(1, 1, 3, 0))
-            .expect("tcp metrics exist");
+        let metrics = buf.tcp_tx.get(&dim).expect("tcp metrics exist");
         assert_eq!(metrics.rtt_snapshot().sum, 100);
         assert_eq!(metrics.cwnd_snapshot().sum, 65535);
     }
@@ -716,10 +745,11 @@ mod tests {
     fn test_add_net_io_with_tcp_metrics() {
         let mut buf = test_buffer();
         let dim = NetworkDimension::new(1, 1, 3, 0);
+        let key = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_net_io_with_tcp_metrics(dim, 1500, 100, 65535);
 
-        let metrics = buf.tcp_tx.get(&dim).expect("tcp tx metrics exist");
+        let metrics = buf.tcp_tx.get(&key).expect("tcp tx metrics exist");
         assert_eq!(metrics.bytes_snapshot().sum, 1500);
         assert_eq!(metrics.rtt_snapshot().sum, 100);
         assert_eq!(metrics.cwnd_snapshot().sum, 65535);

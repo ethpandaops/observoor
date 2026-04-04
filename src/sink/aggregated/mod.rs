@@ -29,7 +29,9 @@ use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension};
+use self::dimension::{
+    BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
@@ -680,7 +682,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIO(e) => {
-                let net_dim = build_network_dimension_from_parts_cached(
+                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
                     e.direction,
                     e.transport,
@@ -689,11 +691,15 @@ impl AggregatedSink {
                     dimensions,
                     port_label_cache,
                 );
-                buf.add_net_io(net_dim, i64::from(e.bytes));
+                if e.direction == Direction::RX as u8 {
+                    buf.add_net_io_rx(net_dim, i64::from(e.bytes));
+                } else {
+                    buf.add_net_io_tx(net_dim, i64::from(e.bytes));
+                }
             }
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
-                let net_dim = build_network_dimension_from_parts_cached(
+                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
                     Direction::TX as u8,
                     NetTransport::Tcp as u8,
@@ -702,11 +708,11 @@ impl AggregatedSink {
                     dimensions,
                     port_label_cache,
                 );
-                buf.add_net_io_with_tcp_metrics(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
+                buf.add_net_io_with_tcp_metrics_dim(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = build_network_dimension_from_parts_cached(
+                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
                     Direction::TX as u8,
                     NetTransport::Tcp as u8,
@@ -715,7 +721,7 @@ impl AggregatedSink {
                     dimensions,
                     port_label_cache,
                 );
-                buf.add_tcp_retransmit(net_dim, i64::from(e.bytes));
+                buf.add_tcp_retransmit_dim(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::TcpState => {
@@ -1421,7 +1427,7 @@ fn build_network_dimension(
 }
 
 #[inline(always)]
-fn build_network_dimension_from_parts_cached(
+fn build_tcp_metrics_dimension_from_parts_cached(
     basic: BasicDimension,
     raw_direction: u8,
     transport: u8,
@@ -1429,8 +1435,7 @@ fn build_network_dimension_from_parts_cached(
     dst_port: u16,
     dims: &ResolvedDimensions<'_>,
     port_label_cache: &mut PortLabelResolveCache,
-) -> NetworkDimension {
-    let direction = raw_direction & dims.network_direction_mask;
+) -> TCPMetricsDimension {
     let port_label = if let Some(port_label_map) = dims.network_port_label_map {
         let (primary_port, secondary_port) = if raw_direction == Direction::TX as u8 {
             (src_port, dst_port)
@@ -1448,7 +1453,7 @@ fn build_network_dimension_from_parts_cached(
         0
     };
 
-    NetworkDimension::from_basic(basic, port_label, direction)
+    TCPMetricsDimension::from_basic(basic, port_label)
 }
 
 /// Creates a NetworkDimension for TCP retransmit events.
@@ -1788,12 +1793,8 @@ mod tests {
 
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        let net_dim = NetworkDimension::new(
-            123,
-            ClientType::Geth as u8,
-            PortLabel::ElP2PTcp as u8,
-            Direction::TX as u8,
-        );
+        let net_dim =
+            TCPMetricsDimension::new(123, ClientType::Geth as u8, PortLabel::ElP2PTcp as u8);
         assert!(buf.tcp_tx.contains_key(&net_dim));
     }
 
