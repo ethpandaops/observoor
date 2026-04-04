@@ -1802,7 +1802,7 @@ mod tests {
 
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        assert!(!buf.disk_io.is_empty());
+        assert!(!buf.disk_io_write.is_empty());
     }
 
     #[test]

@@ -343,7 +343,10 @@ pub struct Buffer {
     pub tcp_tx: FastMap<TCPMetricsDimension, TcpTxAggregate>,
 
     // --- Disk (DiskDimension) ---
-    pub disk_io: FastMap<DiskDimension, DiskAggregate>,
+    // Disk completions frequently alternate read/write against the same device.
+    // Splitting by direction lets each map keep a stable last-hit cache entry.
+    pub disk_io_read: FastMap<DiskDimension, DiskAggregate>,
+    pub disk_io_write: FastMap<DiskDimension, DiskAggregate>,
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
     pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
@@ -378,7 +381,8 @@ impl Buffer {
             // TCP TX bytes + metrics.
             tcp_tx: fast_map_with_capacity(32),
             // Disk.
-            disk_io: fast_map_with_capacity(16),
+            disk_io_read: fast_map_with_capacity(16),
+            disk_io_write: fast_map_with_capacity(16),
             block_merge: fast_map_with_capacity(16),
             // Scheduler.
             cpu_on_core: fast_map_with_capacity(64),
@@ -410,7 +414,8 @@ impl Buffer {
         self.net_io_rx.clear();
         self.tcp_retransmit.clear();
         self.tcp_tx.clear();
-        self.disk_io.clear();
+        self.disk_io_read.clear();
+        self.disk_io_write.clear();
         self.block_merge.clear();
         self.cpu_on_core.clear();
     }
@@ -537,7 +542,11 @@ impl Buffer {
         bytes: u32,
         queue_depth: u32,
     ) {
-        record_disk(&mut self.disk_io, dim, latency_ns, bytes, queue_depth);
+        if dim.rw() == 0 {
+            record_disk(&mut self.disk_io_read, dim, latency_ns, bytes, queue_depth);
+        } else {
+            record_disk(&mut self.disk_io_write, dim, latency_ns, bytes, queue_depth);
+        }
     }
 
     /// Adds a block merge event.
@@ -776,7 +785,7 @@ mod tests {
 
         buf.add_disk_io(dim, 50_000, 4096, 3);
 
-        let disk = buf.disk_io.get(&dim).expect("disk aggregate exists");
+        let disk = buf.disk_io_write.get(&dim).expect("disk aggregate exists");
         assert_eq!(disk.latency_snapshot().count, 1);
         assert_eq!(disk.bytes_snapshot().sum, 4096);
         assert_eq!(disk.queue_depth_snapshot().sum, 3);

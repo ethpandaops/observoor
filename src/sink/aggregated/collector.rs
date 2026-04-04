@@ -9,7 +9,8 @@ use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
 use super::aggregate::{CounterAggregate, CounterSnapshot, LatencySnapshot, SyscallAggregate};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{
-    direction_string, port_label_string, rw_string, BasicDimension, TCPMetricsDimension,
+    direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
+    TCPMetricsDimension,
 };
 use super::metric::{
     BatchMetadata, CounterMetric, CpuUtilMetric, GaugeMetric, LatencyMetric, MetricBatch,
@@ -321,7 +322,8 @@ impl Collector {
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
         (map_len(&buf.basic_metrics) * 8)
             + (map_len(&buf.basic_cold_metrics) * 5)
-            + map_len(&buf.disk_io)
+            + map_len(&buf.disk_io_read)
+            + map_len(&buf.disk_io_write)
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
@@ -331,12 +333,13 @@ impl Collector {
             + map_len(&buf.net_io_rx)
             + map_len(&buf.tcp_tx)
             + map_len(&buf.tcp_retransmit)
-            + map_len(&buf.disk_io)
+            + map_len(&buf.disk_io_read)
+            + map_len(&buf.disk_io_write)
             + map_len(&buf.block_merge)
     }
 
     fn estimate_gauge_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.tcp_tx) * 2) + map_len(&buf.disk_io)
+        (map_len(&buf.tcp_tx) * 2) + map_len(&buf.disk_io_read) + map_len(&buf.disk_io_write)
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
@@ -590,17 +593,35 @@ impl Collector {
         slot: SlotInfo,
     ) {
         let sampling = self.sampling_for_event(EventType::DiskIO);
-        for (dim, aggregate) in buf.disk_io.iter() {
+        self.collect_disk_metrics_map(batch, &buf.disk_io_read, window, slot, sampling);
+        self.collect_disk_metrics_map(batch, &buf.disk_io_write, window, slot, sampling);
+    }
+
+    #[inline(always)]
+    fn collect_disk_metrics_map(
+        &self,
+        batch: &mut MetricBatch,
+        map: &FastMap<DiskDimension, super::aggregate::DiskAggregate>,
+        window: WindowInfo,
+        slot: SlotInfo,
+        sampling: EventSamplingMetadata,
+    ) {
+        for (dim, aggregate) in map.iter() {
+            let rw = Some(rw_string(dim.rw()));
+            let pid = dim.pid();
+            let client_type = client_type_from_u8(dim.client_type());
+            let device_id = Some(dim.device_id());
+
             let latency = aggregate.latency_snapshot();
             if latency.count > 0 {
                 batch.latency.push(LatencyMetric {
                     metric_type: "disk_latency",
                     window,
                     slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: Some(dim.device_id()),
-                    rw: Some(rw_string(dim.rw())),
+                    pid,
+                    client_type,
+                    device_id,
+                    rw,
                     sampling_mode: sampling.mode,
                     sampling_rate: sampling.rate,
                     sum: latency.sum,
@@ -617,10 +638,10 @@ impl Collector {
                     metric_type: "disk_bytes",
                     window,
                     slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: Some(dim.device_id()),
-                    rw: Some(rw_string(dim.rw())),
+                    pid,
+                    client_type,
+                    device_id,
+                    rw,
                     port_label: None,
                     direction: None,
                     sampling_mode: sampling.mode,
@@ -629,16 +650,17 @@ impl Collector {
                     count: bytes.count,
                 });
             }
+
             let queue_depth = aggregate.queue_depth_snapshot();
             if queue_depth.count > 0 {
                 batch.gauge.push(GaugeMetric {
                     metric_type: "disk_queue_depth",
                     window,
                     slot,
-                    pid: dim.pid(),
-                    client_type: client_type_from_u8(dim.client_type()),
-                    device_id: Some(dim.device_id()),
-                    rw: Some(rw_string(dim.rw())),
+                    pid,
+                    client_type,
+                    device_id,
+                    rw,
                     port_label: None,
                     sampling_mode: sampling.mode,
                     sampling_rate: sampling.rate,
