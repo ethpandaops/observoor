@@ -36,6 +36,8 @@ pub struct TrackedTidInfo {
 /// boundary overhead while the sink keeps the same total queued-event budget by
 /// using fewer batch slots.
 pub const PARSED_EVENT_BATCH_SIZE: usize = 16384;
+type ParsedEventBatchCount = u16;
+const _: () = assert!(PARSED_EVENT_BATCH_SIZE * 2 <= u16::MAX as usize);
 
 /// Parsed events plus per-batch counters computed in the tracer read loop.
 ///
@@ -44,8 +46,8 @@ pub const PARSED_EVENT_BATCH_SIZE: usize = 16384;
 #[derive(Clone)]
 pub struct ParsedEventBatch {
     pub events: Vec<ParsedEvent>,
-    pub event_type_totals: [u32; MAX_EVENT_TYPE + 1],
-    pub client_totals: [u32; CLIENT_TYPE_CARDINALITY],
+    pub event_type_totals: [ParsedEventBatchCount; MAX_EVENT_TYPE + 1],
+    pub client_totals: [ParsedEventBatchCount; CLIENT_TYPE_CARDINALITY],
     recycler: Option<Arc<ParsedEventBatchPool>>,
 }
 

@@ -68,8 +68,8 @@ impl BufferedCapturedStats {
 
     fn record_precounted(
         &mut self,
-        event_totals: &[u32; MAX_EVENT_TYPE + 1],
-        client_totals: &[u32; CLIENT_TYPE_CARDINALITY],
+        event_totals: &[u16; MAX_EVENT_TYPE + 1],
+        client_totals: &[u16; CLIENT_TYPE_CARDINALITY],
         event_count: usize,
     ) {
         for (raw, count) in event_totals.iter().copied().enumerate().skip(1) {
