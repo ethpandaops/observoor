@@ -720,7 +720,6 @@ impl AggregatedSink {
                 let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
                 let switch = crate::tracer::event::SchedEvent {
                     on_cpu_ns: e.on_cpu_ns,
-                    voluntary: e.voluntary,
                     cpu_id: e.cpu_id,
                 };
                 let runqueue = crate::tracer::event::SchedRunqueueEvent {
@@ -1844,7 +1843,6 @@ mod tests {
             EventType::SchedSwitch,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 1_000_000,
-                voluntary: true,
                 cpu_id: 3,
             }),
         );
@@ -1913,7 +1911,6 @@ mod tests {
             EventType::SchedSwitch,
             TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 300,
-                voluntary: false,
                 cpu_id: 2,
                 next_pid: 124,
                 next_tid: 88,
@@ -2057,7 +2054,6 @@ mod tests {
             EventType::SchedSwitch,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 2_000,
-                voluntary: false,
                 cpu_id: 3,
             }),
         );
@@ -2099,7 +2095,6 @@ mod tests {
             EventType::SchedSwitch,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 700,
-                voluntary: true,
                 cpu_id: 1,
             }),
         );
@@ -2259,7 +2254,6 @@ mod tests {
             EventType::SchedSwitch,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 50,
-                voluntary: false,
                 cpu_id: 1,
             }),
         );

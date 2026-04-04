@@ -424,12 +424,11 @@ fn parse_sched_variant(header: &RawEventHeader, data: &[u8]) -> Result<TypedEven
 }
 
 /// Scheduler context-switch event payload: 8 bytes.
-/// voluntary is stored in `hdr.pad[0]`, cpu_id in `hdr.pad[1..4]`.
+/// cpu_id is stored in `hdr.pad[1..4]`.
 fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, ParseError> {
     let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
     Ok(SchedEvent {
         on_cpu_ns: u64::from_le(raw.on_cpu_ns),
-        voluntary: header.pad[0] != 0,
         cpu_id: decode_u32_from_pad(&header.pad, 1),
     })
 }
@@ -449,7 +448,6 @@ fn parse_sched_combined(
 
     Ok(SchedCombinedEvent {
         on_cpu_ns: u64::from_le(raw.on_cpu_ns),
-        voluntary: header.pad[0] != 0,
         cpu_id: decode_u32_from_pad(&header.pad, 1),
         runqueue_ns: u64::from_le(raw.runqueue_ns),
         off_cpu_ns: u64::from_le(raw.off_cpu_ns),
@@ -772,7 +770,6 @@ mod tests {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 100_000);
-        assert!(e.voluntary);
         assert_eq!(e.cpu_id, 9);
     }
 
@@ -787,7 +784,6 @@ mod tests {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 200_000);
-        assert!(!e.voluntary);
         assert_eq!(e.cpu_id, 15);
     }
 
@@ -813,7 +809,6 @@ mod tests {
         assert_eq!(e.next_pid, 303);
         assert_eq!(e.next_tid, 404);
         assert_eq!(e.next_client_type, 2);
-        assert!(e.voluntary);
         assert_eq!(e.cpu_id, 15);
         assert_eq!(
             parsed.raw.secondary_event_type_raw(),

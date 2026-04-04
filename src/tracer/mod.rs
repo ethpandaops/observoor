@@ -216,7 +216,6 @@ mod tests {
                 .with_secondary_logical_event(EventType::SchedRunqueue, 2),
             typed: TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 50,
-                voluntary: false,
                 cpu_id: 2,
                 next_pid: 200,
                 next_tid: 201,

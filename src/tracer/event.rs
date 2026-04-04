@@ -458,7 +458,6 @@ pub struct NetIOTcpTxMetricsEvent {
 #[allow(dead_code)]
 pub struct SchedEvent {
     pub on_cpu_ns: u64,
-    pub voluntary: bool,
     pub cpu_id: u32,
 }
 
@@ -471,7 +470,6 @@ pub struct SchedEvent {
 #[allow(dead_code)]
 pub struct SchedCombinedEvent {
     pub on_cpu_ns: u64,
-    pub voluntary: bool,
     pub cpu_id: u32,
     pub next_pid: u32,
     pub next_tid: u32,
