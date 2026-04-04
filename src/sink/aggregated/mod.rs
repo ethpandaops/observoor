@@ -1696,8 +1696,8 @@ mod tests {
         AggregatedSink::process_event(&mut buf, &event, &dims);
 
         let dim = BasicDimension::new(123, 1);
-        let entry = buf.basic_metrics.get(&dim).expect("entry exists");
-        assert_eq!(entry.syscalls().read_snapshot().count, 1);
+        let entry = buf.syscall_read.get(&dim).expect("entry exists");
+        assert_eq!(entry.snapshot().count, 1);
     }
 
     #[test]

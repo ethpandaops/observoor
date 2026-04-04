@@ -12,7 +12,7 @@ use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
     BasicAggregate, BasicColdAggregate, BasicSchedulerAggregate, CounterAggregate, DiskAggregate,
-    TcpTxAggregate,
+    LatencyAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -329,7 +329,16 @@ pub struct Buffer {
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
 
-    // --- BasicDimension metrics (hot path + cold syscall/memory/process counters) ---
+    // --- Hot BasicDimension metrics ---
+    // Each syscall family gets its own small aggregate so the hot path updates
+    // one compact value instead of bouncing around a larger multi-syscall blob.
+    pub syscall_read: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_write: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_futex: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
+
+    // --- BasicDimension counters (page faults + FD activity) ---
     pub basic_metrics: FastMap<BasicDimension, BasicAggregate>,
     pub basic_sched_metrics: FastMap<BasicDimension, BasicSchedulerAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
@@ -373,7 +382,13 @@ impl Buffer {
             el_optimistic,
             el_offline,
             system_cores,
-            // BasicDimension metrics.
+            // Hot BasicDimension metrics.
+            syscall_read: fast_map_with_capacity(16),
+            syscall_write: fast_map_with_capacity(16),
+            syscall_futex: fast_map_with_capacity(16),
+            syscall_mmap: fast_map_with_capacity(16),
+            syscall_fsync: fast_map_with_capacity(16),
+            // BasicDimension counters.
             basic_metrics: fast_map_with_capacity(16),
             basic_sched_metrics: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
@@ -411,6 +426,11 @@ impl Buffer {
         self.el_offline = el_offline;
         self.system_cores = system_cores;
 
+        self.syscall_read.clear();
+        self.syscall_write.clear();
+        self.syscall_futex.clear();
+        self.syscall_mmap.clear();
+        self.syscall_fsync.clear();
         self.basic_metrics.clear();
         self.basic_sched_metrics.clear();
         self.basic_cold_metrics.clear();
@@ -441,22 +461,22 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_read(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_read(latency_ns);
+        get_or_default_mut(&mut self.syscall_read, dim).record(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_write(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_write(latency_ns);
+        get_or_default_mut(&mut self.syscall_write, dim).record(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_futex(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_futex(latency_ns);
+        get_or_default_mut(&mut self.syscall_futex, dim).record(latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_mmap(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_mmap(latency_ns);
+        get_or_default_mut(&mut self.syscall_mmap, dim).record(latency_ns);
     }
 
     #[inline(always)]
@@ -466,7 +486,7 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_fsync(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.basic_metrics, dim).record_syscall_fsync(latency_ns);
+        get_or_default_mut(&mut self.syscall_fsync, dim).record(latency_ns);
     }
 
     #[inline(always)]
@@ -668,8 +688,7 @@ mod tests {
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
 
-        let entry = buf.basic_metrics.get(&dim).expect("entry exists");
-        let snap = entry.syscalls().read_snapshot();
+        let snap = buf.syscall_read.get(&dim).expect("entry exists").snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
     }
@@ -696,6 +715,11 @@ mod tests {
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
         assert!(buf.basic_metrics.is_empty());
+        assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscall_write.is_empty());
+        assert!(buf.syscall_futex.is_empty());
+        assert!(buf.syscall_mmap.is_empty());
+        assert!(buf.syscall_fsync.is_empty());
     }
 
     #[test]
@@ -926,6 +950,11 @@ mod tests {
         assert!(buf.el_optimistic);
         assert!(buf.el_offline);
         assert_eq!(buf.system_cores, 16);
+        assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscall_write.is_empty());
+        assert!(buf.syscall_futex.is_empty());
+        assert!(buf.syscall_mmap.is_empty());
+        assert!(buf.syscall_fsync.is_empty());
         assert!(buf.basic_metrics.is_empty());
         assert!(buf.basic_sched_metrics.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
@@ -934,11 +963,10 @@ mod tests {
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf
-            .basic_metrics
+            .syscall_read
             .get(&dim)
             .expect("entry exists after reset")
-            .syscalls()
-            .read_snapshot();
+            .snapshot();
         assert_eq!(snap.count, 1);
         assert_eq!(snap.sum, 7_500);
     }

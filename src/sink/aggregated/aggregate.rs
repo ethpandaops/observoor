@@ -76,96 +76,13 @@ pub struct LatencySnapshot {
     pub histogram: [u32; NUM_BUCKETS],
 }
 
-/// Tracks all syscall latency families behind a single per-dimension map entry.
+/// Tracks hot count-only BasicDimension metrics behind one per-dimension entry.
 ///
-/// Mixed syscall workloads often bounce between multiple syscall types for the
-/// same PID, so co-locating the aggregates lets the hot path reuse one map
-/// lookup and one last-hit cache entry across all syscall variants.
-pub struct SyscallAggregate {
-    read: LatencyAggregate,
-    write: LatencyAggregate,
-    futex: LatencyAggregate,
-    mmap: LatencyAggregate,
-    fsync: LatencyAggregate,
-}
-
-impl SyscallAggregate {
-    /// Creates a new aggregate for all syscall latency metrics.
-    pub fn new() -> Self {
-        Self {
-            read: LatencyAggregate::new(),
-            write: LatencyAggregate::new(),
-            futex: LatencyAggregate::new(),
-            mmap: LatencyAggregate::new(),
-            fsync: LatencyAggregate::new(),
-        }
-    }
-
-    #[inline(always)]
-    pub fn record_read(&mut self, latency_ns: u64) {
-        self.read.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_write(&mut self, latency_ns: u64) {
-        self.write.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_futex(&mut self, latency_ns: u64) {
-        self.futex.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_mmap(&mut self, latency_ns: u64) {
-        self.mmap.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_fsync(&mut self, latency_ns: u64) {
-        self.fsync.record(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn read_snapshot(&self) -> LatencySnapshot {
-        self.read.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn write_snapshot(&self) -> LatencySnapshot {
-        self.write.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn futex_snapshot(&self) -> LatencySnapshot {
-        self.futex.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn mmap_snapshot(&self) -> LatencySnapshot {
-        self.mmap.snapshot()
-    }
-
-    #[inline(always)]
-    pub fn fsync_snapshot(&self) -> LatencySnapshot {
-        self.fsync.snapshot()
-    }
-}
-
-impl Default for SyscallAggregate {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Tracks all BasicDimension-keyed metrics behind one per-dimension entry.
-///
-/// Stress-bench spends most of its time in syscall, page-fault, and FD paths.
-/// Keep those together behind the hottest BasicDimension map entry so the
-/// common ingest path touches a smaller value than the full scheduler-aware
-/// aggregate.
+/// Syscall latencies dominate the ingest path and are stored in dedicated maps
+/// so each event only touches one small latency aggregate. FD and page-fault
+/// counters stay together here because they are compact and often arrive in the
+/// same file-I/O burst.
 pub struct BasicAggregate {
-    syscalls: SyscallAggregate,
     page_fault_major: CountAggregate,
     page_fault_minor: CountAggregate,
     fd_ops: FdAggregate,
@@ -174,36 +91,10 @@ pub struct BasicAggregate {
 impl BasicAggregate {
     pub fn new() -> Self {
         Self {
-            syscalls: SyscallAggregate::new(),
             page_fault_major: CountAggregate::new(),
             page_fault_minor: CountAggregate::new(),
             fd_ops: FdAggregate::new(),
         }
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_read(&mut self, latency_ns: u64) {
-        self.syscalls.record_read(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_write(&mut self, latency_ns: u64) {
-        self.syscalls.record_write(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_futex(&mut self, latency_ns: u64) {
-        self.syscalls.record_futex(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_mmap(&mut self, latency_ns: u64) {
-        self.syscalls.record_mmap(latency_ns);
-    }
-
-    #[inline(always)]
-    pub fn record_syscall_fsync(&mut self, latency_ns: u64) {
-        self.syscalls.record_fsync(latency_ns);
     }
 
     #[inline(always)]
@@ -223,11 +114,6 @@ impl BasicAggregate {
     #[inline(always)]
     pub fn record_fd_close(&mut self) {
         self.fd_ops.record_close();
-    }
-
-    #[inline(always)]
-    pub fn syscalls(&self) -> &SyscallAggregate {
-        &self.syscalls
     }
 
     #[inline(always)]
