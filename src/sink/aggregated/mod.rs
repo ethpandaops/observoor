@@ -50,6 +50,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
 const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
+const SCHED_TID_CACHE_SIZE: usize = 8;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -139,9 +140,24 @@ impl RunningThreadStore {
 
     #[inline(always)]
     fn find_cpu_for_tid(&self, tid: u32) -> Option<usize> {
-        self.entries
-            .iter()
-            .position(|entry| entry.is_some_and(|running| running.tid == tid))
+        for (cpu_id, entry) in self.entries.iter().enumerate() {
+            if let Some(running) = entry {
+                if running.tid == tid {
+                    return Some(cpu_id);
+                }
+            }
+        }
+
+        None
+    }
+
+    #[inline(always)]
+    fn cpu_matches_tid(&self, cpu_id: u32, tid: u32) -> bool {
+        if let Some(Some(running)) = self.entries.get(cpu_id as usize) {
+            running.tid == tid
+        } else {
+            false
+        }
     }
 
     #[inline(always)]
@@ -162,8 +178,20 @@ impl RunningThreadStore {
     }
 }
 
+#[derive(Clone, Copy)]
+struct SchedTidCacheEntry {
+    tid: u32,
+    cpu_id: u32,
+}
+
+#[inline(always)]
+fn sched_tid_cache_slot(tid: u32) -> usize {
+    ((tid ^ tid.rotate_left(11)) as usize) & (SCHED_TID_CACHE_SIZE - 1)
+}
+
 struct SchedulerWindowState {
     running_by_cpu: RunningThreadStore,
+    tid_to_cpu_cache: [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_SIZE],
 }
 
 impl Default for SchedulerWindowState {
@@ -172,6 +200,7 @@ impl Default for SchedulerWindowState {
             // This state only tracks currently running threads, so cardinality
             // stays bounded by the number of active cores rather than total TIDs.
             running_by_cpu: RunningThreadStore::with_capacity(64),
+            tid_to_cpu_cache: [None; SCHED_TID_CACHE_SIZE],
         }
     }
 }
@@ -278,6 +307,35 @@ impl<'a> ResolvedDimensions<'a> {
 
 impl SchedulerWindowState {
     #[inline(always)]
+    fn find_cpu_for_tid(&mut self, tid: u32) -> Option<u32> {
+        let cache_slot = sched_tid_cache_slot(tid);
+
+        if let Some(entry) = self.tid_to_cpu_cache[cache_slot] {
+            if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
+                return Some(entry.cpu_id);
+            }
+        }
+
+        let Some(cpu_id) = self
+            .running_by_cpu
+            .find_cpu_for_tid(tid)
+            .map(|cpu_id| cpu_id as u32)
+        else {
+            if self.tid_to_cpu_cache[cache_slot].is_some_and(|entry| entry.tid == tid) {
+                self.tid_to_cpu_cache[cache_slot] = None;
+            }
+            return None;
+        };
+        self.tid_to_cpu_cache[cache_slot] = Some(SchedTidCacheEntry { tid, cpu_id });
+        Some(cpu_id)
+    }
+
+    #[inline(always)]
+    fn remember_tid_cpu(&mut self, tid: u32, cpu_id: u32) {
+        self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] = Some(SchedTidCacheEntry { tid, cpu_id });
+    }
+
+    #[inline(always)]
     fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
         for running in self.running_by_cpu.iter_mut() {
             if boundary_ns <= running.running_since_ns {
@@ -347,19 +405,19 @@ impl SchedulerWindowState {
         let cpu_index = cpu_id as usize;
         let mut reused_target_slot = false;
 
-        if let Some(prev_cpu) = self.running_by_cpu.find_cpu_for_tid(tid) {
+        if let Some(prev_cpu) = self.find_cpu_for_tid(tid) {
             let prev = self
                 .running_by_cpu
-                .take_cpu(prev_cpu as u32)
+                .take_cpu(prev_cpu)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > prev.running_since_ns {
                 buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
             } else if timestamp_ns < prev.running_since_ns {
-                *self.running_by_cpu.cpu_slot_mut(prev_cpu as u32) = Some(prev);
+                *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
                 return;
             }
 
-            reused_target_slot = prev_cpu == cpu_index;
+            reused_target_slot = prev_cpu as usize == cpu_index;
         }
 
         if !reused_target_slot {
@@ -374,6 +432,7 @@ impl SchedulerWindowState {
         }
 
         *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(next_running);
+        self.remember_tid_cpu(tid, cpu_id);
     }
 
     #[inline(always)]
@@ -403,16 +462,16 @@ impl SchedulerWindowState {
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
-        if let Some(cpu_id) = self.running_by_cpu.find_cpu_for_tid(tid) {
+        if let Some(cpu_id) = self.find_cpu_for_tid(tid) {
             let running = self
                 .running_by_cpu
-                .take_cpu(cpu_id as u32)
+                .take_cpu(cpu_id)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > running.running_since_ns {
                 buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
             }
             if timestamp_ns < running.running_since_ns {
-                *self.running_by_cpu.cpu_slot_mut(cpu_id as u32) = Some(running);
+                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
             }
         }
     }
