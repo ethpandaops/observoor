@@ -101,7 +101,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
     __type(key, struct syscall_key);
-    __type(value, struct net_send_val);
+    __type(value, struct net_recv_val);
 } net_send_udp_start SEC(".maps");
 
 // tracked_tids: TIDs to trace for on-CPU time, value is pid + client_type.

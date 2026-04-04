@@ -199,7 +199,7 @@ struct req_val {
     __u8  pad[3];
 };
 
-// Network recv tracking (8 bytes).
+// Network socket metadata tracking (8 bytes).
 // kretprobe handlers run on the same task, so pid/tid and timestamps can be
 // recovered at return time instead of being copied through the map value.
 struct net_recv_val {
@@ -210,7 +210,7 @@ struct net_recv_val {
     __u8  pad[2];
 };
 
-// Network send tracking (16 bytes).
+// TCP send tracking (16 bytes).
 struct net_send_val {
     __u16 sport;
     __u16 dport;

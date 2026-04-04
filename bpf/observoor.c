@@ -822,14 +822,14 @@ int BPF_KPROBE(kprobe_udp_sendmsg, struct sock *sk, struct msghdr *msg,
         return 0;
 
     struct syscall_key key = { .pid_tgid = pid_tgid };
-    struct net_send_val val = {};
+    // UDP emits the same userspace event shape as RX, so only carry the
+    // socket metadata needed to rebuild that event on return.
+    struct net_recv_val val = {};
     val.sport = BPF_CORE_READ(sk, __sk_common.skc_num);
     val.dport = __builtin_bswap16(
         BPF_CORE_READ(sk, __sk_common.skc_dport));
     val.client_type = ct;
     val.transport = NET_TRANSPORT_UDP;
-    val.srtt_us = 0;
-    val.snd_cwnd = 0;
     bpf_map_update_elem(&net_send_udp_start, &key, &val, BPF_ANY);
     return 0;
 }
@@ -840,7 +840,7 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct syscall_key key = { .pid_tgid = pid_tgid };
 
-    struct net_send_val *val = bpf_map_lookup_elem(&net_send_udp_start, &key);
+    struct net_recv_val *val = bpf_map_lookup_elem(&net_send_udp_start, &key);
     if (!val)
         return 0;
 
