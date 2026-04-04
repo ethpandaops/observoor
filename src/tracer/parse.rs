@@ -67,7 +67,7 @@ struct RawSchedPayload {
     on_cpu_ns: u64,
 }
 
-#[repr(C, packed)]
+#[repr(C)]
 #[derive(Clone, Copy)]
 struct RawSchedCombinedPayload {
     on_cpu_ns: u64,
@@ -116,6 +116,7 @@ struct RawSwapPayload {
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
+const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
