@@ -91,12 +91,12 @@ struct SlotRotation {
 
 #[derive(Clone, Copy, Debug)]
 struct RunningThread {
-    tid: u32,
     // Scheduler events close and flush the same running slice repeatedly, so
     // keep the resolved process dimension alongside the owning CPU id.
     basic_dim: BasicDimension,
-    cpu_id: u32,
     running_since_ns: u64,
+    tid: u32,
+    cpu_id: u32,
 }
 
 #[derive(Default)]
