@@ -259,44 +259,11 @@ impl Collector {
             start_time: buf.wallclock_slot_start,
         };
 
-        let latency_capacity = self.estimate_latency_capacity(buf);
-        let counter_capacity = self.estimate_counter_capacity(buf);
-        let gauge_capacity = self.estimate_gauge_capacity(buf);
-        let cpu_util_capacity = self.estimate_cpu_util_capacity(buf);
-        #[cfg(feature = "bpf")]
-        let memory_usage_capacity = if self.collect_process_snapshots {
-            self.estimate_memory_usage_capacity(buf)
-        } else {
-            0
-        };
-        #[cfg(feature = "bpf")]
-        let process_io_usage_capacity = if self.collect_process_snapshots {
-            self.estimate_process_io_usage_capacity(buf)
-        } else {
-            0
-        };
-        #[cfg(feature = "bpf")]
-        let process_fd_usage_capacity = if self.collect_process_snapshots {
-            self.estimate_process_fd_usage_capacity(buf)
-        } else {
-            0
-        };
-        #[cfg(feature = "bpf")]
-        let process_sched_usage_capacity = if self.collect_process_snapshots {
-            self.estimate_process_sched_usage_capacity(buf)
-        } else {
-            0
-        };
-        reserve_if_needed(&mut batch.latency, latency_capacity);
-        reserve_if_needed(&mut batch.counter, counter_capacity);
-        reserve_if_needed(&mut batch.gauge, gauge_capacity);
-        reserve_if_needed(&mut batch.cpu_util, cpu_util_capacity);
-        #[cfg(feature = "bpf")]
-        if self.collect_process_snapshots {
-            reserve_if_needed(&mut batch.memory_usage, memory_usage_capacity);
-            reserve_if_needed(&mut batch.process_io_usage, process_io_usage_capacity);
-            reserve_if_needed(&mut batch.process_fd_usage, process_fd_usage_capacity);
-            reserve_if_needed(&mut batch.process_sched_usage, process_sched_usage_capacity);
+        // The sink reuses one MetricBatch across flushes. Once any vector has
+        // been sized, let Vec's normal growth handle occasional cardinality
+        // increases instead of rescanning every map on every flush.
+        if batch_vectors_uninitialized(batch) {
+            self.reserve_batch_vectors(buf, batch);
         }
 
         batch.latency.clear();
@@ -371,6 +338,32 @@ impl Collector {
     #[cfg(feature = "bpf")]
     fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
         buf.cpu_on_core.len()
+    }
+
+    fn reserve_batch_vectors(&self, buf: &Buffer, batch: &mut MetricBatch) {
+        reserve_if_needed(&mut batch.latency, self.estimate_latency_capacity(buf));
+        reserve_if_needed(&mut batch.counter, self.estimate_counter_capacity(buf));
+        reserve_if_needed(&mut batch.gauge, self.estimate_gauge_capacity(buf));
+        reserve_if_needed(&mut batch.cpu_util, self.estimate_cpu_util_capacity(buf));
+        #[cfg(feature = "bpf")]
+        if self.collect_process_snapshots {
+            reserve_if_needed(
+                &mut batch.memory_usage,
+                self.estimate_memory_usage_capacity(buf),
+            );
+            reserve_if_needed(
+                &mut batch.process_io_usage,
+                self.estimate_process_io_usage_capacity(buf),
+            );
+            reserve_if_needed(
+                &mut batch.process_fd_usage,
+                self.estimate_process_fd_usage_capacity(buf),
+            );
+            reserve_if_needed(
+                &mut batch.process_sched_usage,
+                self.estimate_process_sched_usage_capacity(buf),
+            );
+        }
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -1549,6 +1542,23 @@ fn reserve_if_needed<T>(vec: &mut Vec<T>, required: usize) {
     if vec.capacity() < required {
         vec.reserve(required - vec.capacity());
     }
+}
+
+fn batch_vectors_uninitialized(batch: &MetricBatch) -> bool {
+    let uninitialized = batch.latency.capacity() == 0
+        && batch.counter.capacity() == 0
+        && batch.gauge.capacity() == 0
+        && batch.cpu_util.capacity() == 0;
+    #[cfg(feature = "bpf")]
+    {
+        let uninitialized = uninitialized
+            && batch.memory_usage.capacity() == 0
+            && batch.process_io_usage.capacity() == 0
+            && batch.process_fd_usage.capacity() == 0
+            && batch.process_sched_usage.capacity() == 0;
+        return uninitialized;
+    }
+    uninitialized
 }
 
 #[cfg(test)]
