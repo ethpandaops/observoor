@@ -139,12 +139,16 @@ impl RunningThreadStore {
 
     #[inline(always)]
     fn find_cpu_for_tid(&self, tid: u32) -> Option<u32> {
-        for (cpu_id, entry) in self.entries.iter().enumerate() {
-            if let Some(running) = entry {
-                if running.tid == tid {
-                    return Some(cpu_id as u32);
-                }
+        let len = self.entries.len();
+        let mut cpu_id = 0usize;
+        while cpu_id < len {
+            // Safety: `cpu_id` stays strictly below `len`.
+            if unsafe { self.entries.get_unchecked(cpu_id) }
+                .is_some_and(|running| running.tid == tid)
+            {
+                return Some(cpu_id as u32);
             }
+            cpu_id += 1;
         }
 
         None
