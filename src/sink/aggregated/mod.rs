@@ -449,16 +449,98 @@ impl SchedulerWindowState {
         off_cpu_ns: u64,
         cpu_id: u32,
     ) {
-        self.handle_sched_switch(buf, prev_tid, timestamp_ns, prev_dim, on_cpu_ns, cpu_id);
-        self.handle_sched_runqueue(
-            buf,
-            next_tid,
-            timestamp_ns,
-            next_dim,
-            runqueue_ns,
-            off_cpu_ns,
-            cpu_id,
-        );
+        buf.add_sched_on_cpu(prev_dim, on_cpu_ns);
+        buf.add_sched_runqueue(next_dim, runqueue_ns, off_cpu_ns);
+
+        let next_running = RunningThread {
+            tid: next_tid,
+            cpu_dim: CpuCoreDimension::from_basic(next_dim, cpu_id),
+            running_since_ns: timestamp_ns,
+        };
+
+        let mut current_cpu_running = self.running_by_cpu.take_cpu(cpu_id);
+
+        match current_cpu_running {
+            Some(running) if running.tid == prev_tid => {
+                if timestamp_ns > running.running_since_ns {
+                    buf.add_cpu_on_core_dim(
+                        running.cpu_dim,
+                        timestamp_ns - running.running_since_ns,
+                    );
+                } else if timestamp_ns < running.running_since_ns {
+                    // Match `handle_sched_switch` fallback behavior for stale
+                    // carried state on the outgoing thread.
+                    buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+                }
+                current_cpu_running = None;
+            }
+            Some(running) => {
+                buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+                current_cpu_running = Some(running);
+            }
+            None => {
+                buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+            }
+        }
+
+        if let Some(running) = current_cpu_running.take() {
+            if running.tid == next_tid {
+                if timestamp_ns > running.running_since_ns {
+                    buf.add_cpu_on_core_dim(
+                        running.cpu_dim,
+                        timestamp_ns - running.running_since_ns,
+                    );
+                } else if timestamp_ns < running.running_since_ns {
+                    *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                    return;
+                }
+            } else {
+                current_cpu_running = Some(running);
+            }
+        }
+
+        if current_cpu_running.is_some_and(|running| running.tid != next_tid) {
+            if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
+                let prev = self
+                    .running_by_cpu
+                    .take_cpu(prev_cpu)
+                    .expect("find_cpu_for_tid must point to an occupied slot");
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                } else if timestamp_ns < prev.running_since_ns {
+                    *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
+                    if let Some(running) = current_cpu_running {
+                        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                    }
+                    return;
+                }
+            }
+        } else if current_cpu_running.is_none() {
+            if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
+                let prev = self
+                    .running_by_cpu
+                    .take_cpu(prev_cpu)
+                    .expect("find_cpu_for_tid must point to an occupied slot");
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                } else if timestamp_ns < prev.running_since_ns {
+                    *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
+                    return;
+                }
+            }
+        }
+
+        if let Some(prev) = current_cpu_running {
+            if timestamp_ns > prev.running_since_ns {
+                buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+            } else if timestamp_ns < prev.running_since_ns {
+                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
+                return;
+            }
+        }
+
+        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(next_running);
+        self.remember_tid_cpu(next_tid, cpu_id);
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
@@ -1921,6 +2003,70 @@ mod tests {
             .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
             .expect("next core usage");
         assert_eq!(next_core.snapshot().sum, 300);
+    }
+
+    #[test]
+    fn test_sched_combined_reattributes_existing_next_thread_runtime() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let seed_running = make_event_at(
+            1_000,
+            124,
+            88,
+            EventType::SchedRunqueue,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                runqueue_ns: 0,
+                off_cpu_ns: 0,
+                cpu_id: 1,
+            }),
+        );
+        process_event_with_scheduler_state(&mut buf, &seed_running, &dims, &mut scheduler_state);
+
+        let combined = make_event_at(
+            1_300,
+            123,
+            77,
+            EventType::SchedSwitch,
+            TypedEvent::SchedCombined(SchedCombinedEvent {
+                on_cpu_ns: 50,
+                cpu_id: 2,
+                next_pid: 124,
+                next_tid: 88,
+                next_client_type: ClientType::Geth as u8,
+                runqueue_ns: 10,
+                off_cpu_ns: 20,
+            }),
+        );
+        process_event_with_scheduler_state(&mut buf, &combined, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_500);
+
+        let cpu1 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 1))
+            .expect("carried runtime on old cpu");
+        assert_eq!(cpu1.snapshot().sum, 300);
+
+        let prev_cpu2 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
+            .expect("fallback runtime on outgoing cpu");
+        assert_eq!(prev_cpu2.snapshot().sum, 50);
+
+        let next_cpu2 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
+            .expect("new running thread on target cpu");
+        assert_eq!(next_cpu2.snapshot().sum, 200);
     }
 
     #[test]
