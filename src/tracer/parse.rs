@@ -136,6 +136,7 @@ pub enum ParseError {
 }
 
 /// Parse a raw ring buffer sample into a [`ParsedEvent`].
+#[inline(always)]
 pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
     if data.len() < HEADER_SIZE {
         return Err(ParseError::Truncated { size: data.len() });
@@ -148,9 +149,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
     let client_type_raw = header.client_type;
 
     if client_type_raw > MAX_CLIENT_TYPE as u8 {
-        return Err(ParseError::UnknownClientType {
-            raw: client_type_raw,
-        });
+        return Err(unknown_client_type(client_type_raw));
     }
 
     // Decode the raw event tag once and build the typed payload from the same
@@ -263,9 +262,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         24 => (EventType::OOMKill, None, TypedEvent::OOMKill),
         25 => (EventType::ProcessExit, None, TypedEvent::ProcessExit),
         _ => {
-            return Err(ParseError::UnknownEventType {
-                raw: event_type_raw,
-            });
+            return Err(unknown_event_type(event_type_raw));
         }
     };
 
@@ -290,10 +287,37 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
 // Safe fixed-record helpers (no indexing, no panics)
 // ---------------------------------------------------------------------------
 
+#[cold]
+#[inline(never)]
+fn payload_truncated(name: &'static str) -> ParseError {
+    ParseError::PayloadTruncated { event_name: name }
+}
+
+#[cold]
+#[inline(never)]
+fn unknown_event_type(raw: u8) -> ParseError {
+    ParseError::UnknownEventType { raw }
+}
+
+#[cold]
+#[inline(never)]
+fn unknown_client_type(raw: u8) -> ParseError {
+    ParseError::UnknownClientType { raw }
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_net_transport(name: &'static str, raw: u8) -> ParseError {
+    ParseError::InvalidNetTransport {
+        event_name: name,
+        raw,
+    }
+}
+
 #[inline(always)]
 fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), ParseError> {
     if data.len() < need {
-        Err(ParseError::PayloadTruncated { event_name: name })
+        Err(payload_truncated(name))
     } else {
         Ok(())
     }
@@ -369,10 +393,7 @@ fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, Pars
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = header.pad[0];
     if transport_raw > NetTransport::Udp as u8 {
-        return Err(ParseError::InvalidNetTransport {
-            event_name: "net IO event",
-            raw: transport_raw,
-        });
+        return Err(invalid_net_transport("net IO event", transport_raw));
     }
 
     Ok(TypedEvent::NetIOTx(NetIOEvent {
@@ -394,10 +415,7 @@ fn parse_net_io(
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = header.pad[0];
     if transport_raw > NetTransport::Udp as u8 {
-        return Err(ParseError::InvalidNetTransport {
-            event_name: "net IO event",
-            raw: transport_raw,
-        });
+        return Err(invalid_net_transport("net IO event", transport_raw));
     }
 
     Ok(NetIOEvent {
@@ -448,9 +466,7 @@ fn parse_sched_combined(
     let raw = read_payload::<RawSchedCombinedPayload>(data, "sched combined event")?;
     let next_client_type = header.pad[5];
     if next_client_type > MAX_CLIENT_TYPE as u8 {
-        return Err(ParseError::UnknownClientType {
-            raw: next_client_type,
-        });
+        return Err(unknown_client_type(next_client_type));
     }
 
     Ok(SchedCombinedEvent {
