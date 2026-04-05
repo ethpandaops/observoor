@@ -3,6 +3,8 @@ use std::time::Duration;
 #[cfg(all(feature = "bpf", not(test)))]
 use std::fs;
 
+use parking_lot::Mutex;
+
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
 
@@ -62,6 +64,7 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 pub struct Collector {
     interval_ms: u16,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
+    scheduler_collect_scratch: Mutex<Option<FastMap<BasicDimension, SchedulerCollectAcc>>>,
     #[cfg(feature = "bpf")]
     collect_process_snapshots: bool,
     #[cfg(feature = "bpf")]
@@ -241,6 +244,7 @@ impl Collector {
         Self {
             interval_ms: interval.as_millis() as u16,
             sampling_by_event,
+            scheduler_collect_scratch: Mutex::new(None),
             #[cfg(feature = "bpf")]
             collect_process_snapshots,
             #[cfg(feature = "bpf")]
@@ -1093,14 +1097,14 @@ impl Collector {
             0.0
         };
 
-        let mut grouped: FastMap<BasicDimension, SchedulerCollectAcc> =
-            fast_map_with_capacity(buf.cpu_on_core.len());
+        let mut grouped_scratch = self.scheduler_collect_scratch.lock();
+        let grouped =
+            grouped_scratch.get_or_insert_with(|| fast_map_with_capacity(buf.cpu_on_core.len()));
+        grouped.clear();
 
         for (dim, aggregate) in buf.cpu_on_core.iter() {
-            let acc = get_or_default_mut(
-                &mut grouped,
-                BasicDimension::new(dim.pid(), dim.client_type()),
-            );
+            let acc =
+                get_or_default_mut(grouped, BasicDimension::new(dim.pid(), dim.client_type()));
 
             let sched_on_cpu = aggregate.sched_on_cpu_snapshot();
             if sched_on_cpu.count > 0 {
@@ -1113,7 +1117,7 @@ impl Collector {
             }
         }
 
-        for (dim, mut acc) in grouped {
+        for (dim, acc) in grouped.iter() {
             self.push_latency_metric(
                 batch,
                 window,
@@ -1131,15 +1135,21 @@ impl Collector {
                 continue;
             }
 
-            if acc.max_core_on_cpu_ns == i64::MIN {
-                acc.max_core_on_cpu_ns = 0;
-            }
-            if acc.min_core_pct == f32::MAX {
-                acc.min_core_pct = 0.0;
-            }
-            if acc.max_core_pct == f32::MIN {
-                acc.max_core_pct = 0.0;
-            }
+            let max_core_on_cpu_ns = if acc.max_core_on_cpu_ns == i64::MIN {
+                0
+            } else {
+                acc.max_core_on_cpu_ns
+            };
+            let min_core_pct = if acc.min_core_pct == f32::MAX {
+                0.0
+            } else {
+                acc.min_core_pct
+            };
+            let max_core_pct = if acc.max_core_pct == f32::MIN {
+                0.0
+            } else {
+                acc.max_core_pct
+            };
             let mean_core_pct = if acc.active_cores == 0 {
                 0.0
             } else {
@@ -1158,11 +1168,11 @@ impl Collector {
                 event_count: acc.event_count,
                 active_cores: acc.active_cores,
                 system_cores: buf.system_cores,
-                max_core_on_cpu_ns: acc.max_core_on_cpu_ns,
+                max_core_on_cpu_ns,
                 max_core_id: acc.max_core_id,
                 mean_core_pct,
-                min_core_pct: acc.min_core_pct,
-                max_core_pct: acc.max_core_pct,
+                min_core_pct,
+                max_core_pct,
             });
 
             #[cfg(feature = "bpf")]
