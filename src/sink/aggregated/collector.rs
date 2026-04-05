@@ -80,6 +80,75 @@ struct EventSamplingMetadata {
     rate: f32,
 }
 
+struct SchedulerCollectAcc {
+    sched_on_cpu: LatencyAggregate,
+    active_cores: u16,
+    total_on_cpu_ns: i64,
+    event_count: u32,
+    max_core_on_cpu_ns: i64,
+    max_core_id: u32,
+    min_core_pct: f32,
+    max_core_pct: f32,
+    sum_core_pct: f32,
+}
+
+impl SchedulerCollectAcc {
+    fn new() -> Self {
+        Self {
+            sched_on_cpu: LatencyAggregate::new(),
+            active_cores: 0,
+            total_on_cpu_ns: 0,
+            event_count: 0,
+            max_core_on_cpu_ns: i64::MIN,
+            max_core_id: 0,
+            min_core_pct: f32::MAX,
+            max_core_pct: f32::MIN,
+            sum_core_pct: 0.0,
+        }
+    }
+
+    #[inline(always)]
+    fn record_sched_on_cpu(&mut self, snap: &LatencySnapshot) {
+        self.sched_on_cpu.merge_snapshot(snap);
+    }
+
+    #[inline(always)]
+    fn record_cpu_util(
+        &mut self,
+        cpu_id: u32,
+        snap: CounterSnapshot,
+        interval_ns: i64,
+        pct_scale: f32,
+    ) {
+        self.active_cores = self.active_cores.saturating_add(1);
+        self.total_on_cpu_ns += snap.sum;
+        self.event_count = self.event_count.saturating_add(snap.count);
+
+        if snap.sum > self.max_core_on_cpu_ns {
+            self.max_core_on_cpu_ns = snap.sum;
+            self.max_core_id = cpu_id;
+        }
+
+        // Keep raw on-CPU accounting for totals, but bound utilization
+        // percentages to one full window per core.
+        let bounded_on_cpu_ns = snap.sum.min(interval_ns);
+        let pct = (bounded_on_cpu_ns as f32) * pct_scale;
+        self.sum_core_pct += pct;
+        if pct < self.min_core_pct {
+            self.min_core_pct = pct;
+        }
+        if pct > self.max_core_pct {
+            self.max_core_pct = pct;
+        }
+    }
+}
+
+impl Default for SchedulerCollectAcc {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn map_len<K, V>(map: &FastMap<K, V>) -> usize {
     map.len()
 }
@@ -283,7 +352,6 @@ impl Collector {
         self.collect_basic_counters(batch, buf, window, slot);
         self.collect_network_counters(batch, buf, window, slot);
         self.collect_disk_counters(batch, buf, window, slot);
-        self.collect_cpu_utilization(batch, buf, window, slot);
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
@@ -416,38 +484,9 @@ impl Collector {
         );
 
         let sched_switch_sampling = self.sampling_for_event(EventType::SchedSwitch);
+        self.collect_scheduler_cpu_metrics(batch, buf, window, slot, sched_switch_sampling);
+
         let sched_runqueue_sampling = self.sampling_for_event(EventType::SchedRunqueue);
-        let mut sched_on_cpu_grouped: FastMap<BasicDimension, LatencyAggregate> =
-            fast_map_with_capacity(buf.cpu_on_core.len());
-        for (dim, aggregate) in buf.cpu_on_core.iter() {
-            let sched_on_cpu = aggregate.sched_on_cpu_snapshot();
-            if sched_on_cpu.count == 0 {
-                continue;
-            }
-            get_or_default_mut(
-                &mut sched_on_cpu_grouped,
-                BasicDimension::new(dim.pid(), dim.client_type()),
-            )
-            .merge_snapshot(&sched_on_cpu);
-        }
-
-        for (dim, aggregate) in sched_on_cpu_grouped.iter() {
-            let pid = dim.pid();
-            let client_type = client_type_from_u8(dim.client_type());
-            self.push_latency_metric(
-                batch,
-                window,
-                slot,
-                pid,
-                client_type,
-                None,
-                None,
-                "sched_on_cpu",
-                sched_switch_sampling,
-                aggregate.snapshot(),
-            );
-        }
-
         for (dim, aggregate) in buf.sched_wait.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
@@ -1037,99 +1076,57 @@ impl Collector {
         }
     }
 
-    /// Collects per-process CPU utilization summaries from per-core counters.
-    fn collect_cpu_utilization(
+    /// Collects scheduler on-CPU latency and per-process CPU utilization in one pass.
+    fn collect_scheduler_cpu_metrics(
         &self,
         batch: &mut MetricBatch,
         buf: &Buffer,
         window: WindowInfo,
         slot: SlotInfo,
+        sampling: EventSamplingMetadata,
     ) {
-        struct CpuUtilAcc {
-            active_cores: u16,
-            total_on_cpu_ns: i64,
-            event_count: u32,
-            max_core_on_cpu_ns: i64,
-            max_core_id: u32,
-            min_core_pct: f32,
-            max_core_pct: f32,
-            sum_core_pct: f32,
-        }
-
-        impl CpuUtilAcc {
-            fn new() -> Self {
-                Self {
-                    active_cores: 0,
-                    total_on_cpu_ns: 0,
-                    event_count: 0,
-                    max_core_on_cpu_ns: i64::MIN,
-                    max_core_id: 0,
-                    min_core_pct: f32::MAX,
-                    max_core_pct: f32::MIN,
-                    sum_core_pct: 0.0,
-                }
-            }
-
-            #[inline(always)]
-            fn update(
-                &mut self,
-                cpu_id: u32,
-                snap: super::aggregate::CounterSnapshot,
-                interval_ns: i64,
-                pct_scale: f32,
-            ) {
-                self.active_cores = self.active_cores.saturating_add(1);
-                self.total_on_cpu_ns += snap.sum;
-                self.event_count = self.event_count.saturating_add(snap.count);
-
-                if snap.sum > self.max_core_on_cpu_ns {
-                    self.max_core_on_cpu_ns = snap.sum;
-                    self.max_core_id = cpu_id;
-                }
-
-                // Keep raw on-CPU accounting for totals, but bound utilization
-                // percentages to one full window per core.
-                let bounded_on_cpu_ns = snap.sum.min(interval_ns);
-                let pct = (bounded_on_cpu_ns as f32) * pct_scale;
-                self.sum_core_pct += pct;
-                if pct < self.min_core_pct {
-                    self.min_core_pct = pct;
-                }
-                if pct > self.max_core_pct {
-                    self.max_core_pct = pct;
-                }
-            }
-        }
-
-        impl Default for CpuUtilAcc {
-            fn default() -> Self {
-                Self::new()
-            }
-        }
-
         let interval_ns = i64::from(self.interval_ms) * 1_000_000;
-        if interval_ns <= 0 {
-            return;
-        }
-        let pct_scale = 100.0f32 / interval_ns as f32;
-        let sampling = self.sampling_for_event(EventType::SchedSwitch);
+        let collect_cpu_util = interval_ns > 0;
+        let pct_scale = if collect_cpu_util {
+            100.0f32 / interval_ns as f32
+        } else {
+            0.0
+        };
 
-        let mut grouped: FastMap<BasicDimension, CpuUtilAcc> =
+        let mut grouped: FastMap<BasicDimension, SchedulerCollectAcc> =
             fast_map_with_capacity(buf.cpu_on_core.len());
 
         for (dim, aggregate) in buf.cpu_on_core.iter() {
-            let snap = aggregate.cpu_on_core_snapshot();
-            if snap.count == 0 {
-                continue;
-            }
-            get_or_default_mut(
+            let acc = get_or_default_mut(
                 &mut grouped,
                 BasicDimension::new(dim.pid(), dim.client_type()),
-            )
-            .update(dim.cpu_id(), snap, interval_ns, pct_scale);
+            );
+
+            let sched_on_cpu = aggregate.sched_on_cpu_snapshot();
+            if sched_on_cpu.count > 0 {
+                acc.record_sched_on_cpu(&sched_on_cpu);
+            }
+
+            let snap = aggregate.cpu_on_core_snapshot();
+            if collect_cpu_util && snap.count > 0 {
+                acc.record_cpu_util(dim.cpu_id(), snap, interval_ns, pct_scale);
+            }
         }
 
         for (dim, mut acc) in grouped {
+            self.push_latency_metric(
+                batch,
+                window,
+                slot,
+                dim.pid(),
+                client_type_from_u8(dim.client_type()),
+                None,
+                None,
+                "sched_on_cpu",
+                sampling,
+                acc.sched_on_cpu.snapshot(),
+            );
+
             if acc.active_cores == 0 {
                 continue;
             }
