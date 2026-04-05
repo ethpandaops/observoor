@@ -66,21 +66,20 @@ impl BufferedCapturedStats {
         }
     }
 
-    fn record_precounted(
-        &mut self,
-        event_totals: &[u16; MAX_EVENT_TYPE + 1],
-        client_totals: &[u16; CLIENT_TYPE_CARDINALITY],
-        event_count: usize,
-    ) {
-        for (raw, count) in event_totals.iter().copied().enumerate().skip(1) {
-            self.event_totals[raw] += u64::from(count);
-        }
-        for (raw, count) in client_totals.iter().copied().enumerate() {
-            self.client_totals[raw] += u64::from(count);
+    fn record_batch(&mut self, batch: &crate::tracer::ParsedEventBatch) {
+        for event in batch.events.iter() {
+            let et = event.raw.event_type as usize;
+            if et < self.event_totals.len() {
+                self.event_totals[et] += 1;
+            }
+            let ct = event.raw.client_type as usize;
+            if ct < self.client_totals.len() {
+                self.client_totals[ct] += 1;
+            }
         }
         self.buffered_events = self
             .buffered_events
-            .saturating_add(u32::try_from(event_count).unwrap_or(u32::MAX));
+            .saturating_add(u32::try_from(batch.len()).unwrap_or(u32::MAX));
 
         if self.buffered_events >= TRACER_STATS_FLUSH_INTERVAL {
             self.flush();
@@ -417,11 +416,7 @@ impl Agent {
             let mut buffered_stats =
                 BufferedCapturedStats::new(captured_stats, captured_client_stats);
             tracer.on_event_batch(Box::new(move |batch| {
-                buffered_stats.record_precounted(
-                    &batch.event_type_totals,
-                    &batch.client_totals,
-                    batch.len(),
-                );
+                buffered_stats.record_batch(&batch);
                 sink_ev.handle_event_batch(batch);
             }));
 
