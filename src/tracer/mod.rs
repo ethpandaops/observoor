@@ -101,28 +101,27 @@ impl ParsedEventBatch {
     #[inline(always)]
     fn record_event(&mut self, event: &ParsedEvent) {
         let event_type = event.raw.event_type as usize;
-        if let Some(total) = self.event_totals.get_mut(event_type) {
-            *total += 1;
-        }
+        // Safety: `EventType` is a closed repr(u8) enum and all `Event`s either
+        // come from the parser or normalize invalid client types at construction.
+        unsafe { *self.event_totals.get_unchecked_mut(event_type) += 1 };
 
         let client_type = event.raw.client_type() as usize;
-        if let Some(total) = self.client_totals.get_mut(client_type) {
-            *total += 1;
-        }
+        // Safety: `Event::new` clamps unknown raw values to `Unknown` and
+        // `parse_event` validates the incoming client discriminant.
+        unsafe { *self.client_totals.get_unchecked_mut(client_type) += 1 };
 
         let secondary_event_type = event.raw.secondary_event_type_raw() as usize;
         if secondary_event_type == 0 {
             return;
         }
 
-        if let Some(total) = self.event_totals.get_mut(secondary_event_type) {
-            *total += 1;
-        }
+        // Safety: secondary event tags are only sourced from `EventType`.
+        unsafe { *self.event_totals.get_unchecked_mut(secondary_event_type) += 1 };
 
         let secondary_client_type = event.raw.secondary_client_type_raw() as usize;
-        if let Some(total) = self.client_totals.get_mut(secondary_client_type) {
-            *total += 1;
-        }
+        // Safety: `with_secondary_logical_event` normalizes invalid client
+        // types to `Unknown` before storing them.
+        unsafe { *self.client_totals.get_unchecked_mut(secondary_client_type) += 1 };
     }
 
     pub fn recycle(mut self) {

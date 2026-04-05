@@ -1,4 +1,5 @@
 use std::fmt;
+use std::mem::size_of;
 
 /// EventType identifies the kind of eBPF event.
 /// Values must match `bpf/include/observoor.h`.
@@ -348,10 +349,13 @@ pub struct Event {
     pub timestamp_ns: u64,
     basic_dimension: u64,
     pub tid: u32,
+    client_type: u8,
     pub event_type: EventType,
     secondary_event_type: u8,
     secondary_client_type: u8,
 }
+
+const _: () = assert!(size_of::<Event>() == 24);
 
 impl Event {
     #[inline(always)]
@@ -362,10 +366,40 @@ impl Event {
         event_type: EventType,
         client_type: u8,
     ) -> Self {
+        Self::new_sanitized(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            sanitize_client_type(client_type),
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+        Self::new_sanitized(timestamp_ns, pid, tid, event_type, client_type)
+    }
+
+    #[inline(always)]
+    fn new_sanitized(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
         Self {
             timestamp_ns,
             basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
             tid,
+            client_type,
             event_type,
             secondary_event_type: 0,
             secondary_client_type: 0,
@@ -375,7 +409,7 @@ impl Event {
     #[inline(always)]
     pub fn with_secondary_logical_event(mut self, event_type: EventType, client_type: u8) -> Self {
         self.secondary_event_type = event_type as u8;
-        self.secondary_client_type = client_type;
+        self.secondary_client_type = sanitize_client_type(client_type);
         self
     }
 
@@ -387,7 +421,7 @@ impl Event {
     /// Validated raw `ClientType` discriminant from the ring buffer.
     #[inline(always)]
     pub fn client_type(self) -> u8 {
-        (self.basic_dimension >> 32) as u8
+        self.client_type
     }
 
     #[inline(always)]
@@ -403,6 +437,15 @@ impl Event {
     #[inline(always)]
     pub fn secondary_client_type_raw(self) -> u8 {
         self.secondary_client_type
+    }
+}
+
+#[inline(always)]
+fn sanitize_client_type(client_type: u8) -> u8 {
+    if client_type <= MAX_CLIENT_TYPE as u8 {
+        client_type
+    } else {
+        ClientType::Unknown as u8
     }
 }
 
@@ -599,6 +642,16 @@ mod tests {
             assert_eq!(ct as u8, i);
         }
         assert!(ClientType::from_u8(13).is_none());
+    }
+
+    #[test]
+    fn test_event_new_normalizes_unknown_client_type() {
+        let event = Event::new(1, 10, 11, EventType::FDOpen, u8::MAX);
+        assert_eq!(event.client_type(), ClientType::Unknown as u8);
+        assert_eq!(
+            event.basic_dimension_key() >> 32,
+            u64::from(ClientType::Unknown as u8)
+        );
     }
 
     #[test]

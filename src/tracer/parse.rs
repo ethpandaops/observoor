@@ -266,7 +266,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         }
     };
 
-    let event = Event::new(
+    let event = Event::new_validated(
         u64::from_le(header.timestamp_ns),
         u32::from_le(header.pid),
         u32::from_le(header.tid),
