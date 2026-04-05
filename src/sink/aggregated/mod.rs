@@ -49,6 +49,7 @@ const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
 const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
 const SCHED_TID_CACHE_SIZE: usize = 8;
+const SCHED_TID_CACHE_WAYS: usize = 2;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -187,6 +188,8 @@ struct SchedTidCacheEntry {
     cpu_id: u32,
 }
 
+type SchedTidCacheSet = [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_WAYS];
+
 #[inline(always)]
 fn sched_tid_cache_slot(tid: u32) -> usize {
     ((tid ^ tid.rotate_left(11)) as usize) & (SCHED_TID_CACHE_SIZE - 1)
@@ -194,16 +197,16 @@ fn sched_tid_cache_slot(tid: u32) -> usize {
 
 struct SchedulerWindowState {
     running_by_cpu: RunningThreadStore,
-    // The live set is bounded by active CPUs, so cache misses are cheaper to
-    // recover with a short scan than by maintaining a second hash index.
-    tid_to_cpu_cache: [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_SIZE],
+    // The live set is bounded by active CPUs, so keep the no-hash direct cache
+    // but allow two colliding tids per bucket before falling back to a scan.
+    tid_to_cpu_cache: [SchedTidCacheSet; SCHED_TID_CACHE_SIZE],
 }
 
 impl Default for SchedulerWindowState {
     fn default() -> Self {
         Self {
             running_by_cpu: RunningThreadStore::with_capacity(64),
-            tid_to_cpu_cache: [None; SCHED_TID_CACHE_SIZE],
+            tid_to_cpu_cache: [[None; SCHED_TID_CACHE_WAYS]; SCHED_TID_CACHE_SIZE],
         }
     }
 }
@@ -313,7 +316,7 @@ impl SchedulerWindowState {
     fn find_cpu_for_tid(&mut self, tid: u32) -> Option<u32> {
         let cache_slot = sched_tid_cache_slot(tid);
 
-        if let Some(entry) = self.tid_to_cpu_cache[cache_slot] {
+        for entry in self.tid_to_cpu_cache[cache_slot].into_iter().flatten() {
             if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
                 return Some(entry.cpu_id);
             }
@@ -324,20 +327,38 @@ impl SchedulerWindowState {
             return None;
         };
 
-        self.tid_to_cpu_cache[cache_slot] = Some(SchedTidCacheEntry { tid, cpu_id });
+        self.remember_tid_cpu(tid, cpu_id);
         Some(cpu_id)
     }
 
     #[inline(always)]
     fn remember_tid_cpu(&mut self, tid: u32, cpu_id: u32) {
-        self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] = Some(SchedTidCacheEntry { tid, cpu_id });
+        let entry = Some(SchedTidCacheEntry { tid, cpu_id });
+        let cache_set = &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
+
+        for slot in cache_set.iter_mut() {
+            if slot.is_some_and(|cached| cached.tid == tid) {
+                *slot = entry;
+                return;
+            }
+        }
+
+        for slot in cache_set.iter_mut() {
+            if slot.is_none() {
+                *slot = entry;
+                return;
+            }
+        }
+
+        cache_set[0] = entry;
     }
 
     #[inline(always)]
     fn clear_cached_tid_cpu(&mut self, tid: u32) {
-        let cache_slot = sched_tid_cache_slot(tid);
-        if self.tid_to_cpu_cache[cache_slot].is_some_and(|entry| entry.tid == tid) {
-            self.tid_to_cpu_cache[cache_slot] = None;
+        for slot in &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] {
+            if slot.is_some_and(|entry| entry.tid == tid) {
+                *slot = None;
+            }
         }
     }
 
@@ -1826,6 +1847,73 @@ mod tests {
         assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
         assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
         assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_keeps_two_colliding_tids_hot() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+
+        let cache_set = &scheduler_state.tid_to_cpu_cache[sched_tid_cache_slot(tid_a)];
+        assert!(cache_set
+            .iter()
+            .flatten()
+            .any(|entry| entry.tid == tid_a && entry.cpu_id == 0));
+        assert!(cache_set
+            .iter()
+            .flatten()
+            .any(|entry| entry.tid == tid_b && entry.cpu_id == 1));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_clear_preserves_other_collision_entry() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+
+        scheduler_state.clear_cached_tid_cpu(tid_a);
+
+        let cache_set = &scheduler_state.tid_to_cpu_cache[sched_tid_cache_slot(tid_a)];
+        assert!(!cache_set.iter().flatten().any(|entry| entry.tid == tid_a));
+        assert!(cache_set.iter().flatten().any(|entry| entry.tid == tid_b));
     }
 
     #[test]
