@@ -17,7 +17,6 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
-use hashbrown::HashMap;
 use smallvec::SmallVec;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -28,7 +27,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
 use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
-use self::buffer::{Buffer, FastHashBuilder};
+use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
@@ -138,13 +137,12 @@ impl RunningThreadStore {
         }
     }
 
-    #[cfg(test)]
     #[inline(always)]
-    fn find_cpu_for_tid(&self, tid: u32) -> Option<usize> {
+    fn find_cpu_for_tid(&self, tid: u32) -> Option<u32> {
         for (cpu_id, entry) in self.entries.iter().enumerate() {
             if let Some(running) = entry {
                 if running.tid == tid {
-                    return Some(cpu_id);
+                    return Some(cpu_id as u32);
                 }
             }
         }
@@ -192,17 +190,15 @@ fn sched_tid_cache_slot(tid: u32) -> usize {
 
 struct SchedulerWindowState {
     running_by_cpu: RunningThreadStore,
-    running_cpu_by_tid: HashMap<u32, u32, FastHashBuilder>,
+    // The live set is bounded by active CPUs, so cache misses are cheaper to
+    // recover with a short scan than by maintaining a second hash index.
     tid_to_cpu_cache: [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_SIZE],
 }
 
 impl Default for SchedulerWindowState {
     fn default() -> Self {
         Self {
-            // This state only tracks currently running threads, so cardinality
-            // stays bounded by the number of active cores rather than total TIDs.
             running_by_cpu: RunningThreadStore::with_capacity(64),
-            running_cpu_by_tid: HashMap::with_capacity_and_hasher(64, FastHashBuilder::default()),
             tid_to_cpu_cache: [None; SCHED_TID_CACHE_SIZE],
         }
     }
@@ -319,16 +315,10 @@ impl SchedulerWindowState {
             }
         }
 
-        let Some(&cpu_id) = self.running_cpu_by_tid.get(&tid) else {
+        let Some(cpu_id) = self.running_by_cpu.find_cpu_for_tid(tid) else {
             self.clear_cached_tid_cpu(tid);
             return None;
         };
-
-        if !self.running_by_cpu.cpu_matches_tid(cpu_id, tid) {
-            self.running_cpu_by_tid.remove(&tid);
-            self.clear_cached_tid_cpu(tid);
-            return None;
-        }
 
         self.tid_to_cpu_cache[cache_slot] = Some(SchedTidCacheEntry { tid, cpu_id });
         Some(cpu_id)
@@ -336,7 +326,6 @@ impl SchedulerWindowState {
 
     #[inline(always)]
     fn remember_tid_cpu(&mut self, tid: u32, cpu_id: u32) {
-        self.running_cpu_by_tid.insert(tid, cpu_id);
         self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] = Some(SchedTidCacheEntry { tid, cpu_id });
     }
 
@@ -350,7 +339,6 @@ impl SchedulerWindowState {
 
     #[inline(always)]
     fn forget_tid_cpu(&mut self, tid: u32) {
-        self.running_cpu_by_tid.remove(&tid);
         self.clear_cached_tid_cpu(tid);
     }
 
@@ -1797,6 +1785,33 @@ mod tests {
         assert_eq!(removed.tid, 20);
         assert!(!store.contains_tid(20));
         assert!(store.contains_tid(10));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_collision_falls_back_to_running_scan() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
     }
 
     #[test]
