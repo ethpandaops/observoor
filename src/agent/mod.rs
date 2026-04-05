@@ -67,16 +67,22 @@ impl BufferedCapturedStats {
     }
 
     fn record_batch(&mut self, batch: &crate::tracer::ParsedEventBatch) {
-        for event in batch.events.iter() {
-            let et = event.raw.event_type as usize;
-            if et < self.event_totals.len() {
-                self.event_totals[et] += 1;
-            }
-            let ct = event.raw.client_type() as usize;
-            if ct < self.client_totals.len() {
-                self.client_totals[ct] += 1;
-            }
+        for (dst, src) in self
+            .event_totals
+            .iter_mut()
+            .zip(batch.event_totals().iter().copied())
+        {
+            *dst += u64::from(src);
         }
+
+        for (dst, src) in self
+            .client_totals
+            .iter_mut()
+            .zip(batch.client_totals().iter().copied())
+        {
+            *dst += u64::from(src);
+        }
+
         self.buffered_events = self
             .buffered_events
             .saturating_add(u32::try_from(batch.len()).unwrap_or(u32::MAX));

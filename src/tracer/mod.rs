@@ -12,7 +12,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use self::event::{ClientType, ParsedEvent};
+use self::event::{ClientType, ParsedEvent, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
 
 /// Ring buffer usage statistics.
 #[derive(Debug, Clone, Copy, Default)]
@@ -39,6 +39,8 @@ pub const PARSED_EVENT_BATCH_SIZE: usize = 16384;
 #[derive(Clone)]
 pub struct ParsedEventBatch {
     pub events: Vec<ParsedEvent>,
+    event_totals: [u32; MAX_EVENT_TYPE + 1],
+    client_totals: [u32; CLIENT_TYPE_CARDINALITY],
     recycler: Option<Arc<ParsedEventBatchPool>>,
 }
 
@@ -46,6 +48,8 @@ impl ParsedEventBatch {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             events: Vec::with_capacity(capacity),
+            event_totals: [0; MAX_EVENT_TYPE + 1],
+            client_totals: [0; CLIENT_TYPE_CARDINALITY],
             recycler: None,
         }
     }
@@ -73,12 +77,52 @@ impl ParsedEventBatch {
 
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
+        self.record_event(&event);
         self.events.push(event);
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
         self.events.clear();
+        self.event_totals.fill(0);
+        self.client_totals.fill(0);
+    }
+
+    #[inline(always)]
+    pub fn event_totals(&self) -> &[u32; MAX_EVENT_TYPE + 1] {
+        &self.event_totals
+    }
+
+    #[inline(always)]
+    pub fn client_totals(&self) -> &[u32; CLIENT_TYPE_CARDINALITY] {
+        &self.client_totals
+    }
+
+    #[inline(always)]
+    fn record_event(&mut self, event: &ParsedEvent) {
+        let event_type = event.raw.event_type as usize;
+        if let Some(total) = self.event_totals.get_mut(event_type) {
+            *total += 1;
+        }
+
+        let client_type = event.raw.client_type() as usize;
+        if let Some(total) = self.client_totals.get_mut(client_type) {
+            *total += 1;
+        }
+
+        let secondary_event_type = event.raw.secondary_event_type_raw() as usize;
+        if secondary_event_type == 0 {
+            return;
+        }
+
+        if let Some(total) = self.event_totals.get_mut(secondary_event_type) {
+            *total += 1;
+        }
+
+        let secondary_client_type = event.raw.secondary_client_type_raw() as usize;
+        if let Some(total) = self.client_totals.get_mut(secondary_client_type) {
+            *total += 1;
+        }
     }
 
     pub fn recycle(mut self) {
@@ -163,9 +207,14 @@ mod tests {
         });
 
         assert_eq!(batch.len(), 2);
+        assert_eq!(batch.event_totals()[EventType::FDOpen as usize], 1);
+        assert_eq!(batch.event_totals()[EventType::FDClose as usize], 1);
+        assert_eq!(batch.client_totals()[1], 2);
 
         batch.clear();
         assert!(batch.is_empty());
+        assert!(batch.event_totals().iter().all(|count| *count == 0));
+        assert!(batch.client_totals().iter().all(|count| *count == 0));
     }
 
     #[test]
@@ -184,5 +233,31 @@ mod tests {
         let recycled = ParsedEventBatch::checkout(&pool);
         assert!(recycled.is_empty());
         assert_eq!(recycled.events.capacity(), initial_capacity);
+        assert!(recycled.event_totals().iter().all(|count| *count == 0));
+        assert!(recycled.client_totals().iter().all(|count| *count == 0));
+    }
+
+    #[test]
+    fn parsed_event_batch_counts_secondary_logical_events() {
+        let mut batch = ParsedEventBatch::with_capacity(1);
+
+        batch.push(ParsedEvent {
+            raw: Event::new(1, 100, 100, EventType::SchedSwitch, 1)
+                .with_secondary_logical_event(EventType::SchedRunqueue, 2),
+            typed: TypedEvent::SchedCombined(crate::tracer::event::SchedCombinedEvent {
+                on_cpu_ns: 10,
+                cpu_id: 3,
+                next_pid: 200,
+                next_tid: 200,
+                next_client_type: 2,
+                runqueue_ns: 20,
+                off_cpu_ns: 30,
+            }),
+        });
+
+        assert_eq!(batch.event_totals()[EventType::SchedSwitch as usize], 1);
+        assert_eq!(batch.event_totals()[EventType::SchedRunqueue as usize], 1);
+        assert_eq!(batch.client_totals()[1], 1);
+        assert_eq!(batch.client_totals()[2], 1);
     }
 }
