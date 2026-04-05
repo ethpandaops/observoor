@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use hashbrown::HashMap;
 use smallvec::SmallVec;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
@@ -27,7 +28,7 @@ use crate::sink::Sink;
 use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
 use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
-use self::buffer::Buffer;
+use self::buffer::{Buffer, FastHashBuilder};
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
 use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
@@ -137,6 +138,7 @@ impl RunningThreadStore {
         }
     }
 
+    #[cfg(test)]
     #[inline(always)]
     fn find_cpu_for_tid(&self, tid: u32) -> Option<usize> {
         for (cpu_id, entry) in self.entries.iter().enumerate() {
@@ -190,6 +192,7 @@ fn sched_tid_cache_slot(tid: u32) -> usize {
 
 struct SchedulerWindowState {
     running_by_cpu: RunningThreadStore,
+    running_cpu_by_tid: HashMap<u32, u32, FastHashBuilder>,
     tid_to_cpu_cache: [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_SIZE],
 }
 
@@ -199,6 +202,7 @@ impl Default for SchedulerWindowState {
             // This state only tracks currently running threads, so cardinality
             // stays bounded by the number of active cores rather than total TIDs.
             running_by_cpu: RunningThreadStore::with_capacity(64),
+            running_cpu_by_tid: HashMap::with_capacity_and_hasher(64, FastHashBuilder::default()),
             tid_to_cpu_cache: [None; SCHED_TID_CACHE_SIZE],
         }
     }
@@ -315,23 +319,54 @@ impl SchedulerWindowState {
             }
         }
 
-        let Some(cpu_id) = self
-            .running_by_cpu
-            .find_cpu_for_tid(tid)
-            .map(|cpu_id| cpu_id as u32)
-        else {
-            if self.tid_to_cpu_cache[cache_slot].is_some_and(|entry| entry.tid == tid) {
-                self.tid_to_cpu_cache[cache_slot] = None;
-            }
+        let Some(&cpu_id) = self.running_cpu_by_tid.get(&tid) else {
+            self.clear_cached_tid_cpu(tid);
             return None;
         };
+
+        if !self.running_by_cpu.cpu_matches_tid(cpu_id, tid) {
+            self.running_cpu_by_tid.remove(&tid);
+            self.clear_cached_tid_cpu(tid);
+            return None;
+        }
+
         self.tid_to_cpu_cache[cache_slot] = Some(SchedTidCacheEntry { tid, cpu_id });
         Some(cpu_id)
     }
 
     #[inline(always)]
     fn remember_tid_cpu(&mut self, tid: u32, cpu_id: u32) {
+        self.running_cpu_by_tid.insert(tid, cpu_id);
         self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] = Some(SchedTidCacheEntry { tid, cpu_id });
+    }
+
+    #[inline(always)]
+    fn clear_cached_tid_cpu(&mut self, tid: u32) {
+        let cache_slot = sched_tid_cache_slot(tid);
+        if self.tid_to_cpu_cache[cache_slot].is_some_and(|entry| entry.tid == tid) {
+            self.tid_to_cpu_cache[cache_slot] = None;
+        }
+    }
+
+    #[inline(always)]
+    fn forget_tid_cpu(&mut self, tid: u32) {
+        self.running_cpu_by_tid.remove(&tid);
+        self.clear_cached_tid_cpu(tid);
+    }
+
+    #[inline(always)]
+    fn take_running_on_cpu(&mut self, cpu_id: u32) -> Option<RunningThread> {
+        let running = self.running_by_cpu.take_cpu(cpu_id);
+        if let Some(running) = running {
+            self.forget_tid_cpu(running.tid);
+        }
+        running
+    }
+
+    #[inline(always)]
+    fn restore_running(&mut self, running: RunningThread) {
+        *self.running_by_cpu.cpu_slot_mut(running.cpu_id) = Some(running);
+        self.remember_tid_cpu(running.tid, running.cpu_id);
     }
 
     #[inline(always)]
@@ -358,7 +393,7 @@ impl SchedulerWindowState {
     ) {
         buf.add_sched_on_cpu(dim, on_cpu_ns);
 
-        if let Some(running) = self.running_by_cpu.take_cpu(cpu_id) {
+        if let Some(running) = self.take_running_on_cpu(cpu_id) {
             if running.tid == tid {
                 if timestamp_ns > running.running_since_ns {
                     buf.add_cpu_on_core(
@@ -374,7 +409,7 @@ impl SchedulerWindowState {
                     return;
                 }
             } else {
-                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                self.restore_running(running);
             }
         }
 
@@ -408,8 +443,7 @@ impl SchedulerWindowState {
 
         if let Some(prev_cpu) = self.find_cpu_for_tid(tid) {
             let prev = self
-                .running_by_cpu
-                .take_cpu(prev_cpu)
+                .take_running_on_cpu(prev_cpu)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > prev.running_since_ns {
                 buf.add_cpu_on_core(
@@ -418,7 +452,7 @@ impl SchedulerWindowState {
                     timestamp_ns - prev.running_since_ns,
                 );
             } else if timestamp_ns < prev.running_since_ns {
-                *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
+                self.restore_running(prev);
                 return;
             }
 
@@ -426,7 +460,7 @@ impl SchedulerWindowState {
         }
 
         if !reused_target_slot {
-            if let Some(prev) = self.running_by_cpu.take_cpu(cpu_id) {
+            if let Some(prev) = self.take_running_on_cpu(cpu_id) {
                 if timestamp_ns > prev.running_since_ns {
                     buf.add_cpu_on_core(
                         prev.basic_dim,
@@ -434,14 +468,13 @@ impl SchedulerWindowState {
                         timestamp_ns - prev.running_since_ns,
                     );
                 } else if timestamp_ns < prev.running_since_ns {
-                    *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
+                    self.restore_running(prev);
                     return;
                 }
             }
         }
 
-        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(next_running);
-        self.remember_tid_cpu(tid, cpu_id);
+        self.restore_running(next_running);
     }
 
     #[inline(always)]
@@ -468,7 +501,7 @@ impl SchedulerWindowState {
             running_since_ns: timestamp_ns,
         };
 
-        let mut current_cpu_running = self.running_by_cpu.take_cpu(cpu_id);
+        let mut current_cpu_running = self.take_running_on_cpu(cpu_id);
 
         match current_cpu_running {
             Some(running) if running.tid == prev_tid => {
@@ -503,7 +536,7 @@ impl SchedulerWindowState {
                         timestamp_ns - running.running_since_ns,
                     );
                 } else if timestamp_ns < running.running_since_ns {
-                    *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                    self.restore_running(running);
                     return;
                 }
             } else {
@@ -514,8 +547,7 @@ impl SchedulerWindowState {
         if current_cpu_running.is_some_and(|running| running.tid != next_tid) {
             if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
                 let prev = self
-                    .running_by_cpu
-                    .take_cpu(prev_cpu)
+                    .take_running_on_cpu(prev_cpu)
                     .expect("find_cpu_for_tid must point to an occupied slot");
                 if timestamp_ns > prev.running_since_ns {
                     buf.add_cpu_on_core(
@@ -524,9 +556,9 @@ impl SchedulerWindowState {
                         timestamp_ns - prev.running_since_ns,
                     );
                 } else if timestamp_ns < prev.running_since_ns {
-                    *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
+                    self.restore_running(prev);
                     if let Some(running) = current_cpu_running {
-                        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                        self.restore_running(running);
                     }
                     return;
                 }
@@ -534,8 +566,7 @@ impl SchedulerWindowState {
         } else if current_cpu_running.is_none() {
             if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
                 let prev = self
-                    .running_by_cpu
-                    .take_cpu(prev_cpu)
+                    .take_running_on_cpu(prev_cpu)
                     .expect("find_cpu_for_tid must point to an occupied slot");
                 if timestamp_ns > prev.running_since_ns {
                     buf.add_cpu_on_core(
@@ -544,7 +575,7 @@ impl SchedulerWindowState {
                         timestamp_ns - prev.running_since_ns,
                     );
                 } else if timestamp_ns < prev.running_since_ns {
-                    *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
+                    self.restore_running(prev);
                     return;
                 }
             }
@@ -558,20 +589,18 @@ impl SchedulerWindowState {
                     timestamp_ns - prev.running_since_ns,
                 );
             } else if timestamp_ns < prev.running_since_ns {
-                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
+                self.restore_running(prev);
                 return;
             }
         }
 
-        *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(next_running);
-        self.remember_tid_cpu(next_tid, cpu_id);
+        self.restore_running(next_running);
     }
 
     fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
         if let Some(cpu_id) = self.find_cpu_for_tid(tid) {
             let running = self
-                .running_by_cpu
-                .take_cpu(cpu_id)
+                .take_running_on_cpu(cpu_id)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > running.running_since_ns {
                 buf.add_cpu_on_core(
@@ -581,7 +610,7 @@ impl SchedulerWindowState {
                 );
             }
             if timestamp_ns < running.running_since_ns {
-                *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
+                self.restore_running(running);
             }
         }
     }
