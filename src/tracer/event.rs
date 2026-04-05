@@ -438,8 +438,6 @@ pub struct NetIOEvent {
     pub local_port: u16,
     /// Peer socket port after direction normalization.
     pub remote_port: u16,
-    /// Validated raw `Direction` discriminant from the ring buffer.
-    pub direction: u8,
     /// Validated raw `NetTransport` discriminant from the ring buffer.
     pub transport: u8,
 }
@@ -557,7 +555,8 @@ pub enum TypedEvent {
     SyscallFdatasync(SyscallEvent),
     SyscallPwrite(SyscallEvent),
     DiskIO(DiskIOEvent),
-    NetIO(NetIOEvent),
+    NetIOTx(NetIOEvent),
+    NetIORx(NetIOEvent),
     NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent),
     Sched(SchedEvent),
     SchedCombined(SchedCombinedEvent),

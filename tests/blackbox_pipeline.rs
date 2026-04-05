@@ -209,10 +209,14 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             let disk = DiskDimension::new(pid, client_type, e.device_id, e.rw);
             buf.add_disk_io(disk, e.latency_ns, e.bytes, e.queue_depth);
         }
-        TypedEvent::NetIO(e) => {
+        TypedEvent::NetIOTx(e) => {
             // In production, port_label is resolved via config's port_label_map.
             // Here we use 0 (Unknown) since we don't have a port map.
-            let net = NetworkDimension::new(pid, client_type, 0, e.direction);
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
+            buf.add_net_io(net, i64::from(e.bytes));
+        }
+        TypedEvent::NetIORx(e) => {
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::RX as u8);
             buf.add_net_io(net, i64::from(e.bytes));
         }
         TypedEvent::NetIOTcpTxMetrics(e) => {

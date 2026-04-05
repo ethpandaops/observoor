@@ -827,7 +827,7 @@ impl AggregatedSink {
                 buf.add_syscall_pwrite(basic_dim, e.latency_ns);
             }
 
-            TypedEvent::NetIO(e) => {
+            TypedEvent::NetIOTx(e) => {
                 let net_dim = build_tcp_metrics_dimension_from_parts_cached(
                     basic_dim,
                     e.transport,
@@ -836,11 +836,19 @@ impl AggregatedSink {
                     dimensions,
                     port_label_cache,
                 );
-                if e.direction == Direction::RX as u8 {
-                    buf.add_net_io_rx(net_dim, i64::from(e.bytes));
-                } else {
-                    buf.add_net_io_tx(net_dim, i64::from(e.bytes));
-                }
+                buf.add_net_io_tx(net_dim, i64::from(e.bytes));
+            }
+
+            TypedEvent::NetIORx(e) => {
+                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
+                    basic_dim,
+                    e.transport,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions,
+                    port_label_cache,
+                );
+                buf.add_net_io_rx(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
@@ -1538,13 +1546,14 @@ fn parse_cpu_online_text(text: &str) -> Option<u32> {
 fn build_network_dimension(
     pid: u32,
     client_type: u8,
+    direction: u8,
     e: &NetIOEvent,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
     let resolved_dims = ResolvedDimensions::from_config(dims);
     build_network_dimension_from_parts_uncached(
         BasicDimension::new(pid, client_type),
-        e.direction,
+        direction,
         e.transport,
         e.local_port,
         e.remote_port,
@@ -2485,7 +2494,6 @@ mod tests {
             bytes: 100,
             local_port: 8545,
             remote_port: 30303,
-            direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
         assert_eq!(local_port(&tx_event), 8545);
@@ -2495,7 +2503,6 @@ mod tests {
             bytes: 100,
             local_port: 8545,
             remote_port: 30303,
-            direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
         };
         assert_eq!(local_port(&rx_event), 8545);
@@ -2513,11 +2520,16 @@ mod tests {
             bytes: 100,
             local_port: 45432,
             remote_port: 13000,
-            direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::TX as u8,
+            &net_event,
+            &dims,
+        );
         assert_eq!(net_dim.port_label(), PortLabel::ClP2PTcp as u8);
     }
 
@@ -2533,11 +2545,16 @@ mod tests {
             bytes: 100,
             local_port: 13000,
             remote_port: 13000,
-            direction: Direction::RX as u8,
             transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::RX as u8,
+            &net_event,
+            &dims,
+        );
         assert_eq!(net_dim.port_label(), PortLabel::ClP2PTcp as u8);
 
         let retransmit_dim = build_network_dimension_from_tcp_retransmit(
@@ -2562,11 +2579,16 @@ mod tests {
             bytes: 100,
             local_port: 13000,
             remote_port: 13000,
-            direction: Direction::RX as u8,
             transport: NetTransport::Udp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::RX as u8,
+            &net_event,
+            &dims,
+        );
         assert_eq!(net_dim.port_label(), PortLabel::ClDiscovery as u8);
     }
 
@@ -2601,11 +2623,10 @@ mod tests {
             bytes: 100,
             local_port: 8545,
             remote_port: 30303,
-            direction: Direction::TX as u8,
             transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, 1, &net_event, &dims);
+        let net_dim = build_network_dimension(1, 1, Direction::TX as u8, &net_event, &dims);
         assert_eq!(net_dim.port_label(), 0);
         assert_eq!(net_dim.direction(), 0);
 
@@ -2623,11 +2644,16 @@ mod tests {
             bytes: 100,
             local_port: 19999,
             remote_port: 45000,
-            direction: Direction::TX as u8,
             transport: NetTransport::Udp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Unknown as u8, &net_event, &dims);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Unknown as u8,
+            Direction::TX as u8,
+            &net_event,
+            &dims,
+        );
         assert_eq!(net_dim.port_label(), PortLabel::Unknown as u8);
     }
 

@@ -192,7 +192,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         8 => (
             EventType::NetRX,
             None,
-            TypedEvent::NetIO(parse_net_io(&header, payload, Direction::RX as u8)?),
+            TypedEvent::NetIORx(parse_net_io(payload, Direction::RX as u8, &header)?),
         ),
         9 => match parse_sched_variant(&header, payload)? {
             TypedEvent::SchedCombined(event) => (
@@ -375,21 +375,21 @@ fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, Pars
         });
     }
 
-    Ok(TypedEvent::NetIO(NetIOEvent {
+    Ok(TypedEvent::NetIOTx(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
         local_port: u16::from_le(raw.src_port),
         remote_port: u16::from_le(raw.dst_port),
-        direction: Direction::TX as u8,
         transport: transport_raw,
     }))
 }
 
-/// Net I/O event: type 8 for RX, or TX without inline TCP metrics.
-/// transport is stored in `hdr.pad[0]`.
+/// Net I/O RX event payload.
+/// transport is stored in `hdr.pad[0]`, and `direction` only drives
+/// local/remote port normalization.
 fn parse_net_io(
-    header: &RawEventHeader,
     data: &[u8],
     direction: u8,
+    header: &RawEventHeader,
 ) -> Result<NetIOEvent, ParseError> {
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = header.pad[0];
@@ -412,7 +412,6 @@ fn parse_net_io(
         } else {
             u16::from_le(raw.src_port)
         },
-        direction,
         transport: transport_raw,
     })
 }
@@ -736,10 +735,9 @@ mod tests {
         data.extend_from_slice(&9000u16.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::NetIO(e) = &parsed.typed else {
-            panic!("expected NetIO");
+        let TypedEvent::NetIOTx(e) = &parsed.typed else {
+            panic!("expected NetIOTx");
         };
-        assert_eq!(e.direction, Direction::TX as u8);
         assert_eq!(e.transport, NetTransport::Udp as u8);
         assert_eq!(e.bytes, 1536);
         assert_eq!(e.local_port, 30303);
@@ -755,10 +753,9 @@ mod tests {
         data.extend_from_slice(&12345u16.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::NetIO(e) = &parsed.typed else {
-            panic!("expected NetIO");
+        let TypedEvent::NetIORx(e) = &parsed.typed else {
+            panic!("expected NetIORx");
         };
-        assert_eq!(e.direction, Direction::RX as u8);
         assert_eq!(e.transport, NetTransport::Udp as u8);
         assert_eq!(e.bytes, 2048);
         assert_eq!(e.local_port, 12345);
