@@ -48,7 +48,7 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
 const PORT_LABEL_CACHE_SIZE: usize = 16;
 const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
-const SCHED_TID_CACHE_SIZE: usize = 8;
+const SCHED_TID_CACHE_SIZE: usize = 32;
 const SCHED_TID_CACHE_WAYS: usize = 2;
 
 /// Shared atomic state that can be safely sent to a spawned task.
