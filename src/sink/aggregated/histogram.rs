@@ -43,6 +43,14 @@ impl Histogram {
     pub fn snapshot(&self) -> [u32; NUM_BUCKETS] {
         self.buckets
     }
+
+    /// Merges an already-aggregated histogram snapshot into this histogram.
+    #[inline(always)]
+    pub fn merge_snapshot(&mut self, snapshot: &[u32; NUM_BUCKETS]) {
+        for (bucket, incoming) in self.buckets.iter_mut().zip(snapshot.iter().copied()) {
+            *bucket += incoming;
+        }
+    }
 }
 
 impl Default for Histogram {

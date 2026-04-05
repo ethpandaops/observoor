@@ -292,7 +292,7 @@ impl Collector {
             + map_len(&buf.syscall_futex)
             + map_len(&buf.syscall_mmap)
             + map_len(&buf.syscall_fsync)
-            + map_len(&buf.sched_on_cpu)
+            + buf.cpu_on_core.len()
             + (map_len(&buf.sched_wait) * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.disk_io_read)
@@ -417,7 +417,21 @@ impl Collector {
 
         let sched_switch_sampling = self.sampling_for_event(EventType::SchedSwitch);
         let sched_runqueue_sampling = self.sampling_for_event(EventType::SchedRunqueue);
-        for (dim, aggregate) in buf.sched_on_cpu.iter() {
+        let mut sched_on_cpu_grouped: FastMap<BasicDimension, LatencyAggregate> =
+            fast_map_with_capacity(buf.cpu_on_core.len());
+        for (dim, aggregate) in buf.cpu_on_core.iter() {
+            let sched_on_cpu = aggregate.sched_on_cpu_snapshot();
+            if sched_on_cpu.count == 0 {
+                continue;
+            }
+            get_or_default_mut(
+                &mut sched_on_cpu_grouped,
+                BasicDimension::new(dim.pid(), dim.client_type()),
+            )
+            .merge_snapshot(&sched_on_cpu);
+        }
+
+        for (dim, aggregate) in sched_on_cpu_grouped.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
             self.push_latency_metric(
@@ -1104,7 +1118,7 @@ impl Collector {
             fast_map_with_capacity(buf.cpu_on_core.len());
 
         for (dim, aggregate) in buf.cpu_on_core.iter() {
-            let snap = aggregate.snapshot();
+            let snap = aggregate.cpu_on_core_snapshot();
             if snap.count == 0 {
                 continue;
             }

@@ -379,31 +379,28 @@ impl SchedulerWindowState {
         on_cpu_ns: u64,
         cpu_id: u32,
     ) {
-        buf.add_sched_on_cpu(dim, on_cpu_ns);
+        let mut resolved_on_cpu_ns = Some(on_cpu_ns);
 
         if let Some(running) = self.take_running_on_cpu(cpu_id) {
             if running.tid == tid {
                 if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core(
-                        running.basic_dim,
-                        running.cpu_id,
-                        timestamp_ns - running.running_since_ns,
-                    );
-                    return;
-                }
-
-                // Zero-length runtime for this slice; consume the running state.
-                if timestamp_ns == running.running_since_ns {
-                    return;
+                    resolved_on_cpu_ns = Some(timestamp_ns - running.running_since_ns);
+                } else if timestamp_ns == running.running_since_ns {
+                    resolved_on_cpu_ns = None;
                 }
             } else {
                 self.restore_running(running);
             }
         }
 
-        // Fallback for missing switch-in state (startup, drops, or stale events):
-        // use the kernel-reported slice.
-        buf.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
+        if let Some(resolved_on_cpu_ns) = resolved_on_cpu_ns {
+            // Fallback for missing switch-in state (startup, drops, or stale events):
+            // use the kernel-reported slice.
+            buf.add_sched_slice(dim, cpu_id, on_cpu_ns, resolved_on_cpu_ns);
+        } else {
+            // Zero-length runtime for this slice; consume the running state.
+            buf.add_sched_on_cpu(dim, cpu_id, on_cpu_ns);
+        }
     }
 
     #[inline(always)]
@@ -479,8 +476,8 @@ impl SchedulerWindowState {
         off_cpu_ns: u64,
         cpu_id: u32,
     ) {
-        buf.add_sched_on_cpu(prev_dim, on_cpu_ns);
         buf.add_sched_runqueue(next_dim, runqueue_ns, off_cpu_ns);
+        let mut resolved_prev_on_cpu_ns = Some(on_cpu_ns);
 
         let next_running = RunningThread {
             tid: next_tid,
@@ -494,25 +491,29 @@ impl SchedulerWindowState {
         match current_cpu_running {
             Some(running) if running.tid == prev_tid => {
                 if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core(
-                        running.basic_dim,
-                        running.cpu_id,
-                        timestamp_ns - running.running_since_ns,
-                    );
+                    resolved_prev_on_cpu_ns = Some(timestamp_ns - running.running_since_ns);
+                } else if timestamp_ns == running.running_since_ns {
+                    resolved_prev_on_cpu_ns = None;
                 } else if timestamp_ns < running.running_since_ns {
                     // Match `handle_sched_switch` fallback behavior for stale
                     // carried state on the outgoing thread.
-                    buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+                    resolved_prev_on_cpu_ns = Some(on_cpu_ns);
                 }
                 current_cpu_running = None;
             }
             Some(running) => {
-                buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+                resolved_prev_on_cpu_ns = Some(on_cpu_ns);
                 current_cpu_running = Some(running);
             }
             None => {
-                buf.add_cpu_on_core(prev_dim, cpu_id, on_cpu_ns);
+                resolved_prev_on_cpu_ns = Some(on_cpu_ns);
             }
+        }
+
+        if let Some(resolved_prev_on_cpu_ns) = resolved_prev_on_cpu_ns {
+            buf.add_sched_slice(prev_dim, cpu_id, on_cpu_ns, resolved_prev_on_cpu_ns);
+        } else {
+            buf.add_sched_on_cpu(prev_dim, cpu_id, on_cpu_ns);
         }
 
         if let Some(running) = current_cpu_running.take() {
@@ -1986,7 +1987,9 @@ mod tests {
             }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
-        assert!(!buf.sched_on_cpu.is_empty());
+        assert!(buf
+            .sched_on_cpu_snapshot(BasicDimension::new(123, 1))
+            .is_some());
         assert!(!buf.cpu_on_core.is_empty());
 
         // Page fault
@@ -2063,10 +2066,9 @@ mod tests {
         scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
         let prev_sched = buf
-            .sched_on_cpu
-            .get(&BasicDimension::new(123, ClientType::Geth as u8))
+            .sched_on_cpu_snapshot(BasicDimension::new(123, ClientType::Geth as u8))
             .expect("prev sched_on_cpu");
-        assert_eq!(prev_sched.snapshot().sum, 300);
+        assert_eq!(prev_sched.sum, 300);
 
         let next_wait = buf
             .sched_wait
@@ -2079,13 +2081,13 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
             .expect("prev core usage");
-        assert_eq!(prev_core.snapshot().sum, 300);
+        assert_eq!(prev_core.cpu_on_core_snapshot().sum, 300);
 
         let next_core = buf
             .cpu_on_core
             .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
             .expect("next core usage");
-        assert_eq!(next_core.snapshot().sum, 300);
+        assert_eq!(next_core.cpu_on_core_snapshot().sum, 300);
     }
 
     #[test]
@@ -2137,19 +2139,19 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 1))
             .expect("carried runtime on old cpu");
-        assert_eq!(cpu1.snapshot().sum, 300);
+        assert_eq!(cpu1.cpu_on_core_snapshot().sum, 300);
 
         let prev_cpu2 = buf
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
             .expect("fallback runtime on outgoing cpu");
-        assert_eq!(prev_cpu2.snapshot().sum, 50);
+        assert_eq!(prev_cpu2.cpu_on_core_snapshot().sum, 50);
 
         let next_cpu2 = buf
             .cpu_on_core
             .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
             .expect("new running thread on target cpu");
-        assert_eq!(next_cpu2.snapshot().sum, 200);
+        assert_eq!(next_cpu2.cpu_on_core_snapshot().sum, 200);
     }
 
     #[test]
@@ -2186,7 +2188,7 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("core usage in first buffer");
-        assert_eq!(core1.snapshot().sum, 500);
+        assert_eq!(core1.cpu_on_core_snapshot().sum, 500);
 
         let rq = buf1
             .sched_wait
@@ -2209,7 +2211,7 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("core usage carried into second buffer");
-        assert_eq!(core2.snapshot().sum, 400);
+        assert_eq!(core2.cpu_on_core_snapshot().sum, 400);
     }
 
     #[test]
@@ -2267,14 +2269,13 @@ mod tests {
             .get(&CpuCoreDimension::new(123, 1, 3))
             .expect("core usage on switch-out");
         // Uses carried state (11_000 - 10_500), not the raw 2_000ns slice.
-        assert_eq!(core2.snapshot().sum, 500);
+        assert_eq!(core2.cpu_on_core_snapshot().sum, 500);
 
         let on_cpu = buf2
-            .sched_on_cpu
-            .get(&BasicDimension::new(123, 1))
+            .sched_on_cpu_snapshot(BasicDimension::new(123, 1))
             .expect("sched_on_cpu recorded");
         // Latency distribution remains raw from sched_switch payload.
-        assert_eq!(on_cpu.snapshot().sum, 2_000);
+        assert_eq!(on_cpu.sum, 2_000);
     }
 
     #[test]
@@ -2307,7 +2308,7 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("fallback core usage");
-        assert_eq!(core.snapshot().sum, 700);
+        assert_eq!(core.cpu_on_core_snapshot().sum, 700);
     }
 
     #[test]
@@ -2354,7 +2355,7 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 4))
             .expect("process-exit accounted runtime");
-        assert_eq!(core.snapshot().sum, 500);
+        assert_eq!(core.cpu_on_core_snapshot().sum, 500);
         assert!(scheduler_state.running_by_cpu.is_empty());
     }
 
@@ -2404,13 +2405,13 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("first core usage");
-        assert_eq!(core1.snapshot().sum, 300);
+        assert_eq!(core1.cpu_on_core_snapshot().sum, 300);
 
         let core3 = buf
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 3))
             .expect("second core usage");
-        assert_eq!(core3.snapshot().sum, 200);
+        assert_eq!(core3.cpu_on_core_snapshot().sum, 200);
     }
 
     #[test]
@@ -2478,13 +2479,13 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("carried running core usage");
-        assert_eq!(carried_core.snapshot().sum, 200);
+        assert_eq!(carried_core.cpu_on_core_snapshot().sum, 200);
 
         let fallback_core = buf
             .cpu_on_core
             .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("stale switch fallback usage");
-        assert_eq!(fallback_core.snapshot().sum, 50);
+        assert_eq!(fallback_core.cpu_on_core_snapshot().sum, 50);
         assert!(scheduler_state.running_by_cpu.contains_tid(70));
     }
 

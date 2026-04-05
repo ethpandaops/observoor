@@ -12,7 +12,7 @@ use crate::tracer::event::{Direction, EventType};
 
 use super::aggregate::{
     BasicColdAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
-    PageFaultAggregate, SchedWaitAggregate, TcpTxAggregate,
+    PageFaultAggregate, SchedWaitAggregate, SchedulerCpuAggregate, TcpTxAggregate,
 };
 use super::dimension::{
     BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
@@ -315,7 +315,7 @@ const CPU_ON_CORE_PER_CPU_CAPACITY: usize = 8;
 /// per CPU preserves a hot last-hit cache entry for each core instead of
 /// forcing all cores through a single shared `CpuCoreDimension` map.
 pub struct CpuOnCoreMap {
-    per_cpu: Vec<FastMap<BasicDimension, CounterAggregate>>,
+    per_cpu: Vec<FastMap<BasicDimension, SchedulerCpuAggregate>>,
 }
 
 impl CpuOnCoreMap {
@@ -327,7 +327,10 @@ impl CpuOnCoreMap {
     }
 
     #[inline(always)]
-    fn ensure_cpu_map(&mut self, cpu_id: u32) -> &mut FastMap<BasicDimension, CounterAggregate> {
+    fn ensure_cpu_map(
+        &mut self,
+        cpu_id: u32,
+    ) -> &mut FastMap<BasicDimension, SchedulerCpuAggregate> {
         let slot = cpu_id as usize;
         while self.per_cpu.len() <= slot {
             self.per_cpu
@@ -339,13 +342,30 @@ impl CpuOnCoreMap {
     }
 
     #[inline(always)]
-    fn add(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: i64) {
-        add_counter_value(self.ensure_cpu_map(cpu_id), dim, on_cpu_ns);
+    fn record_sched_on_cpu(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim).record_sched_on_cpu(on_cpu_ns);
     }
 
     #[inline(always)]
-    fn add_packed(&mut self, dim: CpuCoreDimension, on_cpu_ns: i64) {
-        self.add(
+    fn record_sched_slice(
+        &mut self,
+        dim: BasicDimension,
+        cpu_id: u32,
+        sched_on_cpu_ns: u64,
+        cpu_on_core_ns: u64,
+    ) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim)
+            .record_sched_slice(sched_on_cpu_ns, cpu_on_core_ns);
+    }
+
+    #[inline(always)]
+    fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim).add_cpu_on_core(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    fn add_packed(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
+        self.add_cpu_on_core(
             BasicDimension::new(dim.pid(), dim.client_type()),
             dim.cpu_id(),
             on_cpu_ns,
@@ -372,14 +392,16 @@ impl CpuOnCoreMap {
 
     #[cfg_attr(not(test), allow(dead_code))]
     #[inline(always)]
-    pub(crate) fn get(&self, key: &CpuCoreDimension) -> Option<&CounterAggregate> {
+    pub(crate) fn get(&self, key: &CpuCoreDimension) -> Option<&SchedulerCpuAggregate> {
         self.per_cpu
             .get(key.cpu_id() as usize)
             .and_then(|map| map.get(&BasicDimension::new(key.pid(), key.client_type())))
     }
 
     #[inline(always)]
-    pub(crate) fn iter(&self) -> impl Iterator<Item = (CpuCoreDimension, &CounterAggregate)> + '_ {
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (CpuCoreDimension, &SchedulerCpuAggregate)> + '_ {
         self.per_cpu.iter().enumerate().flat_map(|(cpu_id, map)| {
             map.iter().map(move |(dim, aggregate)| {
                 (CpuCoreDimension::from_basic(*dim, cpu_id as u32), aggregate)
@@ -424,10 +446,6 @@ pub struct Buffer {
     // them in their own smaller map entry instead of carrying page-fault state.
     pub fd_metrics: FastMap<BasicDimension, FdAggregate>,
     pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
-    // `sched_switch` does not need the runqueue/off-CPU aggregates, so keep
-    // on-CPU latency in its own smaller entry and leave the paired wait
-    // metrics together for `sched_runqueue`.
-    pub sched_on_cpu: FastMap<BasicDimension, LatencyAggregate>,
     pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
@@ -448,6 +466,9 @@ pub struct Buffer {
     pub disk_io_write: FastMap<DiskDimension, DiskAggregate>,
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
+    // Scheduler slices update both per-core utilization and sched_on_cpu
+    // latency. Co-locating both metrics behind one per-CPU map removes a hot
+    // second lookup while keeping collection exact.
     pub cpu_on_core: CpuOnCoreMap,
 }
 
@@ -479,7 +500,6 @@ impl Buffer {
             // BasicDimension counters.
             fd_metrics: fast_map_with_capacity(16),
             page_fault_metrics: fast_map_with_capacity(16),
-            sched_on_cpu: fast_map_with_capacity(8),
             sched_wait: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
@@ -523,7 +543,6 @@ impl Buffer {
         self.syscall_fsync.clear();
         self.fd_metrics.clear();
         self.page_fault_metrics.clear();
-        self.sched_on_cpu.clear();
         self.sched_wait.clear();
         self.basic_cold_metrics.clear();
         self.net_io_tx.clear();
@@ -671,20 +690,33 @@ impl Buffer {
     }
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
-    pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, on_cpu_ns: u64) {
-        get_or_default_mut(&mut self.sched_on_cpu, dim).record(on_cpu_ns);
+    pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        self.cpu_on_core.record_sched_on_cpu(dim, cpu_id, on_cpu_ns);
+    }
+
+    /// Records a completed scheduler slice with separate raw and resolved durations.
+    #[inline(always)]
+    pub fn add_sched_slice(
+        &mut self,
+        dim: BasicDimension,
+        cpu_id: u32,
+        sched_on_cpu_ns: u64,
+        cpu_on_core_ns: u64,
+    ) {
+        self.cpu_on_core
+            .record_sched_slice(dim, cpu_id, sched_on_cpu_ns, cpu_on_core_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
     #[inline(always)]
     pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
-        self.cpu_on_core.add(dim, cpu_id, on_cpu_ns as i64);
+        self.cpu_on_core.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
     }
 
     /// Adds per-core on-CPU time using an already packed core dimension.
     #[inline(always)]
     pub fn add_cpu_on_core_dim(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
-        self.cpu_on_core.add_packed(dim, on_cpu_ns as i64);
+        self.cpu_on_core.add_packed(dim, on_cpu_ns);
     }
 
     /// Adds a scheduler switch event (on-CPU time).
@@ -693,8 +725,7 @@ impl Buffer {
     /// carried scheduler state and calls `add_sched_on_cpu`/`add_cpu_on_core`
     /// separately to keep window accounting exact across rotations.
     pub fn add_sched_switch(&mut self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
-        self.add_sched_on_cpu(dim, on_cpu_ns);
-        self.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
+        self.add_sched_slice(dim, cpu_id, on_cpu_ns, on_cpu_ns);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.
@@ -752,6 +783,31 @@ impl Buffer {
     /// Adds a TCP state change event.
     pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
         get_or_default_mut(&mut self.basic_cold_metrics, dim).record_tcp_state_change();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sched_on_cpu_snapshot(
+        &self,
+        dim: BasicDimension,
+    ) -> Option<super::aggregate::LatencySnapshot> {
+        let mut merged = LatencyAggregate::new();
+        let mut found = false;
+
+        for (cpu_dim, aggregate) in self.cpu_on_core.iter() {
+            if cpu_dim.pid() != dim.pid() || cpu_dim.client_type() != dim.client_type() {
+                continue;
+            }
+
+            let snapshot = aggregate.sched_on_cpu_snapshot();
+            if snapshot.count == 0 {
+                continue;
+            }
+
+            merged.merge_snapshot(&snapshot);
+            found = true;
+        }
+
+        found.then(|| merged.snapshot())
     }
 }
 
@@ -922,8 +978,7 @@ mod tests {
         buf.add_sched_switch(dim, 2_000, 2);
         buf.add_sched_switch(dim, 500, 4);
 
-        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
-        let on_cpu_snap = on_cpu.snapshot();
+        let on_cpu_snap = buf.sched_on_cpu_snapshot(dim).expect("sched_on_cpu exists");
         assert_eq!(on_cpu_snap.count, 3);
         assert_eq!(on_cpu_snap.sum, 3_500);
 
@@ -931,7 +986,10 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(1, 1, 2))
             .expect("core 2 exists");
-        let core2_snap = core2.snapshot();
+        let core2_sched_snap = core2.sched_on_cpu_snapshot();
+        assert_eq!(core2_sched_snap.count, 2);
+        assert_eq!(core2_sched_snap.sum, 3_000);
+        let core2_snap = core2.cpu_on_core_snapshot();
         assert_eq!(core2_snap.count, 2);
         assert_eq!(core2_snap.sum, 3_000);
 
@@ -939,7 +997,10 @@ mod tests {
             .cpu_on_core
             .get(&CpuCoreDimension::new(1, 1, 4))
             .expect("core 4 exists");
-        let core4_snap = core4.snapshot();
+        let core4_sched_snap = core4.sched_on_cpu_snapshot();
+        assert_eq!(core4_sched_snap.count, 1);
+        assert_eq!(core4_sched_snap.sum, 500);
+        let core4_snap = core4.cpu_on_core_snapshot();
         assert_eq!(core4_snap.count, 1);
         assert_eq!(core4_snap.sum, 500);
     }
@@ -1042,11 +1103,11 @@ mod tests {
         assert!(buf.syscall_fsync.is_empty());
         assert!(buf.fd_metrics.is_empty());
         assert!(buf.page_fault_metrics.is_empty());
-        assert!(buf.sched_on_cpu.is_empty());
         assert!(buf.sched_wait.is_empty());
         assert!(buf.basic_cold_metrics.is_empty());
         assert!(buf.net_io_tx.is_empty());
         assert!(buf.net_io_rx.is_empty());
+        assert!(buf.cpu_on_core.is_empty());
 
         buf.add_syscall(EventType::SyscallRead, dim, 7_500);
         let snap = buf

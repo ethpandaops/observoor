@@ -37,6 +37,25 @@ impl LatencyAggregate {
         }
     }
 
+    /// Merges a pre-aggregated snapshot into this aggregate.
+    #[inline(always)]
+    pub fn merge_snapshot(&mut self, snapshot: &LatencySnapshot) {
+        if snapshot.count == 0 {
+            return;
+        }
+
+        self.sum += snapshot.sum;
+        self.count += snapshot.count;
+        self.histogram.merge_snapshot(&snapshot.histogram);
+
+        if snapshot.min < self.min {
+            self.min = snapshot.min;
+        }
+        if snapshot.max > self.max {
+            self.max = snapshot.max;
+        }
+    }
+
     /// Returns a point-in-time snapshot of all statistics.
     #[inline(always)]
     pub fn snapshot(&self) -> LatencySnapshot {
@@ -601,6 +620,57 @@ impl Default for SchedWaitAggregate {
 }
 
 impl Default for TcpMetricsAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks scheduler on-CPU latency alongside per-core time in one entry.
+///
+/// Every completed running slice currently updates both `sched_on_cpu` and
+/// `cpu_on_core`. Co-locating them behind one per-CPU map entry removes a hot
+/// second lookup while preserving exact exported metrics.
+pub struct SchedulerCpuAggregate {
+    sched_on_cpu: LatencyAggregate,
+    cpu_on_core: CounterAggregate,
+}
+
+impl SchedulerCpuAggregate {
+    pub fn new() -> Self {
+        Self {
+            sched_on_cpu: LatencyAggregate::new(),
+            cpu_on_core: CounterAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
+        self.sched_on_cpu.record(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_sched_slice(&mut self, sched_on_cpu_ns: u64, cpu_on_core_ns: u64) {
+        self.record_sched_on_cpu(sched_on_cpu_ns);
+        self.cpu_on_core.add(cpu_on_core_ns as i64);
+    }
+
+    #[inline(always)]
+    pub fn add_cpu_on_core(&mut self, on_cpu_ns: u64) {
+        self.cpu_on_core.add(on_cpu_ns as i64);
+    }
+
+    #[inline(always)]
+    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_on_cpu.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn cpu_on_core_snapshot(&self) -> CounterSnapshot {
+        self.cpu_on_core.snapshot()
+    }
+}
+
+impl Default for SchedulerCpuAggregate {
     fn default() -> Self {
         Self::new()
     }
