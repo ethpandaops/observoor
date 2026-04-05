@@ -854,50 +854,66 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIOTx(e) => {
-                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
-                    basic_dim,
-                    e.transport,
-                    e.local_port,
-                    e.remote_port,
-                    dimensions,
-                    port_label_cache,
-                );
+                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
+                    build_tcp_metrics_dimension_with_port_label_cached(
+                        basic_dim,
+                        e.transport,
+                        e.local_port,
+                        e.remote_port,
+                        port_label_map,
+                        port_label_cache,
+                    )
+                } else {
+                    TCPMetricsDimension::from_basic(basic_dim, 0)
+                };
                 buf.add_net_io_tx(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::NetIORx(e) => {
-                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
-                    basic_dim,
-                    e.transport,
-                    e.local_port,
-                    e.remote_port,
-                    dimensions,
-                    port_label_cache,
-                );
+                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
+                    build_tcp_metrics_dimension_with_port_label_cached(
+                        basic_dim,
+                        e.transport,
+                        e.local_port,
+                        e.remote_port,
+                        port_label_map,
+                        port_label_cache,
+                    )
+                } else {
+                    TCPMetricsDimension::from_basic(basic_dim, 0)
+                };
                 buf.add_net_io_rx(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
-                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
-                    basic_dim,
-                    NetTransport::Tcp as u8,
-                    e.local_port,
-                    e.remote_port,
-                    dimensions,
-                    port_label_cache,
-                );
+                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
+                    build_tcp_metrics_dimension_with_port_label_cached(
+                        basic_dim,
+                        NetTransport::Tcp as u8,
+                        e.local_port,
+                        e.remote_port,
+                        port_label_map,
+                        port_label_cache,
+                    )
+                } else {
+                    TCPMetricsDimension::from_basic(basic_dim, 0)
+                };
                 buf.add_net_io_with_tcp_metrics_dim(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = build_tcp_metrics_dimension_from_parts_cached(
-                    basic_dim,
-                    NetTransport::Tcp as u8,
-                    e.local_port,
-                    e.remote_port,
-                    dimensions,
-                    port_label_cache,
-                );
+                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
+                    build_tcp_metrics_dimension_with_port_label_cached(
+                        basic_dim,
+                        NetTransport::Tcp as u8,
+                        e.local_port,
+                        e.remote_port,
+                        port_label_map,
+                        port_label_cache,
+                    )
+                } else {
+                    TCPMetricsDimension::from_basic(basic_dim, 0)
+                };
                 buf.add_tcp_retransmit_dim(net_dim, i64::from(e.bytes));
             }
 
@@ -1589,25 +1605,21 @@ fn build_network_dimension(
 }
 
 #[inline(always)]
-fn build_tcp_metrics_dimension_from_parts_cached(
+fn build_tcp_metrics_dimension_with_port_label_cached(
     basic: BasicDimension,
     transport: u8,
     local_port: u16,
     remote_port: u16,
-    dims: &ResolvedDimensions<'_>,
+    port_label_map: &crate::agent::ports::PortLabelMap,
     port_label_cache: &mut PortLabelResolveCache,
 ) -> TCPMetricsDimension {
-    let port_label = if let Some(port_label_map) = dims.network_port_label_map {
-        port_label_cache.resolve(
-            port_label_map,
-            basic.client_type(),
-            transport,
-            local_port,
-            remote_port,
-        )
-    } else {
-        0
-    };
+    let port_label = port_label_cache.resolve(
+        port_label_map,
+        basic.client_type(),
+        transport,
+        local_port,
+        remote_port,
+    );
 
     TCPMetricsDimension::from_basic(basic, port_label)
 }
