@@ -32,13 +32,11 @@ struct RawSyscallPayload {
     latency_ns: u32,
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawDiskIOPayload {
     latency_ns: u64,
     bytes: u32,
-    rw: u8,
-    _pad: [u8; 3],
     queue_depth: u32,
     device_id: u32,
 }
@@ -188,7 +186,7 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         6 => (
             EventType::DiskIO,
             None,
-            TypedEvent::DiskIO(parse_disk_io(payload)?),
+            TypedEvent::DiskIO(parse_disk_io(&header, payload)?),
         ),
         7 => (EventType::NetTX, None, parse_net_tx(&header, payload)?),
         8 => (
@@ -340,13 +338,14 @@ fn parse_syscall(data: &[u8]) -> Result<SyscallEvent, ParseError> {
     })
 }
 
-/// Disk I/O event: type 6. Payload: 24 bytes.
-fn parse_disk_io(data: &[u8]) -> Result<DiskIOEvent, ParseError> {
+/// Disk I/O event: type 6. Payload: 20 bytes.
+/// read/write is stored in `hdr.pad[0]`.
+fn parse_disk_io(header: &RawEventHeader, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     let raw = read_payload::<RawDiskIOPayload>(data, "disk IO event")?;
     Ok(DiskIOEvent {
         latency_ns: u64::from_le(raw.latency_ns),
         bytes: u32::from_le(raw.bytes),
-        rw: raw.rw,
+        rw: header.pad[0],
         queue_depth: u32::from_le(raw.queue_depth),
         device_id: u32::from_le(raw.device_id),
     })
@@ -689,10 +688,9 @@ mod tests {
     #[test]
     fn test_disk_io() {
         let mut data = header(3_000_000, 102, 202, 6, 3); // DiskIO, Besu
+        data[HEADER_PAD_OFFSET] = 1; // rw = write
         data.extend_from_slice(&1_000_000u64.to_le_bytes()); // latency
         data.extend_from_slice(&4096u32.to_le_bytes()); // bytes
-        data.push(1); // rw = write
-        data.extend_from_slice(&[0u8; 3]); // pad
         data.extend_from_slice(&8u32.to_le_bytes()); // queue_depth
         data.extend_from_slice(&66304u32.to_le_bytes()); // device_id
 

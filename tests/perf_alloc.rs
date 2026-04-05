@@ -49,10 +49,9 @@ fn fd_payload() -> Vec<u8> {
 
 fn disk_payload() -> Vec<u8> {
     let mut data = header(123_456_789, 1337, 1337, EventType::DiskIO as u8, 1);
+    data[18] = 1;
     data.extend_from_slice(&37_500u64.to_le_bytes());
     data.extend_from_slice(&4_096u32.to_le_bytes());
-    data.push(1);
-    data.extend_from_slice(&[0u8; 3]);
     data.extend_from_slice(&7u32.to_le_bytes());
     data.extend_from_slice(&259u32.to_le_bytes());
     data

@@ -52,13 +52,12 @@ struct syscall_event {
     __u32 latency_ns;
 };
 
-// Disk I/O event (48 bytes total).
+// Disk I/O event (44 bytes total).
+// read/write is stored in hdr.pad[0] to avoid payload padding.
 struct disk_io_event {
     struct event_header hdr;
     __u64 latency_ns;
     __u32 bytes;
-    __u8  rw; // 0=read, 1=write
-    __u8  pad[3];
     __u32 queue_depth;
     __u32 dev; // Block device ID (major:minor encoded)
 };

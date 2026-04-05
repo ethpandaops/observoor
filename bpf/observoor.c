@@ -596,9 +596,9 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_local *ctx)
     fill_header(&e->hdr, EVENT_DISK_IO, val->client_type);
     e->hdr.pid = val->pid;
     e->hdr.tid = val->tid;
+    e->hdr.pad[0] = rw;
     e->latency_ns = bpf_ktime_get_ns() - val->ts;
     e->bytes = bytes;
-    e->rw = rw;
     e->queue_depth = depth;
     e->dev = dev;
 

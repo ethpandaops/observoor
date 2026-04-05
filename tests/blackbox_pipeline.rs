@@ -68,10 +68,9 @@ fn disk_payload(
     device_id: u32,
 ) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, EventType::DiskIO as u8, 1);
+    data[18] = rw;
     data.extend_from_slice(&latency_ns.to_le_bytes());
     data.extend_from_slice(&bytes.to_le_bytes());
-    data.push(rw);
-    data.extend_from_slice(&[0u8; 3]);
     data.extend_from_slice(&queue_depth.to_le_bytes());
     data.extend_from_slice(&device_id.to_le_bytes());
     data
