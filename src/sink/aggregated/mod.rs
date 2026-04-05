@@ -811,11 +811,11 @@ impl AggregatedSink {
     }
 
     #[inline(always)]
-    fn process_event_inner(
+    fn process_event_inner<const WITH_SCHEDULER_STATE: bool>(
         buf: &mut Buffer,
         event: &ParsedEvent,
         dimensions: &ResolvedDimensions<'_>,
-        scheduler_state: Option<&mut SchedulerWindowState>,
+        scheduler_state: &mut SchedulerWindowState,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
         let basic_dim = BasicDimension::from_packed(event.raw.basic_dimension_key());
@@ -917,7 +917,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
-                if let Some(scheduler_state) = scheduler_state {
+                if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_switch(
                         buf,
                         event.raw.tid,
@@ -935,7 +935,7 @@ impl AggregatedSink {
                 let prev_dim = basic_dim;
                 let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
 
-                if let Some(scheduler_state) = scheduler_state {
+                if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_combined(
                         buf,
                         event.raw.tid,
@@ -955,7 +955,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::SchedRunqueue(e) => {
-                if let Some(scheduler_state) = scheduler_state {
+                if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_runqueue(
                         buf,
                         event.raw.tid,
@@ -1004,7 +1004,7 @@ impl AggregatedSink {
 
             TypedEvent::ProcessExit => {
                 buf.add_process_exit(basic_dim);
-                if let Some(scheduler_state) = scheduler_state {
+                if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_process_exit(buf, event.raw.tid, event.raw.timestamp_ns);
                 }
             }
@@ -1016,11 +1016,12 @@ impl AggregatedSink {
     fn process_event(buf: &mut Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
         let mut port_label_cache = PortLabelResolveCache::default();
         let resolved_dimensions = ResolvedDimensions::from_config(dimensions);
-        Self::process_event_inner(
+        let mut scheduler_state = SchedulerWindowState::default();
+        Self::process_event_inner::<false>(
             buf,
             event,
             &resolved_dimensions,
-            None,
+            &mut scheduler_state,
             &mut port_label_cache,
         );
     }
@@ -1034,11 +1035,11 @@ impl AggregatedSink {
         port_label_cache: &mut PortLabelResolveCache,
     ) {
         for event in &events.events {
-            Self::process_event_inner(
+            Self::process_event_inner::<true>(
                 buf,
                 event,
                 dimensions,
-                Some(&mut *scheduler_state),
+                scheduler_state,
                 port_label_cache,
             );
         }
@@ -1769,11 +1770,11 @@ mod tests {
     ) {
         let mut port_label_cache = PortLabelResolveCache::default();
         let resolved_dimensions = ResolvedDimensions::from_config(dims);
-        AggregatedSink::process_event_inner(
+        AggregatedSink::process_event_inner::<true>(
             buf,
             event,
             &resolved_dimensions,
-            Some(scheduler_state),
+            scheduler_state,
             &mut port_label_cache,
         );
     }
