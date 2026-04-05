@@ -12,7 +12,7 @@ use anyhow::Result;
 use parking_lot::Mutex;
 use tokio_util::sync::CancellationToken;
 
-use self::event::{ClientType, ParsedEvent, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
+use self::event::{ClientType, ParsedEvent};
 
 /// Ring buffer usage statistics.
 #[derive(Debug, Clone, Copy, Default)]
@@ -36,18 +36,9 @@ pub struct TrackedTidInfo {
 /// boundary overhead while the sink keeps the same total queued-event budget by
 /// using fewer batch slots.
 pub const PARSED_EVENT_BATCH_SIZE: usize = 16384;
-type ParsedEventBatchCount = u16;
-const _: () = assert!(PARSED_EVENT_BATCH_SIZE * 2 <= u16::MAX as usize);
-
-/// Parsed events plus per-batch counters computed in the tracer read loop.
-///
-/// This lets downstream consumers reuse already-known event/client totals
-/// instead of rescanning every batch on the hot path.
 #[derive(Clone)]
 pub struct ParsedEventBatch {
     pub events: Vec<ParsedEvent>,
-    pub event_type_totals: [ParsedEventBatchCount; MAX_EVENT_TYPE + 1],
-    pub client_totals: [ParsedEventBatchCount; CLIENT_TYPE_CARDINALITY],
     recycler: Option<Arc<ParsedEventBatchPool>>,
 }
 
@@ -55,8 +46,6 @@ impl ParsedEventBatch {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             events: Vec::with_capacity(capacity),
-            event_type_totals: [0; MAX_EVENT_TYPE + 1],
-            client_totals: [0; CLIENT_TYPE_CARDINALITY],
             recycler: None,
         }
     }
@@ -84,37 +73,12 @@ impl ParsedEventBatch {
 
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
-        let client_idx = usize::from(event.raw.client_type());
-        let event_type_idx = event.raw.event_type as usize;
-        let secondary_event_type_idx = usize::from(event.raw.secondary_event_type_raw());
-        debug_assert!(client_idx < CLIENT_TYPE_CARDINALITY);
-        debug_assert!(event_type_idx <= MAX_EVENT_TYPE);
-
-        // Safety: the parser rejects out-of-range client types before events
-        // reach this hot path, and secondary logical-event metadata is either
-        // zeroed or populated from already-validated parser state.
-        unsafe {
-            *self.client_totals.get_unchecked_mut(client_idx) += 1;
-            *self.event_type_totals.get_unchecked_mut(event_type_idx) += 1;
-            if secondary_event_type_idx != 0 {
-                debug_assert!(secondary_event_type_idx <= MAX_EVENT_TYPE);
-                *self
-                    .event_type_totals
-                    .get_unchecked_mut(secondary_event_type_idx) += 1;
-                *self
-                    .client_totals
-                    .get_unchecked_mut(usize::from(event.raw.secondary_client_type_raw())) += 1;
-            }
-        }
-
         self.events.push(event);
     }
 
     #[inline(always)]
     pub fn clear(&mut self) {
         self.events.clear();
-        self.event_type_totals.fill(0);
-        self.client_totals.fill(0);
     }
 
     pub fn recycle(mut self) {
@@ -183,10 +147,10 @@ pub trait Tracer: Send {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tracer::event::{Event, EventType, SchedCombinedEvent, TypedEvent};
+    use crate::tracer::event::{Event, EventType, TypedEvent};
 
     #[test]
-    fn parsed_event_batch_tracks_precomputed_counts() {
+    fn parsed_event_batch_pushes_and_clears_events() {
         let mut batch = ParsedEventBatch::with_capacity(2);
 
         batch.push(ParsedEvent {
@@ -199,42 +163,9 @@ mod tests {
         });
 
         assert_eq!(batch.len(), 2);
-        assert_eq!(batch.event_type_totals[EventType::FDOpen as usize], 1);
-        assert_eq!(batch.event_type_totals[EventType::FDClose as usize], 1);
-        assert_eq!(batch.client_totals[1], 2);
 
         batch.clear();
         assert!(batch.is_empty());
-        assert_eq!(batch.event_type_totals[EventType::FDOpen as usize], 0);
-        assert_eq!(batch.client_totals[1], 0);
-    }
-
-    #[test]
-    fn parsed_event_batch_counts_sched_combined_as_two_logical_events() {
-        let mut batch = ParsedEventBatch::with_capacity(1);
-
-        batch.push(ParsedEvent {
-            raw: Event::new(1, 100, 101, EventType::SchedSwitch, 1)
-                .with_secondary_logical_event(EventType::SchedRunqueue, 2),
-            typed: TypedEvent::SchedCombined(SchedCombinedEvent {
-                on_cpu_ns: 50,
-                cpu_id: 2,
-                next_pid: 200,
-                next_tid: 201,
-                next_client_type: 2,
-                runqueue_ns: 20,
-                off_cpu_ns: 30,
-            }),
-        });
-
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch.event_type_totals[EventType::SchedSwitch as usize], 1);
-        assert_eq!(
-            batch.event_type_totals[EventType::SchedRunqueue as usize],
-            1
-        );
-        assert_eq!(batch.client_totals[1], 1);
-        assert_eq!(batch.client_totals[2], 1);
     }
 
     #[test]
