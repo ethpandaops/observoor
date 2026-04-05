@@ -589,7 +589,12 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_local *ctx)
     if (!should_emit_event(EVENT_DISK_IO))
         goto cleanup;
 
-    struct disk_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    // Only the 44-byte populated prefix goes over the ring buffer; reserving
+    // the full 48-byte C struct would pay for tail padding on every event.
+    const __u64 disk_io_event_size =
+        sizeof(struct event_header) + sizeof(__u64) + (3 * sizeof(__u32));
+    struct disk_io_event *e =
+        bpf_ringbuf_reserve(&events, disk_io_event_size, 0);
     if (!e)
         goto cleanup;
 
