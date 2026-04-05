@@ -72,7 +72,7 @@ impl BufferedCapturedStats {
             if et < self.event_totals.len() {
                 self.event_totals[et] += 1;
             }
-            let ct = event.raw.client_type as usize;
+            let ct = event.raw.client_type() as usize;
             if ct < self.client_totals.len() {
                 self.client_totals[ct] += 1;
             }
