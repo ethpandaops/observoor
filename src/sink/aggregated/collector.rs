@@ -350,27 +350,27 @@ impl Collector {
     }
 
     fn estimate_cpu_util_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_io_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_fd_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.cpu_on_core)
+        buf.cpu_on_core.len()
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).

@@ -307,6 +307,87 @@ fn tcp_metrics_key_for_network(dim: NetworkDimension) -> TCPMetricsDimension {
     TCPMetricsDimension::new(dim.pid(), dim.client_type(), dim.port_label())
 }
 
+const CPU_ON_CORE_PER_CPU_CAPACITY: usize = 8;
+
+/// Per-core scheduler accounting maps keyed by BasicDimension.
+///
+/// Scheduler events from different CPUs interleave heavily. Keeping one map
+/// per CPU preserves a hot last-hit cache entry for each core instead of
+/// forcing all cores through a single shared `CpuCoreDimension` map.
+pub struct CpuOnCoreMap {
+    per_cpu: Vec<FastMap<BasicDimension, CounterAggregate>>,
+}
+
+impl CpuOnCoreMap {
+    #[inline(always)]
+    fn with_cpu_capacity(cpu_capacity: usize) -> Self {
+        Self {
+            per_cpu: Vec::with_capacity(cpu_capacity),
+        }
+    }
+
+    #[inline(always)]
+    fn ensure_cpu_map(&mut self, cpu_id: u32) -> &mut FastMap<BasicDimension, CounterAggregate> {
+        let slot = cpu_id as usize;
+        while self.per_cpu.len() <= slot {
+            self.per_cpu
+                .push(fast_map_with_capacity(CPU_ON_CORE_PER_CPU_CAPACITY));
+        }
+
+        // Safety: the loop above grows `per_cpu` until `slot` is in range.
+        unsafe { self.per_cpu.get_unchecked_mut(slot) }
+    }
+
+    #[inline(always)]
+    fn add(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: i64) {
+        add_counter_value(self.ensure_cpu_map(cpu_id), dim, on_cpu_ns);
+    }
+
+    #[inline(always)]
+    fn add_packed(&mut self, dim: CpuCoreDimension, on_cpu_ns: i64) {
+        self.add(
+            BasicDimension::new(dim.pid(), dim.client_type()),
+            dim.cpu_id(),
+            on_cpu_ns,
+        );
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.per_cpu.iter().map(FastMap::len).sum()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.per_cpu.iter().all(FastMap::is_empty)
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        for map in &mut self.per_cpu {
+            map.clear();
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &CpuCoreDimension) -> Option<&CounterAggregate> {
+        self.per_cpu
+            .get(key.cpu_id() as usize)
+            .and_then(|map| map.get(&BasicDimension::new(key.pid(), key.client_type())))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (CpuCoreDimension, &CounterAggregate)> + '_ {
+        self.per_cpu.iter().enumerate().flat_map(|(cpu_id, map)| {
+            map.iter().map(move |(dim, aggregate)| {
+                (CpuCoreDimension::from_basic(*dim, cpu_id as u32), aggregate)
+            })
+        })
+    }
+}
+
 /// Aggregation buffer that collects events and aggregates them by dimension
 /// over a time window.
 ///
@@ -367,7 +448,7 @@ pub struct Buffer {
     pub disk_io_write: FastMap<DiskDimension, DiskAggregate>,
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
-    pub cpu_on_core: FastMap<CpuCoreDimension, CounterAggregate>,
+    pub cpu_on_core: CpuOnCoreMap,
 }
 
 impl Buffer {
@@ -412,7 +493,7 @@ impl Buffer {
             disk_io_write: fast_map_with_capacity(16),
             block_merge: fast_map_with_capacity(16),
             // Scheduler.
-            cpu_on_core: fast_map_with_capacity(64),
+            cpu_on_core: CpuOnCoreMap::with_cpu_capacity(system_cores as usize),
         }
     }
 
@@ -602,7 +683,7 @@ impl Buffer {
     /// Adds per-core on-CPU time using an already packed core dimension.
     #[inline(always)]
     pub fn add_cpu_on_core_dim(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
-        add_counter_value(&mut self.cpu_on_core, dim, on_cpu_ns as i64);
+        self.cpu_on_core.add_packed(dim, on_cpu_ns as i64);
     }
 
     /// Adds a scheduler switch event (on-CPU time).

@@ -30,9 +30,7 @@ use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{
-    BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
-};
+use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
@@ -94,8 +92,9 @@ struct SlotRotation {
 struct RunningThread {
     tid: u32,
     // Scheduler events close and flush the same running slice repeatedly, so
-    // cache the packed per-core dimension once on switch-in.
-    cpu_dim: CpuCoreDimension,
+    // keep the resolved process dimension alongside the owning CPU id.
+    basic_dim: BasicDimension,
+    cpu_id: u32,
     running_since_ns: u64,
 }
 
@@ -342,7 +341,7 @@ impl SchedulerWindowState {
                 continue;
             }
             let delta_ns = boundary_ns - running.running_since_ns;
-            buf.add_cpu_on_core_dim(running.cpu_dim, delta_ns);
+            buf.add_cpu_on_core(running.basic_dim, running.cpu_id, delta_ns);
             running.running_since_ns = boundary_ns;
         }
     }
@@ -362,8 +361,9 @@ impl SchedulerWindowState {
         if let Some(running) = self.running_by_cpu.take_cpu(cpu_id) {
             if running.tid == tid {
                 if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core_dim(
-                        running.cpu_dim,
+                    buf.add_cpu_on_core(
+                        running.basic_dim,
+                        running.cpu_id,
                         timestamp_ns - running.running_since_ns,
                     );
                     return;
@@ -398,7 +398,8 @@ impl SchedulerWindowState {
 
         let next_running = RunningThread {
             tid,
-            cpu_dim: CpuCoreDimension::from_basic(dim, cpu_id),
+            basic_dim: dim,
+            cpu_id,
             running_since_ns: timestamp_ns,
         };
 
@@ -411,7 +412,11 @@ impl SchedulerWindowState {
                 .take_cpu(prev_cpu)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > prev.running_since_ns {
-                buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                buf.add_cpu_on_core(
+                    prev.basic_dim,
+                    prev.cpu_id,
+                    timestamp_ns - prev.running_since_ns,
+                );
             } else if timestamp_ns < prev.running_since_ns {
                 *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
                 return;
@@ -423,7 +428,11 @@ impl SchedulerWindowState {
         if !reused_target_slot {
             if let Some(prev) = self.running_by_cpu.take_cpu(cpu_id) {
                 if timestamp_ns > prev.running_since_ns {
-                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
                 } else if timestamp_ns < prev.running_since_ns {
                     *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
                     return;
@@ -454,7 +463,8 @@ impl SchedulerWindowState {
 
         let next_running = RunningThread {
             tid: next_tid,
-            cpu_dim: CpuCoreDimension::from_basic(next_dim, cpu_id),
+            basic_dim: next_dim,
+            cpu_id,
             running_since_ns: timestamp_ns,
         };
 
@@ -463,8 +473,9 @@ impl SchedulerWindowState {
         match current_cpu_running {
             Some(running) if running.tid == prev_tid => {
                 if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core_dim(
-                        running.cpu_dim,
+                    buf.add_cpu_on_core(
+                        running.basic_dim,
+                        running.cpu_id,
                         timestamp_ns - running.running_since_ns,
                     );
                 } else if timestamp_ns < running.running_since_ns {
@@ -486,8 +497,9 @@ impl SchedulerWindowState {
         if let Some(running) = current_cpu_running.take() {
             if running.tid == next_tid {
                 if timestamp_ns > running.running_since_ns {
-                    buf.add_cpu_on_core_dim(
-                        running.cpu_dim,
+                    buf.add_cpu_on_core(
+                        running.basic_dim,
+                        running.cpu_id,
                         timestamp_ns - running.running_since_ns,
                     );
                 } else if timestamp_ns < running.running_since_ns {
@@ -506,7 +518,11 @@ impl SchedulerWindowState {
                     .take_cpu(prev_cpu)
                     .expect("find_cpu_for_tid must point to an occupied slot");
                 if timestamp_ns > prev.running_since_ns {
-                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
                 } else if timestamp_ns < prev.running_since_ns {
                     *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
                     if let Some(running) = current_cpu_running {
@@ -522,7 +538,11 @@ impl SchedulerWindowState {
                     .take_cpu(prev_cpu)
                     .expect("find_cpu_for_tid must point to an occupied slot");
                 if timestamp_ns > prev.running_since_ns {
-                    buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
                 } else if timestamp_ns < prev.running_since_ns {
                     *self.running_by_cpu.cpu_slot_mut(prev_cpu) = Some(prev);
                     return;
@@ -532,7 +552,11 @@ impl SchedulerWindowState {
 
         if let Some(prev) = current_cpu_running {
             if timestamp_ns > prev.running_since_ns {
-                buf.add_cpu_on_core_dim(prev.cpu_dim, timestamp_ns - prev.running_since_ns);
+                buf.add_cpu_on_core(
+                    prev.basic_dim,
+                    prev.cpu_id,
+                    timestamp_ns - prev.running_since_ns,
+                );
             } else if timestamp_ns < prev.running_since_ns {
                 *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(prev);
                 return;
@@ -550,7 +574,11 @@ impl SchedulerWindowState {
                 .take_cpu(cpu_id)
                 .expect("find_cpu_for_tid must point to an occupied slot");
             if timestamp_ns > running.running_since_ns {
-                buf.add_cpu_on_core_dim(running.cpu_dim, timestamp_ns - running.running_since_ns);
+                buf.add_cpu_on_core(
+                    running.basic_dim,
+                    running.cpu_id,
+                    timestamp_ns - running.running_since_ns,
+                );
             }
             if timestamp_ns < running.running_since_ns {
                 *self.running_by_cpu.cpu_slot_mut(cpu_id) = Some(running);
@@ -1701,16 +1729,17 @@ mod tests {
     #[test]
     fn test_running_thread_store_grows_cpu_slots() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
-        let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
         *store.cpu_slot_mut(0) = Some(RunningThread {
             tid: 10,
-            cpu_dim: cpu_dim(0),
+            basic_dim: dim,
+            cpu_id: 0,
             running_since_ns: 100,
         });
         *store.cpu_slot_mut(2) = Some(RunningThread {
             tid: 30,
-            cpu_dim: cpu_dim(2),
+            basic_dim: dim,
+            cpu_id: 2,
             running_since_ns: 300,
         });
 
@@ -1721,16 +1750,17 @@ mod tests {
     #[test]
     fn test_running_thread_store_take_cpu_clears_slot() {
         let dim = BasicDimension::new(123, ClientType::Geth as u8);
-        let cpu_dim = |cpu_id| CpuCoreDimension::from_basic(dim, cpu_id);
         let mut store = RunningThreadStore::with_capacity(4);
         *store.cpu_slot_mut(0) = Some(RunningThread {
             tid: 10,
-            cpu_dim: cpu_dim(0),
+            basic_dim: dim,
+            cpu_id: 0,
             running_since_ns: 100,
         });
         *store.cpu_slot_mut(1) = Some(RunningThread {
             tid: 20,
-            cpu_dim: cpu_dim(1),
+            basic_dim: dim,
+            cpu_id: 1,
             running_since_ns: 200,
         });
 
