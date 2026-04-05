@@ -636,8 +636,6 @@ pub struct AggregatedSink {
     cfg: AggregatedSinkConfig,
     meta_client_name: Arc<str>,
     meta_network_name: Arc<str>,
-    #[allow(dead_code)]
-    collector: Collector,
     exporters: Vec<Exporter>,
 
     /// Event-batch channel sender for the processing loop.
@@ -674,7 +672,6 @@ impl AggregatedSink {
         let (slot_rotation_tx, slot_rotation_rx) = mpsc::unbounded_channel();
 
         Self {
-            collector: Collector::new(cfg.resolution.interval, &cfg.sampling),
             cfg,
             meta_client_name: Arc::from(meta_client_name),
             meta_network_name: Arc::from(meta_network_name),

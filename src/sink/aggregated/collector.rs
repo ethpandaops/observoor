@@ -1,9 +1,8 @@
+use std::cell::RefCell;
 use std::time::Duration;
 
 #[cfg(all(feature = "bpf", not(test)))]
 use std::fs;
-
-use parking_lot::Mutex;
 
 use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
@@ -64,7 +63,9 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 pub struct Collector {
     interval_ms: u16,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
-    scheduler_collect_scratch: Mutex<Option<FastMap<BasicDimension, SchedulerCollectAcc>>>,
+    // Collection runs on the sink task only, so this reusable grouping scratch
+    // only needs interior mutability, not cross-thread synchronization.
+    scheduler_collect_scratch: RefCell<Option<FastMap<BasicDimension, SchedulerCollectAcc>>>,
     #[cfg(feature = "bpf")]
     collect_process_snapshots: bool,
     #[cfg(feature = "bpf")]
@@ -244,7 +245,7 @@ impl Collector {
         Self {
             interval_ms: interval.as_millis() as u16,
             sampling_by_event,
-            scheduler_collect_scratch: Mutex::new(None),
+            scheduler_collect_scratch: RefCell::new(None),
             #[cfg(feature = "bpf")]
             collect_process_snapshots,
             #[cfg(feature = "bpf")]
@@ -1097,7 +1098,7 @@ impl Collector {
             0.0
         };
 
-        let mut grouped_scratch = self.scheduler_collect_scratch.lock();
+        let mut grouped_scratch = self.scheduler_collect_scratch.borrow_mut();
         let grouped =
             grouped_scratch.get_or_insert_with(|| fast_map_with_capacity(buf.cpu_on_core.len()));
         grouped.clear();
