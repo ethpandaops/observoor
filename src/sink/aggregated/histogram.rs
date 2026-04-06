@@ -71,26 +71,13 @@ impl std::fmt::Debug for Histogram {
 #[inline(always)]
 fn bucket_index(value_ns: u64) -> usize {
     if value_ns < BOUNDARIES[0] {
-        0
-    } else if value_ns < BOUNDARIES[1] {
-        1
-    } else if value_ns < BOUNDARIES[2] {
-        2
-    } else if value_ns < BOUNDARIES[3] {
-        3
-    } else if value_ns < BOUNDARIES[4] {
-        4
-    } else if value_ns < BOUNDARIES[5] {
-        5
-    } else if value_ns < BOUNDARIES[6] {
-        6
-    } else if value_ns < BOUNDARIES[7] {
-        7
-    } else if value_ns < BOUNDARIES[8] {
-        8
-    } else {
-        9
+        return 0;
     }
+
+    // After the sub-microsecond bucket, each boundary is an exact power of 10.
+    // `ilog10` maps directly to those decade buckets without the hot compare
+    // chain that previously ran on every latency sample.
+    (value_ns.ilog10() as usize).saturating_sub(2).min(NUM_BUCKETS - 1)
 }
 
 /// Returns the upper bounds for each bucket in nanoseconds.
