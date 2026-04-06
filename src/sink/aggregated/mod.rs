@@ -189,6 +189,7 @@ struct SchedTidCacheEntry {
 }
 
 type SchedTidCacheSet = [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_WAYS];
+const _: () = assert!(SCHED_TID_CACHE_WAYS == 2);
 
 #[inline(always)]
 fn sched_tid_cache_slot(tid: u32) -> usize {
@@ -314,9 +315,15 @@ impl<'a> ResolvedDimensions<'a> {
 impl SchedulerWindowState {
     #[inline(always)]
     fn find_cpu_for_tid(&mut self, tid: u32) -> Option<u32> {
-        let cache_slot = sched_tid_cache_slot(tid);
+        let cache_set = &self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
 
-        for entry in self.tid_to_cpu_cache[cache_slot].into_iter().flatten() {
+        if let Some(entry) = cache_set[0] {
+            if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
+                return Some(entry.cpu_id);
+            }
+        }
+
+        if let Some(entry) = cache_set[1] {
             if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
                 return Some(entry.cpu_id);
             }
@@ -336,18 +343,24 @@ impl SchedulerWindowState {
         let entry = Some(SchedTidCacheEntry { tid, cpu_id });
         let cache_set = &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
 
-        for slot in cache_set.iter_mut() {
-            if slot.is_some_and(|cached| cached.tid == tid) {
-                *slot = entry;
-                return;
-            }
+        if cache_set[0].is_some_and(|cached| cached.tid == tid) {
+            cache_set[0] = entry;
+            return;
         }
 
-        for slot in cache_set.iter_mut() {
-            if slot.is_none() {
-                *slot = entry;
-                return;
-            }
+        if cache_set[1].is_some_and(|cached| cached.tid == tid) {
+            cache_set[1] = entry;
+            return;
+        }
+
+        if cache_set[0].is_none() {
+            cache_set[0] = entry;
+            return;
+        }
+
+        if cache_set[1].is_none() {
+            cache_set[1] = entry;
+            return;
         }
 
         cache_set[0] = entry;
@@ -355,10 +368,14 @@ impl SchedulerWindowState {
 
     #[inline(always)]
     fn clear_cached_tid_cpu(&mut self, tid: u32) {
-        for slot in &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)] {
-            if slot.is_some_and(|entry| entry.tid == tid) {
-                *slot = None;
-            }
+        let cache_set = &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
+
+        if cache_set[0].is_some_and(|entry| entry.tid == tid) {
+            cache_set[0] = None;
+        }
+
+        if cache_set[1].is_some_and(|entry| entry.tid == tid) {
+            cache_set[1] = None;
         }
     }
 
