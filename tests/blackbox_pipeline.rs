@@ -228,11 +228,12 @@ fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, event.raw.scheduler_cpu_id());
         }
         TypedEvent::SchedCombined(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
-            let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
+            let cpu_id = event.raw.scheduler_cpu_id();
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, cpu_id);
+            let next_dim = BasicDimension::new(e.next_pid, event.raw.secondary_client_type_raw());
             buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
         }
         TypedEvent::SchedRunqueue(e) => {

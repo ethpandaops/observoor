@@ -349,13 +349,15 @@ pub struct Event {
     pub timestamp_ns: u64,
     basic_dimension: u64,
     pub tid: u32,
-    client_type: u8,
+    scheduler_cpu_id_high: u8,
     pub event_type: EventType,
     secondary_event_type: u8,
     secondary_client_type: u8,
 }
 
 const _: () = assert!(size_of::<Event>() == 24);
+
+const BASIC_DIMENSION_MASK: u64 = (1u64 << 40) - 1;
 
 impl Event {
     #[inline(always)]
@@ -427,7 +429,7 @@ impl Event {
             timestamp_ns,
             basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
             tid,
-            client_type,
+            scheduler_cpu_id_high: 0,
             event_type,
             secondary_event_type: 0,
             secondary_client_type: 0,
@@ -442,6 +444,14 @@ impl Event {
     }
 
     #[inline(always)]
+    pub fn with_scheduler_cpu_id(mut self, cpu_id: u32) -> Self {
+        self.basic_dimension =
+            (self.basic_dimension & BASIC_DIMENSION_MASK) | (u64::from(cpu_id & 0x00FF_FFFF) << 40);
+        self.scheduler_cpu_id_high = (cpu_id >> 24) as u8;
+        self
+    }
+
+    #[inline(always)]
     pub fn pid(self) -> u32 {
         self.basic_dimension as u32
     }
@@ -449,12 +459,17 @@ impl Event {
     /// Validated raw `ClientType` discriminant from the ring buffer.
     #[inline(always)]
     pub fn client_type(self) -> u8 {
-        self.client_type
+        ((self.basic_dimension >> 32) & 0xFF) as u8
     }
 
     #[inline(always)]
     pub fn basic_dimension_key(self) -> u64 {
-        self.basic_dimension
+        self.basic_dimension & BASIC_DIMENSION_MASK
+    }
+
+    #[inline(always)]
+    pub fn scheduler_cpu_id(self) -> u32 {
+        (u32::from(self.scheduler_cpu_id_high) << 24) | ((self.basic_dimension >> 40) as u32)
     }
 
     #[inline(always)]
@@ -531,7 +546,6 @@ pub struct NetIOTcpTxMetricsEvent {
 #[allow(dead_code)]
 pub struct SchedEvent {
     pub on_cpu_ns: u64,
-    pub cpu_id: u32,
 }
 
 /// Combined scheduler switch-out + switch-in event.
@@ -543,13 +557,10 @@ pub struct SchedEvent {
 #[allow(dead_code)]
 pub struct SchedCombinedEvent {
     pub on_cpu_ns: u64,
-    pub cpu_id: u32,
-    pub next_pid: u32,
-    pub next_tid: u32,
-    /// Validated raw `ClientType` discriminant for the incoming thread.
-    pub next_client_type: u8,
     pub runqueue_ns: u64,
     pub off_cpu_ns: u64,
+    pub next_pid: u32,
+    pub next_tid: u32,
 }
 
 /// Runqueue/off-CPU latency event.
@@ -558,7 +569,6 @@ pub struct SchedCombinedEvent {
 pub struct SchedRunqueueEvent {
     pub runqueue_ns: u64,
     pub off_cpu_ns: u64,
-    pub cpu_id: u32,
 }
 
 /// Page fault event.
@@ -680,6 +690,21 @@ mod tests {
             event.basic_dimension_key() >> 32,
             u64::from(ClientType::Unknown as u8)
         );
+    }
+
+    #[test]
+    fn test_event_scheduler_cpu_id_preserves_basic_dimension() {
+        let event =
+            Event::new(1, 10, 11, EventType::SchedSwitch, ClientType::Lighthouse as u8)
+                .with_scheduler_cpu_id(0xDEADBEEF);
+
+        assert_eq!(event.pid(), 10);
+        assert_eq!(event.client_type(), ClientType::Lighthouse as u8);
+        assert_eq!(
+            event.basic_dimension_key(),
+            (u64::from(ClientType::Lighthouse as u8) << 32) | 10
+        );
+        assert_eq!(event.scheduler_cpu_id(), 0xDEADBEEF);
     }
 
     #[test]

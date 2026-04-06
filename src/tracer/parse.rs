@@ -197,10 +197,11 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     // dispatch to avoid a second hot-path match on `EventType`.
     // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
     let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
-    let (event_type, secondary_event_type_raw, secondary_client_type_raw, typed) =
+    let (event_type, secondary_event_type_raw, secondary_client_type_raw, scheduler_cpu_id, typed) =
         match event_type_raw {
             1 => (
                 EventType::SyscallRead,
+                0,
                 0,
                 0,
                 TypedEvent::SyscallRead(parse_syscall(payload)?),
@@ -209,10 +210,12 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::SyscallWrite,
                 0,
                 0,
+                0,
                 TypedEvent::SyscallWrite(parse_syscall(payload)?),
             ),
             3 => (
                 EventType::SyscallFutex,
+                0,
                 0,
                 0,
                 TypedEvent::SyscallFutex(parse_syscall(payload)?),
@@ -221,10 +224,12 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::SyscallMmap,
                 0,
                 0,
+                0,
                 TypedEvent::SyscallMmap(parse_syscall(payload)?),
             ),
             5 => (
                 EventType::SyscallEpollWait,
+                0,
                 0,
                 0,
                 TypedEvent::SyscallEpollWait(parse_syscall(payload)?),
@@ -233,34 +238,54 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::DiskIO,
                 0,
                 0,
+                0,
                 TypedEvent::DiskIO(parse_disk_io(&header, payload)?),
             ),
-            7 => (EventType::NetTX, 0, 0, parse_net_tx(&header, payload)?),
+            7 => (EventType::NetTX, 0, 0, 0, parse_net_tx(&header, payload)?),
             8 => (
                 EventType::NetRX,
                 0,
                 0,
+                0,
                 TypedEvent::NetIORx(parse_net_rx(payload, &header)?),
             ),
-            9 => match parse_sched_variant(&header, payload)? {
-                TypedEvent::SchedCombined(event) => (
-                    EventType::SchedSwitch,
-                    EventType::SchedRunqueue as u8,
-                    event.next_client_type,
-                    TypedEvent::SchedCombined(event),
-                ),
-                typed => (EventType::SchedSwitch, 0, 0, typed),
-            },
+            9 => {
+                let cpu_id = decode_u32_from_pad(&header.pad, 1);
+                if payload.len() >= SCHED_COMBINED_PAYLOAD_SIZE {
+                    let next_client_type = header.pad[5];
+                    if next_client_type > MAX_CLIENT_TYPE as u8 {
+                        return Err(unknown_client_type(next_client_type));
+                    }
+
+                    (
+                        EventType::SchedSwitch,
+                        EventType::SchedRunqueue as u8,
+                        next_client_type,
+                        cpu_id,
+                        TypedEvent::SchedCombined(parse_sched_combined(payload)?),
+                    )
+                } else {
+                    (
+                        EventType::SchedSwitch,
+                        0,
+                        0,
+                        cpu_id,
+                        TypedEvent::Sched(parse_sched(payload)?),
+                    )
+                }
+            }
             10 => (
                 EventType::PageFault,
                 0,
                 0,
+                0,
                 TypedEvent::PageFault(parse_page_fault(&header)),
             ),
-            11 => (EventType::FDOpen, 0, 0, TypedEvent::FDOpen),
-            12 => (EventType::FDClose, 0, 0, TypedEvent::FDClose),
+            11 => (EventType::FDOpen, 0, 0, 0, TypedEvent::FDOpen),
+            12 => (EventType::FDClose, 0, 0, 0, TypedEvent::FDClose),
             13 => (
                 EventType::SyscallFsync,
+                0,
                 0,
                 0,
                 TypedEvent::SyscallFsync(parse_syscall(payload)?),
@@ -269,10 +294,12 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::SyscallFdatasync,
                 0,
                 0,
+                0,
                 TypedEvent::SyscallFdatasync(parse_syscall(payload)?),
             ),
             15 => (
                 EventType::SyscallPwrite,
+                0,
                 0,
                 0,
                 TypedEvent::SyscallPwrite(parse_syscall(payload)?),
@@ -281,10 +308,12 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::SchedRunqueue,
                 0,
                 0,
+                decode_u32_from_pad(&header.pad, 0),
                 TypedEvent::SchedRunqueue(parse_sched_runqueue(&header, payload)?),
             ),
             17 => (
                 EventType::BlockMerge,
+                0,
                 0,
                 0,
                 TypedEvent::BlockMerge(parse_block_merge(payload)?),
@@ -293,11 +322,13 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::TcpRetransmit,
                 0,
                 0,
+                0,
                 TypedEvent::TcpRetransmit(parse_tcp_retransmit(payload)?),
             ),
-            19 => (EventType::TcpState, 0, 0, TypedEvent::TcpState),
+            19 => (EventType::TcpState, 0, 0, 0, TypedEvent::TcpState),
             20 => (
                 EventType::MemReclaim,
+                0,
                 0,
                 0,
                 TypedEvent::MemReclaim(parse_mem_latency(payload)?),
@@ -306,10 +337,12 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::MemCompaction,
                 0,
                 0,
+                0,
                 TypedEvent::MemCompaction(parse_mem_latency(payload)?),
             ),
             22 => (
                 EventType::SwapIn,
+                0,
                 0,
                 0,
                 TypedEvent::SwapIn(parse_swap(payload)?),
@@ -318,10 +351,11 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::SwapOut,
                 0,
                 0,
+                0,
                 TypedEvent::SwapOut(parse_swap(payload)?),
             ),
-            24 => (EventType::OOMKill, 0, 0, TypedEvent::OOMKill),
-            25 => (EventType::ProcessExit, 0, 0, TypedEvent::ProcessExit),
+            24 => (EventType::OOMKill, 0, 0, 0, TypedEvent::OOMKill),
+            25 => (EventType::ProcessExit, 0, 0, 0, TypedEvent::ProcessExit),
             _ => {
                 return Err(unknown_event_type(event_type_raw));
             }
@@ -342,7 +376,8 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
             secondary_event_type_raw,
             secondary_client_type_raw,
         )
-    };
+    }
+    .with_scheduler_cpu_id(scheduler_cpu_id);
     Ok(ParsedEventParts {
         raw: event,
         typed,
@@ -492,63 +527,35 @@ fn parse_net_rx(data: &[u8], header: &RawEventHeader) -> Result<NetIOEvent, Pars
     })
 }
 
-/// Scheduler context-switch event: type 9.
-/// The common payload is 8 bytes, but the BPF side can also attach the
-/// incoming tracked thread to collapse the usual sched_switch + sched_runqueue
-/// pair into one ring-buffer record.
-fn parse_sched_variant(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, ParseError> {
-    if data.len() >= SCHED_COMBINED_PAYLOAD_SIZE {
-        return Ok(TypedEvent::SchedCombined(parse_sched_combined(
-            header, data,
-        )?));
-    }
-
-    Ok(TypedEvent::Sched(parse_sched(header, data)?))
-}
-
 /// Scheduler context-switch event payload: 8 bytes.
-/// cpu_id is stored in `hdr.pad[1..4]`.
-fn parse_sched(header: &RawEventHeader, data: &[u8]) -> Result<SchedEvent, ParseError> {
+fn parse_sched(data: &[u8]) -> Result<SchedEvent, ParseError> {
     let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
     Ok(SchedEvent {
         on_cpu_ns: u64::from_le(raw.on_cpu_ns),
-        cpu_id: decode_u32_from_pad(&header.pad, 1),
     })
 }
 
 /// Combined scheduler switch-out + switch-in payload: 32 bytes.
-fn parse_sched_combined(
-    header: &RawEventHeader,
-    data: &[u8],
-) -> Result<SchedCombinedEvent, ParseError> {
+fn parse_sched_combined(data: &[u8]) -> Result<SchedCombinedEvent, ParseError> {
     let raw = read_payload::<RawSchedCombinedPayload>(data, "sched combined event")?;
-    let next_client_type = header.pad[5];
-    if next_client_type > MAX_CLIENT_TYPE as u8 {
-        return Err(unknown_client_type(next_client_type));
-    }
-
     Ok(SchedCombinedEvent {
         on_cpu_ns: u64::from_le(raw.on_cpu_ns),
-        cpu_id: decode_u32_from_pad(&header.pad, 1),
         runqueue_ns: u64::from_le(raw.runqueue_ns),
         off_cpu_ns: u64::from_le(raw.off_cpu_ns),
         next_pid: u32::from_le(raw.next_pid),
         next_tid: u32::from_le(raw.next_tid),
-        next_client_type,
     })
 }
 
 /// Scheduler runqueue/off-CPU latency event: type 16. Payload: 16 bytes.
-/// cpu_id is stored in `hdr.pad[0..3]`.
 fn parse_sched_runqueue(
-    header: &RawEventHeader,
+    _header: &RawEventHeader,
     data: &[u8],
 ) -> Result<SchedRunqueueEvent, ParseError> {
     let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
         runqueue_ns: u64::from_le(raw.runqueue_ns),
         off_cpu_ns: u64::from_le(raw.off_cpu_ns),
-        cpu_id: decode_u32_from_pad(&header.pad, 0),
     })
 }
 
@@ -850,7 +857,7 @@ mod tests {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 100_000);
-        assert_eq!(e.cpu_id, 9);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 9);
     }
 
     #[test]
@@ -864,7 +871,7 @@ mod tests {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 200_000);
-        assert_eq!(e.cpu_id, 15);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
     }
 
     #[test]
@@ -888,8 +895,8 @@ mod tests {
         assert_eq!(e.off_cpu_ns, 70_000);
         assert_eq!(e.next_pid, 303);
         assert_eq!(e.next_tid, 404);
-        assert_eq!(e.next_client_type, 2);
-        assert_eq!(e.cpu_id, 15);
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
         assert_eq!(
             parsed.raw.secondary_event_type_raw(),
             EventType::SchedRunqueue as u8
@@ -910,7 +917,7 @@ mod tests {
         };
         assert_eq!(e.runqueue_ns, 50_000);
         assert_eq!(e.off_cpu_ns, 200_000);
-        assert_eq!(e.cpu_id, 4);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 4);
     }
 
     // -- Page fault --

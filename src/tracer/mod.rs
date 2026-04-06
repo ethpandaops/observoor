@@ -269,15 +269,14 @@ mod tests {
 
         batch.push(ParsedEvent {
             raw: Event::new(1, 100, 100, EventType::SchedSwitch, 1)
-                .with_secondary_logical_event(EventType::SchedRunqueue, 2),
+                .with_secondary_logical_event(EventType::SchedRunqueue, 2)
+                .with_scheduler_cpu_id(3),
             typed: TypedEvent::SchedCombined(crate::tracer::event::SchedCombinedEvent {
                 on_cpu_ns: 10,
-                cpu_id: 3,
-                next_pid: 200,
-                next_tid: 200,
-                next_client_type: 2,
                 runqueue_ns: 20,
                 off_cpu_ns: 30,
+                next_pid: 200,
+                next_tid: 200,
             }),
         });
 

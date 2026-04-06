@@ -934,6 +934,7 @@ impl AggregatedSink {
             }
 
             TypedEvent::Sched(e) => {
+                let cpu_id = event.raw.scheduler_cpu_id();
                 if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_switch(
                         buf,
@@ -941,16 +942,18 @@ impl AggregatedSink {
                         event.raw.timestamp_ns,
                         basic_dim,
                         e.on_cpu_ns,
-                        e.cpu_id,
+                        cpu_id,
                     );
                 } else {
-                    buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+                    buf.add_sched_switch(basic_dim, e.on_cpu_ns, cpu_id);
                 }
             }
 
             TypedEvent::SchedCombined(e) => {
                 let prev_dim = basic_dim;
-                let next_dim = BasicDimension::new(e.next_pid, e.next_client_type);
+                let next_dim =
+                    BasicDimension::new(e.next_pid, event.raw.secondary_client_type_raw());
+                let cpu_id = event.raw.scheduler_cpu_id();
 
                 if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_combined(
@@ -963,15 +966,16 @@ impl AggregatedSink {
                         e.on_cpu_ns,
                         e.runqueue_ns,
                         e.off_cpu_ns,
-                        e.cpu_id,
+                        cpu_id,
                     );
                 } else {
-                    buf.add_sched_switch(prev_dim, e.on_cpu_ns, e.cpu_id);
+                    buf.add_sched_switch(prev_dim, e.on_cpu_ns, cpu_id);
                     buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
                 }
             }
 
             TypedEvent::SchedRunqueue(e) => {
+                let cpu_id = event.raw.scheduler_cpu_id();
                 if WITH_SCHEDULER_STATE {
                     scheduler_state.handle_sched_runqueue(
                         buf,
@@ -980,7 +984,7 @@ impl AggregatedSink {
                         basic_dim,
                         e.runqueue_ns,
                         e.off_cpu_ns,
-                        e.cpu_id,
+                        cpu_id,
                     );
                 } else {
                     buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
@@ -1838,6 +1842,43 @@ mod tests {
         }
     }
 
+    fn make_scheduler_event_at(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        cpu_id: u32,
+        typed: TypedEvent,
+    ) -> ParsedEvent {
+        ParsedEvent {
+            raw: Event::new(timestamp_ns, pid, tid, event_type, ClientType::Geth as u8)
+                .with_scheduler_cpu_id(cpu_id),
+            typed,
+        }
+    }
+
+    fn make_sched_combined_event_at(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        cpu_id: u32,
+        next_client_type: u8,
+        typed: TypedEvent,
+    ) -> ParsedEvent {
+        ParsedEvent {
+            raw: Event::new(
+                timestamp_ns,
+                pid,
+                tid,
+                EventType::SchedSwitch,
+                ClientType::Geth as u8,
+            )
+            .with_secondary_logical_event(EventType::SchedRunqueue, next_client_type)
+            .with_scheduler_cpu_id(cpu_id),
+            typed,
+        }
+    }
+
     fn process_event_with_scheduler_state(
         buf: &mut Buffer,
         event: &ParsedEvent,
@@ -2148,11 +2189,14 @@ mod tests {
         let dims = DimensionsConfig::default();
 
         // Sched switch
-        let event = make_event(
+        let event = make_scheduler_event_at(
+            0,
+            123,
+            123,
             EventType::SchedSwitch,
+            3,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 1_000_000,
-                cpu_id: 3,
             }),
         );
         AggregatedSink::process_event(&mut buf, &event, &dims);
@@ -2215,19 +2259,18 @@ mod tests {
             8,
         );
 
-        let event = make_event_at(
+        let event = make_sched_combined_event_at(
             1_000,
             123,
             77,
-            EventType::SchedSwitch,
+            2,
+            ClientType::Geth as u8,
             TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 300,
-                cpu_id: 2,
-                next_pid: 124,
-                next_tid: 88,
-                next_client_type: ClientType::Geth as u8,
                 runqueue_ns: 50,
                 off_cpu_ns: 100,
+                next_pid: 124,
+                next_tid: 88,
             }),
         );
 
@@ -2273,32 +2316,31 @@ mod tests {
             8,
         );
 
-        let seed_running = make_event_at(
+        let seed_running = make_scheduler_event_at(
             1_000,
             124,
             88,
             EventType::SchedRunqueue,
+            1,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 0,
                 off_cpu_ns: 0,
-                cpu_id: 1,
             }),
         );
         process_event_with_scheduler_state(&mut buf, &seed_running, &dims, &mut scheduler_state);
 
-        let combined = make_event_at(
+        let combined = make_sched_combined_event_at(
             1_300,
             123,
             77,
-            EventType::SchedSwitch,
+            2,
+            ClientType::Geth as u8,
             TypedEvent::SchedCombined(SchedCombinedEvent {
                 on_cpu_ns: 50,
-                cpu_id: 2,
-                next_pid: 124,
-                next_tid: 88,
-                next_client_type: ClientType::Geth as u8,
                 runqueue_ns: 10,
                 off_cpu_ns: 20,
+                next_pid: 124,
+                next_tid: 88,
             }),
         );
         process_event_with_scheduler_state(&mut buf, &combined, &dims, &mut scheduler_state);
@@ -2338,15 +2380,15 @@ mod tests {
             8,
         );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             1_000,
             123,
             77,
             EventType::SchedRunqueue,
+            2,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 50,
                 off_cpu_ns: 100,
-                cpu_id: 2,
             }),
         );
 
@@ -2398,15 +2440,15 @@ mod tests {
             8,
         );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             10_000,
             123,
             88,
             EventType::SchedRunqueue,
+            3,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 0,
                 off_cpu_ns: 0,
-                cpu_id: 3,
             }),
         );
         process_event_with_scheduler_state(&mut buf1, &rq_event, &dims, &mut scheduler_state);
@@ -2421,14 +2463,14 @@ mod tests {
             false,
             8,
         );
-        let switch_event = make_event_at(
+        let switch_event = make_scheduler_event_at(
             11_000,
             123,
             88,
             EventType::SchedSwitch,
+            3,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 2_000,
-                cpu_id: 3,
             }),
         );
         process_event_with_scheduler_state(&mut buf2, &switch_event, &dims, &mut scheduler_state);
@@ -2461,14 +2503,14 @@ mod tests {
             false,
             8,
         );
-        let switch_event = make_event_at(
+        let switch_event = make_scheduler_event_at(
             2_000,
             123,
             99,
             EventType::SchedSwitch,
+            1,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 700,
-                cpu_id: 1,
             }),
         );
         process_event_with_scheduler_state(&mut buf, &switch_event, &dims, &mut scheduler_state);
@@ -2495,15 +2537,15 @@ mod tests {
             8,
         );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             1_000,
             123,
             50,
             EventType::SchedRunqueue,
+            4,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 0,
                 off_cpu_ns: 0,
-                cpu_id: 4,
             }),
         );
         process_event_with_scheduler_state(&mut buf, &rq_event, &dims, &mut scheduler_state);
@@ -2543,26 +2585,26 @@ mod tests {
             8,
         );
 
-        let rq1 = make_event_at(
+        let rq1 = make_scheduler_event_at(
             1_000,
             123,
             60,
             EventType::SchedRunqueue,
+            1,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 1,
                 off_cpu_ns: 1,
-                cpu_id: 1,
             }),
         );
-        let rq2 = make_event_at(
+        let rq2 = make_scheduler_event_at(
             1_300,
             123,
             60,
             EventType::SchedRunqueue,
+            3,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 1,
                 off_cpu_ns: 1,
-                cpu_id: 3,
             }),
         );
 
@@ -2598,36 +2640,36 @@ mod tests {
             8,
         );
 
-        let rq = make_event_at(
+        let rq = make_scheduler_event_at(
             1_000,
             123,
             70,
             EventType::SchedRunqueue,
+            2,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 10,
                 off_cpu_ns: 20,
-                cpu_id: 2,
             }),
         );
-        let stale_rq = make_event_at(
+        let stale_rq = make_scheduler_event_at(
             900,
             123,
             70,
             EventType::SchedRunqueue,
+            4,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
                 runqueue_ns: 15,
                 off_cpu_ns: 25,
-                cpu_id: 4,
             }),
         );
-        let stale_switch = make_event_at(
+        let stale_switch = make_scheduler_event_at(
             950,
             123,
             70,
             EventType::SchedSwitch,
+            1,
             TypedEvent::Sched(SchedEvent {
                 on_cpu_ns: 50,
-                cpu_id: 1,
             }),
         );
         let stale_exit = make_event_at(
