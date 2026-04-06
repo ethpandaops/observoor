@@ -384,7 +384,35 @@ impl Event {
         client_type: u8,
     ) -> Self {
         debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
-        Self::new_sanitized(timestamp_ns, pid, tid, event_type, client_type)
+        Self::new_validated_with_secondary(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            client_type,
+            0,
+            0,
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated_with_secondary(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+    ) -> Self {
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+        debug_assert!(secondary_event_type <= MAX_EVENT_TYPE as u8);
+        debug_assert!(secondary_client_type <= MAX_CLIENT_TYPE as u8);
+
+        let mut event = Self::new_sanitized(timestamp_ns, pid, tid, event_type, client_type);
+        event.secondary_event_type = secondary_event_type;
+        event.secondary_client_type = secondary_client_type;
+        event
     }
 
     #[inline(always)]
