@@ -70,22 +70,32 @@ impl std::fmt::Debug for Histogram {
 /// Returns the bucket index for a given value in nanoseconds.
 #[inline(always)]
 fn bucket_index(value_ns: u64) -> usize {
-    if value_ns < BOUNDARIES[0] {
-        0
-    } else if value_ns < BOUNDARIES[1] {
-        1
-    } else if value_ns < BOUNDARIES[2] {
-        2
+    // Pair adjacent ranges so the common mid/upper buckets avoid walking the
+    // entire boundary chain one comparison at a time.
+    if value_ns < BOUNDARIES[1] {
+        if value_ns < BOUNDARIES[0] {
+            0
+        } else {
+            1
+        }
     } else if value_ns < BOUNDARIES[3] {
-        3
-    } else if value_ns < BOUNDARIES[4] {
-        4
+        if value_ns < BOUNDARIES[2] {
+            2
+        } else {
+            3
+        }
     } else if value_ns < BOUNDARIES[5] {
-        5
-    } else if value_ns < BOUNDARIES[6] {
-        6
+        if value_ns < BOUNDARIES[4] {
+            4
+        } else {
+            5
+        }
     } else if value_ns < BOUNDARIES[7] {
-        7
+        if value_ns < BOUNDARIES[6] {
+            6
+        } else {
+            7
+        }
     } else if value_ns < BOUNDARIES[8] {
         8
     } else {
