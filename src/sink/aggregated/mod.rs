@@ -155,6 +155,7 @@ impl RunningThreadStore {
         None
     }
 
+    #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code))]
     #[inline(always)]
     fn cpu_matches_tid(&self, cpu_id: u32, tid: u32) -> bool {
         if let Some(Some(running)) = self.entries.get(cpu_id as usize) {
@@ -318,13 +319,15 @@ impl SchedulerWindowState {
         let cache_set = &self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
 
         if let Some(entry) = cache_set[0] {
-            if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
+            if entry.tid == tid {
+                debug_assert!(self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid));
                 return Some(entry.cpu_id);
             }
         }
 
         if let Some(entry) = cache_set[1] {
-            if entry.tid == tid && self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid) {
+            if entry.tid == tid {
+                debug_assert!(self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid));
                 return Some(entry.cpu_id);
             }
         }
@@ -2032,6 +2035,37 @@ mod tests {
         let cache_set = &scheduler_state.tid_to_cpu_cache[sched_tid_cache_slot(tid_a)];
         assert!(!cache_set.iter().flatten().any(|entry| entry.tid == tid_a));
         assert!(cache_set.iter().flatten().any(|entry| entry.tid == tid_b));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_drops_old_cpu_mapping_on_reuse() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = 20u32;
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+
+        let removed = scheduler_state
+            .take_running_on_cpu(0)
+            .expect("cpu 0 should be occupied");
+        assert_eq!(removed.tid, tid_a);
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), None);
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(0));
     }
 
     #[test]
