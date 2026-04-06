@@ -385,16 +385,17 @@ impl Event {
         event_type: EventType,
         client_type: u8,
     ) -> Self {
-        Self::new_validated_with_secondary_and_cpu(
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+
+        Self {
             timestamp_ns,
-            pid,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
             tid,
+            scheduler_cpu_id_high: 0,
             event_type,
-            client_type,
-            0,
-            0,
-            0,
-        )
+            secondary_event_type: 0,
+            secondary_client_type: 0,
+        }
     }
 
     #[inline(always)]
@@ -407,16 +408,19 @@ impl Event {
         secondary_event_type: u8,
         secondary_client_type: u8,
     ) -> Self {
-        Self::new_validated_with_secondary_and_cpu(
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+        debug_assert!(secondary_event_type <= MAX_EVENT_TYPE as u8);
+        debug_assert!(secondary_client_type <= MAX_CLIENT_TYPE as u8);
+
+        Self {
             timestamp_ns,
-            pid,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
             tid,
+            scheduler_cpu_id_high: 0,
             event_type,
-            client_type,
             secondary_event_type,
             secondary_client_type,
-            0,
-        )
+        }
     }
 
     #[inline(always)]

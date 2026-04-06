@@ -147,8 +147,16 @@ impl ParsedEventBatch {
         }
 
         // Safety: secondary event tags are only sourced from `EventType`.
-        unsafe { *self.event_totals.get_unchecked_mut(secondary_event_type as usize) += 1 };
-        unsafe { *self.client_totals.get_unchecked_mut(secondary_client_type as usize) += 1 };
+        unsafe {
+            *self
+                .event_totals
+                .get_unchecked_mut(secondary_event_type as usize) += 1
+        };
+        unsafe {
+            *self
+                .client_totals
+                .get_unchecked_mut(secondary_client_type as usize) += 1
+        };
     }
 
     pub fn recycle(mut self) {
