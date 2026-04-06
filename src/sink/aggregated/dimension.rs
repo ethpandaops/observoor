@@ -24,6 +24,13 @@ pub struct NetworkDimension(u64);
 pub struct TCPMetricsDimension(u64);
 
 /// Dimension key for disk I/O metrics.
+/// The hot disk I/O maps are already split into read and write buckets, so the
+/// key only needs PID + client type + device ID.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(transparent)]
+pub struct DiskDeviceDimension(u128);
+
+/// Dimension key for disk metrics that still need an explicit read/write bit.
 /// Includes device ID and read/write for per-device breakdown.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(transparent)]
@@ -198,6 +205,38 @@ impl DiskDimension {
     }
 }
 
+impl DiskDeviceDimension {
+    #[inline(always)]
+    pub(crate) fn packed(self) -> u128 {
+        self.0
+    }
+
+    #[inline(always)]
+    pub fn new(pid: u32, client_type: u8, device_id: u32) -> Self {
+        Self(pack_disk_device(pid, client_type, device_id))
+    }
+
+    #[inline(always)]
+    pub fn from_basic(basic: BasicDimension, device_id: u32) -> Self {
+        Self(u128::from(basic.packed()) | (u128::from(device_id) << 40))
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.0 as u32
+    }
+
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        (self.0 >> 32) as u8
+    }
+
+    #[inline(always)]
+    pub fn device_id(self) -> u32 {
+        (self.0 >> 40) as u32
+    }
+}
+
 #[inline(always)]
 fn pack_basic(pid: u32, client_type: u8) -> u64 {
     (pid as u64) | ((client_type as u64) << 32)
@@ -219,11 +258,13 @@ fn pack_tcp_metrics(pid: u32, client_type: u8, port_label: u8) -> u64 {
 }
 
 #[inline(always)]
+fn pack_disk_device(pid: u32, client_type: u8, device_id: u32) -> u128 {
+    u128::from(pid) | (u128::from(client_type) << 32) | (u128::from(device_id) << 40)
+}
+
+#[inline(always)]
 fn pack_disk(pid: u32, client_type: u8, device_id: u32, rw: u8) -> u128 {
-    u128::from(pid)
-        | (u128::from(client_type) << 32)
-        | (u128::from(device_id) << 40)
-        | (u128::from(rw) << 72)
+    pack_disk_device(pid, client_type, device_id) | (u128::from(rw) << 72)
 }
 
 /// Returns a human-readable direction string.
@@ -363,6 +404,14 @@ mod tests {
     }
 
     #[test]
+    fn test_disk_device_dimension_as_map_key() {
+        let mut map: HashMap<DiskDeviceDimension, u32> = HashMap::new();
+        let dim = DiskDeviceDimension::new(100, 1, 259);
+        map.insert(dim, 42);
+        assert_eq!(map.get(&dim), Some(&42));
+    }
+
+    #[test]
     fn test_disk_dimension_accessors() {
         let dim = DiskDimension::new(100, 1, 259, 1);
         assert_eq!(dim.pid(), 100);
@@ -377,6 +426,23 @@ mod tests {
         assert_eq!(
             DiskDimension::from_basic(basic, 259, 1),
             DiskDimension::new(100, 1, 259, 1)
+        );
+    }
+
+    #[test]
+    fn test_disk_device_dimension_accessors() {
+        let dim = DiskDeviceDimension::new(100, 1, 259);
+        assert_eq!(dim.pid(), 100);
+        assert_eq!(dim.client_type(), 1);
+        assert_eq!(dim.device_id(), 259);
+    }
+
+    #[test]
+    fn test_disk_device_dimension_from_basic_matches_new() {
+        let basic = BasicDimension::new(100, 1);
+        assert_eq!(
+            DiskDeviceDimension::from_basic(basic, 259),
+            DiskDeviceDimension::new(100, 1, 259)
         );
     }
 

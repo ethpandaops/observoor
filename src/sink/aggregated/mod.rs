@@ -30,7 +30,9 @@ use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
+use self::dimension::{
+    BasicDimension, DiskDeviceDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
@@ -927,8 +929,14 @@ impl AggregatedSink {
 
             TypedEvent::DiskIO(e) => {
                 let disk_dim =
-                    build_disk_dimension_from_basic(basic_dim, e.device_id, e.rw, dimensions);
-                buf.add_disk_io(disk_dim, e.latency_ns, e.bytes, e.queue_depth);
+                    build_disk_io_dimension_from_basic(basic_dim, e.device_id, dimensions);
+                buf.add_disk_io_with_device_key(
+                    disk_dim,
+                    e.rw,
+                    e.latency_ns,
+                    e.bytes,
+                    e.queue_depth,
+                );
             }
 
             TypedEvent::BlockMerge(e) => {
@@ -1788,6 +1796,15 @@ fn build_disk_dimension(
 }
 
 #[inline(always)]
+fn build_disk_io_dimension_from_basic(
+    basic: BasicDimension,
+    device_id: u32,
+    dims: &ResolvedDimensions<'_>,
+) -> DiskDeviceDimension {
+    DiskDeviceDimension::from_basic(basic, device_id & dims.disk_device_mask)
+}
+
+#[inline(always)]
 fn build_disk_dimension_from_basic(
     basic: BasicDimension,
     device_id: u32,
@@ -2503,9 +2520,7 @@ mod tests {
             88,
             EventType::SchedSwitch,
             3,
-            TypedEvent::Sched(SchedEvent {
-                on_cpu_ns: 2_000,
-            }),
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 2_000 }),
         );
         process_event_with_scheduler_state(&mut buf2, &switch_event, &dims, &mut scheduler_state);
 
@@ -2543,9 +2558,7 @@ mod tests {
             99,
             EventType::SchedSwitch,
             1,
-            TypedEvent::Sched(SchedEvent {
-                on_cpu_ns: 700,
-            }),
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 700 }),
         );
         process_event_with_scheduler_state(&mut buf, &switch_event, &dims, &mut scheduler_state);
 
@@ -2702,9 +2715,7 @@ mod tests {
             70,
             EventType::SchedSwitch,
             1,
-            TypedEvent::Sched(SchedEvent {
-                on_cpu_ns: 50,
-            }),
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 50 }),
         );
         let stale_exit = make_event_at(
             980,

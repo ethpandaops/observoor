@@ -15,7 +15,8 @@ use super::aggregate::{
     PageFaultAggregate, SchedWaitAggregate, SchedulerCpuAggregate, TcpTxAggregate,
 };
 use super::dimension::{
-    BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+    BasicDimension, CpuCoreDimension, DiskDeviceDimension, DiskDimension, NetworkDimension,
+    TCPMetricsDimension,
 };
 
 #[derive(Default)]
@@ -154,6 +155,13 @@ impl FastMapKey for DiskDimension {
     }
 }
 
+impl FastMapKey for DiskDeviceDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
 pub struct FastMap<K, V> {
     // Keep one consistent heap-backed layout for all aggregation maps.
     // Large aggregates stay out of the map object itself, which avoids the
@@ -272,8 +280,8 @@ where
 
 #[inline(always)]
 fn record_disk(
-    map: &mut FastMap<DiskDimension, DiskAggregate>,
-    key: DiskDimension,
+    map: &mut FastMap<DiskDeviceDimension, DiskAggregate>,
+    key: DiskDeviceDimension,
     latency_ns: u64,
     bytes: u32,
     queue_depth: u32,
@@ -459,11 +467,12 @@ pub struct Buffer {
     // --- TCP TX bytes + metrics (TCPMetricsDimension -> TcpTxAggregate) ---
     pub tcp_tx: FastMap<TCPMetricsDimension, TcpTxAggregate>,
 
-    // --- Disk (DiskDimension) ---
+    // --- Disk ---
     // Disk completions frequently alternate read/write against the same device.
-    // Splitting by direction lets each map keep a stable last-hit cache entry.
-    pub disk_io_read: FastMap<DiskDimension, DiskAggregate>,
-    pub disk_io_write: FastMap<DiskDimension, DiskAggregate>,
+    // Splitting by direction lets each map keep a stable last-hit cache entry,
+    // so the hot disk I/O key can omit the now-redundant rw bit.
+    pub disk_io_read: FastMap<DiskDeviceDimension, DiskAggregate>,
+    pub disk_io_write: FastMap<DiskDeviceDimension, DiskAggregate>,
     pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
     // Scheduler slices update both per-core utilization and sched_on_cpu
@@ -677,7 +686,25 @@ impl Buffer {
         bytes: u32,
         queue_depth: u32,
     ) {
-        if dim.rw() == 0 {
+        self.add_disk_io_with_device_key(
+            DiskDeviceDimension::new(dim.pid(), dim.client_type(), dim.device_id()),
+            dim.rw(),
+            latency_ns,
+            bytes,
+            queue_depth,
+        );
+    }
+
+    #[inline(always)]
+    pub(crate) fn add_disk_io_with_device_key(
+        &mut self,
+        dim: DiskDeviceDimension,
+        rw: u8,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+    ) {
+        if rw == 0 {
             record_disk(&mut self.disk_io_read, dim, latency_ns, bytes, queue_depth);
         } else {
             record_disk(&mut self.disk_io_write, dim, latency_ns, bytes, queue_depth);
@@ -963,7 +990,10 @@ mod tests {
 
         buf.add_disk_io(dim, 50_000, 4096, 3);
 
-        let disk = buf.disk_io_write.get(&dim).expect("disk aggregate exists");
+        let disk = buf
+            .disk_io_write
+            .get(&DiskDeviceDimension::new(1, 1, 259))
+            .expect("disk aggregate exists");
         assert_eq!(disk.latency_snapshot().count, 1);
         assert_eq!(disk.bytes_snapshot().sum, 4096);
         assert_eq!(disk.queue_depth_snapshot().sum, 3);

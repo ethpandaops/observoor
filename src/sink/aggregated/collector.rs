@@ -10,7 +10,7 @@ use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
 use super::aggregate::{CounterAggregate, CounterSnapshot, LatencyAggregate, LatencySnapshot};
 use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
 use super::dimension::{
-    direction_string, port_label_string, rw_string, BasicDimension, DiskDimension,
+    direction_string, port_label_string, rw_string, BasicDimension, DiskDeviceDimension,
     TCPMetricsDimension,
 };
 use super::metric::{
@@ -678,21 +678,36 @@ impl Collector {
         slot: SlotInfo,
     ) {
         let sampling = self.sampling_for_event(EventType::DiskIO);
-        self.collect_disk_metrics_map(batch, &buf.disk_io_read, window, slot, sampling);
-        self.collect_disk_metrics_map(batch, &buf.disk_io_write, window, slot, sampling);
+        self.collect_disk_metrics_map(
+            batch,
+            &buf.disk_io_read,
+            window,
+            slot,
+            sampling,
+            rw_string(0),
+        );
+        self.collect_disk_metrics_map(
+            batch,
+            &buf.disk_io_write,
+            window,
+            slot,
+            sampling,
+            rw_string(1),
+        );
     }
 
     #[inline(always)]
     fn collect_disk_metrics_map(
         &self,
         batch: &mut MetricBatch,
-        map: &FastMap<DiskDimension, super::aggregate::DiskAggregate>,
+        map: &FastMap<DiskDeviceDimension, super::aggregate::DiskAggregate>,
         window: WindowInfo,
         slot: SlotInfo,
         sampling: EventSamplingMetadata,
+        rw: &'static str,
     ) {
         for (dim, aggregate) in map.iter() {
-            let rw = Some(rw_string(dim.rw()));
+            let rw = Some(rw);
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
             let device_id = Some(dim.device_id());
