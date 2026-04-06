@@ -698,12 +698,7 @@ int BPF_KPROBE(kprobe_tcp_sendmsg, struct sock *sk, struct msghdr *msg,
         return 0;
 
     __u64 sk_key = (unsigned long)sk;
-    struct sock_owner_val sval = {
-        .pid = pid,
-        .tid = tid,
-        .client_type = ct,
-    };
-    bpf_map_update_elem(&sock_owner, &sk_key, &sval, BPF_ANY);
+    remember_sock_owner(sk_key, pid, tid, ct);
 
     // Stash socket metadata + TCP metrics for the kretprobe.
     // We capture TCP metrics here because sk is only available on entry.
@@ -770,12 +765,7 @@ int BPF_KPROBE(kprobe_tcp_recvmsg, struct sock *sk)
         return 0;
 
     __u64 sk_key = (unsigned long)sk;
-    struct sock_owner_val sval = {
-        .pid = pid,
-        .tid = tid,
-        .client_type = ct,
-    };
-    bpf_map_update_elem(&sock_owner, &sk_key, &sval, BPF_ANY);
+    remember_sock_owner(sk_key, pid, tid, ct);
 
     struct syscall_key key = { .pid_tgid = pid_tgid };
     struct net_recv_val val = {};

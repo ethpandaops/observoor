@@ -254,6 +254,33 @@ static __always_inline struct tracked_tid_val *lookup_tracked_tid(
     return bpf_map_lookup_elem(&tracked_tids, &tid);
 }
 
+// Helper: Remember socket ownership for later TCP retransmit/state probes.
+//
+// Long-lived sockets can hit tcp_sendmsg/tcp_recvmsg many times with the same
+// owner tuple. Skip the heavier LRU hash update when the cached mapping is
+// already correct.
+static __always_inline void remember_sock_owner(
+    __u64 sk_key,
+    __u32 pid,
+    __u32 tid,
+    __u8 client_type
+) {
+    struct sock_owner_val *existing =
+        bpf_map_lookup_elem(&sock_owner, &sk_key);
+    if (existing &&
+        existing->pid == pid &&
+        existing->tid == tid &&
+        existing->client_type == client_type)
+        return;
+
+    struct sock_owner_val owner = {
+        .pid = pid,
+        .tid = tid,
+        .client_type = client_type,
+    };
+    bpf_map_update_elem(&sock_owner, &sk_key, &owner, BPF_ANY);
+}
+
 // Helper: Fill common event header.
 static __always_inline void fill_header(
     struct event_header *hdr,
