@@ -17,7 +17,7 @@ use crate::config::{EventSamplingMode, ProbeGroup, SamplingConfig};
 
 use super::event::ClientType;
 use super::event::EventType;
-use super::parse::{parse_event, ParseError};
+use super::parse::{parse_event, parse_event_into_batch, ParseError};
 use super::{
     ErrorHandler, EventBatchHandler, EventHandler, ParsedEventBatch, ParsedEventBatchPool,
     RingbufStats, RingbufStatsHandler, Tracer, TrackedTidInfo, PARSED_EVENT_BATCH_SIZE,
@@ -402,9 +402,8 @@ async fn read_loop(
                             continue;
                         }
 
-                        match parse_event(data) {
-                            Ok(event) => {
-                                parsed_batch.push(event);
+                        match parse_event_into_batch(data, &mut parsed_batch) {
+                            Ok(()) => {
                                 if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
                                     dispatch_single_event_batch_handler(
                                         &mut parsed_batch,

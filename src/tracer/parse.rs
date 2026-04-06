@@ -8,6 +8,7 @@ use std::mem::size_of;
 
 use thiserror::Error;
 
+use super::ParsedEventBatch;
 use super::event::{
     BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
     NetIOTcpTxMetricsEvent, NetTransport, PageFaultEvent, ParsedEvent, SchedCombinedEvent,
@@ -135,9 +136,49 @@ pub enum ParseError {
     InvalidNetTransport { event_name: &'static str, raw: u8 },
 }
 
+#[cfg_attr(not(feature = "bpf"), allow(dead_code))]
+struct ParsedEventParts {
+    raw: Event,
+    typed: TypedEvent,
+    event_type_raw: u8,
+    client_type_raw: u8,
+    secondary_event_type_raw: u8,
+    secondary_client_type_raw: u8,
+}
+
 /// Parse a raw ring buffer sample into a [`ParsedEvent`].
 #[inline(always)]
 pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
+    let parts = parse_event_parts(data)?;
+    Ok(ParsedEvent {
+        raw: parts.raw,
+        typed: parts.typed,
+    })
+}
+
+/// Parse a raw ring buffer sample and append it directly into a batch.
+#[inline(always)]
+#[cfg_attr(not(feature = "bpf"), allow(dead_code))]
+pub(crate) fn parse_event_into_batch(
+    data: &[u8],
+    batch: &mut ParsedEventBatch,
+) -> Result<(), ParseError> {
+    let parts = parse_event_parts(data)?;
+    batch.push_counted(
+        ParsedEvent {
+            raw: parts.raw,
+            typed: parts.typed,
+        },
+        parts.event_type_raw,
+        parts.client_type_raw,
+        parts.secondary_event_type_raw,
+        parts.secondary_client_type_raw,
+    );
+    Ok(())
+}
+
+#[inline(always)]
+fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     if data.len() < HEADER_SIZE {
         return Err(ParseError::Truncated { size: data.len() });
     }
@@ -280,7 +321,21 @@ pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
         event
     };
 
-    Ok(ParsedEvent { raw: event, typed })
+    let (secondary_event_type_raw, secondary_client_type_raw) =
+        if let Some((secondary_event_type, secondary_client_type)) = secondary_logical_event {
+            (secondary_event_type as u8, secondary_client_type)
+        } else {
+            (0, 0)
+        };
+
+    Ok(ParsedEventParts {
+        raw: event,
+        typed,
+        event_type_raw,
+        client_type_raw,
+        secondary_event_type_raw,
+        secondary_client_type_raw,
+    })
 }
 
 // ---------------------------------------------------------------------------

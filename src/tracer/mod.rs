@@ -80,8 +80,17 @@ impl ParsedEventBatch {
 
     #[inline(always)]
     pub fn push(&mut self, event: ParsedEvent) {
-        self.record_event(&event);
-        self.events.push(event);
+        let event_type = event.raw.event_type as u8;
+        let client_type = event.raw.client_type();
+        let secondary_event_type = event.raw.secondary_event_type_raw();
+        let secondary_client_type = event.raw.secondary_client_type_raw();
+        self.push_counted(
+            event,
+            event_type,
+            client_type,
+            secondary_event_type,
+            secondary_client_type,
+        );
     }
 
     #[inline(always)]
@@ -102,29 +111,44 @@ impl ParsedEventBatch {
     }
 
     #[inline(always)]
-    fn record_event(&mut self, event: &ParsedEvent) {
-        let event_type = event.raw.event_type as usize;
-        // Safety: `EventType` is a closed repr(u8) enum and all `Event`s either
-        // come from the parser or normalize invalid client types at construction.
-        unsafe { *self.event_totals.get_unchecked_mut(event_type) += 1 };
+    pub(crate) fn push_counted(
+        &mut self,
+        event: ParsedEvent,
+        event_type: u8,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+    ) {
+        self.record_event_counts(
+            event_type,
+            client_type,
+            secondary_event_type,
+            secondary_client_type,
+        );
+        self.events.push(event);
+    }
 
-        let client_type = event.raw.client_type() as usize;
-        // Safety: `Event::new` clamps unknown raw values to `Unknown` and
-        // `parse_event` validates the incoming client discriminant.
-        unsafe { *self.client_totals.get_unchecked_mut(client_type) += 1 };
+    #[inline(always)]
+    fn record_event_counts(
+        &mut self,
+        event_type: u8,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+    ) {
+        // Safety: parser-validated event/client discriminants are bounded by
+        // `MAX_EVENT_TYPE`/`CLIENT_TYPE_CARDINALITY`; `Event::new` also
+        // normalizes invalid client types for test-constructed events.
+        unsafe { *self.event_totals.get_unchecked_mut(event_type as usize) += 1 };
+        unsafe { *self.client_totals.get_unchecked_mut(client_type as usize) += 1 };
 
-        let secondary_event_type = event.raw.secondary_event_type_raw() as usize;
         if secondary_event_type == 0 {
             return;
         }
 
         // Safety: secondary event tags are only sourced from `EventType`.
-        unsafe { *self.event_totals.get_unchecked_mut(secondary_event_type) += 1 };
-
-        let secondary_client_type = event.raw.secondary_client_type_raw() as usize;
-        // Safety: `with_secondary_logical_event` normalizes invalid client
-        // types to `Unknown` before storing them.
-        unsafe { *self.client_totals.get_unchecked_mut(secondary_client_type) += 1 };
+        unsafe { *self.event_totals.get_unchecked_mut(secondary_event_type as usize) += 1 };
+        unsafe { *self.client_totals.get_unchecked_mut(secondary_client_type as usize) += 1 };
     }
 
     pub fn recycle(mut self) {
