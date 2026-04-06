@@ -808,7 +808,10 @@ impl AggregatedSink {
     }
 
     #[inline(always)]
-    fn process_event_inner<const WITH_SCHEDULER_STATE: bool>(
+    fn process_event_inner<
+        const WITH_SCHEDULER_STATE: bool,
+        const WITH_NETWORK_PORT_LABELS: bool,
+    >(
         buf: &mut Buffer,
         event: &ParsedEvent,
         dimensions: &ResolvedDimensions<'_>,
@@ -851,66 +854,50 @@ impl AggregatedSink {
             }
 
             TypedEvent::NetIOTx(e) => {
-                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
-                    build_tcp_metrics_dimension_with_port_label_cached(
-                        basic_dim,
-                        e.transport,
-                        e.local_port,
-                        e.remote_port,
-                        port_label_map,
-                        port_label_cache,
-                    )
-                } else {
-                    TCPMetricsDimension::from_basic(basic_dim, 0)
-                };
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    e.transport,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
                 buf.add_net_io_tx(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::NetIORx(e) => {
-                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
-                    build_tcp_metrics_dimension_with_port_label_cached(
-                        basic_dim,
-                        e.transport,
-                        e.local_port,
-                        e.remote_port,
-                        port_label_map,
-                        port_label_cache,
-                    )
-                } else {
-                    TCPMetricsDimension::from_basic(basic_dim, 0)
-                };
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    e.transport,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
                 buf.add_net_io_rx(net_dim, i64::from(e.bytes));
             }
 
             TypedEvent::NetIOTcpTxMetrics(e) => {
-                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
-                    build_tcp_metrics_dimension_with_port_label_cached(
-                        basic_dim,
-                        NetTransport::Tcp as u8,
-                        e.local_port,
-                        e.remote_port,
-                        port_label_map,
-                        port_label_cache,
-                    )
-                } else {
-                    TCPMetricsDimension::from_basic(basic_dim, 0)
-                };
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    NetTransport::Tcp as u8,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
                 buf.add_net_io_with_tcp_metrics_dim(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = if let Some(port_label_map) = dimensions.network_port_label_map {
-                    build_tcp_metrics_dimension_with_port_label_cached(
-                        basic_dim,
-                        NetTransport::Tcp as u8,
-                        e.local_port,
-                        e.remote_port,
-                        port_label_map,
-                        port_label_cache,
-                    )
-                } else {
-                    TCPMetricsDimension::from_basic(basic_dim, 0)
-                };
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    NetTransport::Tcp as u8,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
                 buf.add_tcp_retransmit_dim(net_dim, i64::from(e.bytes));
             }
 
@@ -1024,13 +1011,41 @@ impl AggregatedSink {
         }
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    fn process_event_resolved<const WITH_SCHEDULER_STATE: bool>(
+        buf: &mut Buffer,
+        event: &ParsedEvent,
+        dimensions: &ResolvedDimensions<'_>,
+        scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
+    ) {
+        if dimensions.network_port_label_map.is_some() {
+            Self::process_event_inner::<WITH_SCHEDULER_STATE, true>(
+                buf,
+                event,
+                dimensions,
+                scheduler_state,
+                port_label_cache,
+            );
+        } else {
+            Self::process_event_inner::<WITH_SCHEDULER_STATE, false>(
+                buf,
+                event,
+                dimensions,
+                scheduler_state,
+                port_label_cache,
+            );
+        }
+    }
+
     /// Routes a parsed event to the appropriate buffer aggregator.
     #[cfg(test)]
     fn process_event(buf: &mut Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
         let mut port_label_cache = PortLabelResolveCache::default();
         let resolved_dimensions = ResolvedDimensions::from_config(dimensions);
         let mut scheduler_state = SchedulerWindowState::default();
-        Self::process_event_inner::<false>(
+        Self::process_event_resolved::<false>(
             buf,
             event,
             &resolved_dimensions,
@@ -1047,14 +1062,26 @@ impl AggregatedSink {
         scheduler_state: &mut SchedulerWindowState,
         port_label_cache: &mut PortLabelResolveCache,
     ) {
-        for event in &events.events {
-            Self::process_event_inner::<true>(
-                buf,
-                event,
-                dimensions,
-                scheduler_state,
-                port_label_cache,
-            );
+        if dimensions.network_port_label_map.is_some() {
+            for event in &events.events {
+                Self::process_event_inner::<true, true>(
+                    buf,
+                    event,
+                    dimensions,
+                    scheduler_state,
+                    port_label_cache,
+                );
+            }
+        } else {
+            for event in &events.events {
+                Self::process_event_inner::<true, false>(
+                    buf,
+                    event,
+                    dimensions,
+                    scheduler_state,
+                    port_label_cache,
+                );
+            }
         }
     }
 
@@ -1621,6 +1648,29 @@ fn build_tcp_metrics_dimension_with_port_label_cached(
     TCPMetricsDimension::from_basic(basic, port_label)
 }
 
+#[inline(always)]
+fn build_tcp_metrics_dimension<const WITH_PORT_LABELS: bool>(
+    basic: BasicDimension,
+    transport: u8,
+    local_port: u16,
+    remote_port: u16,
+    port_label_map: Option<&crate::agent::ports::PortLabelMap>,
+    port_label_cache: &mut PortLabelResolveCache,
+) -> TCPMetricsDimension {
+    if WITH_PORT_LABELS {
+        build_tcp_metrics_dimension_with_port_label_cached(
+            basic,
+            transport,
+            local_port,
+            remote_port,
+            port_label_map.expect("WITH_PORT_LABELS requires a port label map"),
+            port_label_cache,
+        )
+    } else {
+        TCPMetricsDimension::from_basic(basic, 0)
+    }
+}
+
 /// Creates a NetworkDimension for TCP retransmit events.
 #[cfg_attr(not(test), allow(dead_code))]
 fn build_network_dimension_from_tcp_retransmit(
@@ -1779,7 +1829,7 @@ mod tests {
     ) {
         let mut port_label_cache = PortLabelResolveCache::default();
         let resolved_dimensions = ResolvedDimensions::from_config(dims);
-        AggregatedSink::process_event_inner::<true>(
+        AggregatedSink::process_event_resolved::<true>(
             buf,
             event,
             &resolved_dimensions,
