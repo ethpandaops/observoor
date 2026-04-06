@@ -3,10 +3,10 @@ use super::histogram::{Histogram, NUM_BUCKETS};
 /// Tracks latency statistics with histogram.
 /// Used for syscalls, disk I/O latency, scheduler events, memory latency.
 pub struct LatencyAggregate {
-    sum: i64,
+    sum: u64,
     count: u32,
-    min: i64,
-    max: i64,
+    min: u64,
+    max: u64,
     histogram: Histogram,
 }
 
@@ -16,8 +16,8 @@ impl LatencyAggregate {
         Self {
             sum: 0,
             count: 0,
-            min: i64::MAX,
-            max: i64::MIN,
+            min: u64::MAX,
+            max: 0,
             histogram: Histogram::new(),
         }
     }
@@ -25,15 +25,14 @@ impl LatencyAggregate {
     /// Records a latency value in nanoseconds.
     #[inline(always)]
     pub fn record(&mut self, value_ns: u64) {
-        let val = value_ns as i64;
-        self.sum += val;
+        self.sum += value_ns;
         self.count += 1;
         self.histogram.record(value_ns);
-        if val < self.min {
-            self.min = val;
+        if value_ns < self.min {
+            self.min = value_ns;
         }
-        if val > self.max {
-            self.max = val;
+        if value_ns > self.max {
+            self.max = value_ns;
         }
     }
 
@@ -44,15 +43,17 @@ impl LatencyAggregate {
             return;
         }
 
-        self.sum += snapshot.sum;
+        self.sum += latency_i64_to_u64(snapshot.sum);
         self.count += snapshot.count;
         self.histogram.merge_snapshot(&snapshot.histogram);
 
-        if snapshot.min < self.min {
-            self.min = snapshot.min;
+        let snapshot_min = latency_i64_to_u64(snapshot.min);
+        if snapshot_min < self.min {
+            self.min = snapshot_min;
         }
-        if snapshot.max > self.max {
-            self.max = snapshot.max;
+        let snapshot_max = latency_i64_to_u64(snapshot.max);
+        if snapshot_max > self.max {
+            self.max = snapshot_max;
         }
     }
 
@@ -70,10 +71,10 @@ impl LatencyAggregate {
         }
 
         LatencySnapshot {
-            sum: self.sum,
+            sum: latency_u64_to_i64(self.sum),
             count,
-            min: min_val,
-            max: max_val,
+            min: latency_u64_to_i64(min_val),
+            max: latency_u64_to_i64(max_val),
             histogram: self.histogram.snapshot(),
         }
     }
@@ -83,6 +84,17 @@ impl Default for LatencyAggregate {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[inline(always)]
+fn latency_u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[inline(always)]
+fn latency_i64_to_u64(value: i64) -> u64 {
+    debug_assert!(value >= 0);
+    u64::try_from(value).unwrap_or(0)
 }
 
 /// Point-in-time view of latency statistics.
