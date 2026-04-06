@@ -378,20 +378,16 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     let timestamp_ns = u64::from_le(header.timestamp_ns);
     let pid = u32::from_le(header.pid);
     let tid = u32::from_le(header.tid);
-    let event = if secondary_event_type_raw == 0 {
-        Event::new_validated(timestamp_ns, pid, tid, event_type, client_type_raw)
-    } else {
-        Event::new_validated_with_secondary(
-            timestamp_ns,
-            pid,
-            tid,
-            event_type,
-            client_type_raw,
-            secondary_event_type_raw,
-            secondary_client_type_raw,
-        )
-    }
-    .with_scheduler_cpu_id(scheduler_cpu_id);
+    let event = Event::new_validated_with_secondary_and_cpu(
+        timestamp_ns,
+        pid,
+        tid,
+        event_type,
+        client_type_raw,
+        secondary_event_type_raw,
+        secondary_client_type_raw,
+        scheduler_cpu_id,
+    );
     Ok(ParsedEventParts {
         raw: event,
         typed,
@@ -422,7 +418,16 @@ fn parse_compact_fd_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     };
 
     Ok(ParsedEventParts {
-        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        raw: Event::new_validated_with_secondary_and_cpu(
+            0,
+            u32::from_le(raw.pid),
+            0,
+            event_type,
+            client_type_raw,
+            0,
+            0,
+            0,
+        ),
         typed,
         event_type_raw: raw.event_type,
         client_type_raw,

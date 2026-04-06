@@ -385,13 +385,13 @@ impl Event {
         event_type: EventType,
         client_type: u8,
     ) -> Self {
-        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
-        Self::new_validated_with_secondary(
+        Self::new_validated_with_secondary_and_cpu(
             timestamp_ns,
             pid,
             tid,
             event_type,
             client_type,
+            0,
             0,
             0,
         )
@@ -407,14 +407,44 @@ impl Event {
         secondary_event_type: u8,
         secondary_client_type: u8,
     ) -> Self {
+        Self::new_validated_with_secondary_and_cpu(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            client_type,
+            secondary_event_type,
+            secondary_client_type,
+            0,
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated_with_secondary_and_cpu(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+        scheduler_cpu_id: u32,
+    ) -> Self {
         debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
         debug_assert!(secondary_event_type <= MAX_EVENT_TYPE as u8);
         debug_assert!(secondary_client_type <= MAX_CLIENT_TYPE as u8);
 
-        let mut event = Self::new_sanitized(timestamp_ns, pid, tid, event_type, client_type);
-        event.secondary_event_type = secondary_event_type;
-        event.secondary_client_type = secondary_client_type;
-        event
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid)
+                | (u64::from(client_type) << 32)
+                | (u64::from(scheduler_cpu_id & 0x00FF_FFFF) << 40),
+            tid,
+            scheduler_cpu_id_high: (scheduler_cpu_id >> 24) as u8,
+            event_type,
+            secondary_event_type,
+            secondary_client_type,
+        }
     }
 
     #[inline(always)]
@@ -694,9 +724,14 @@ mod tests {
 
     #[test]
     fn test_event_scheduler_cpu_id_preserves_basic_dimension() {
-        let event =
-            Event::new(1, 10, 11, EventType::SchedSwitch, ClientType::Lighthouse as u8)
-                .with_scheduler_cpu_id(0xDEADBEEF);
+        let event = Event::new(
+            1,
+            10,
+            11,
+            EventType::SchedSwitch,
+            ClientType::Lighthouse as u8,
+        )
+        .with_scheduler_cpu_id(0xDEADBEEF);
 
         assert_eq!(event.pid(), 10);
         assert_eq!(event.client_type(), ClientType::Lighthouse as u8);
