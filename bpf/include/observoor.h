@@ -108,9 +108,14 @@ struct page_fault_event {
     struct event_header hdr;
 };
 
-// FD event (24 bytes total).
+// FD event (8 bytes total).
+// Userspace only counts open/close events, so keep just the fields needed to
+// reconstruct the BasicDimension and event tag.
 struct fd_event {
-    struct event_header hdr;
+    __u32 pid;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  pad[2];
 };
 
 // Scheduler runqueue event (40 bytes total).

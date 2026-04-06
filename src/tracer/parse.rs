@@ -29,6 +29,15 @@ struct RawEventHeader {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
+struct RawCompactFdEvent {
+    pid: u32,
+    event_type: u8,
+    client_type: u8,
+    pad: [u8; 2],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
 struct RawSyscallPayload {
     latency_ns: u32,
 }
@@ -114,8 +123,10 @@ struct RawSwapPayload {
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
+const COMPACT_FD_EVENT_SIZE: usize = size_of::<RawCompactFdEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
+const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -180,6 +191,9 @@ pub(crate) fn parse_event_into_batch(
 #[inline(always)]
 fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     if data.len() < HEADER_SIZE {
+        if data.len() == COMPACT_FD_EVENT_SIZE {
+            return parse_compact_fd_event(data);
+        }
         return Err(ParseError::Truncated { size: data.len() });
     }
 
@@ -385,6 +399,35 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
         client_type_raw,
         secondary_event_type_raw,
         secondary_client_type_raw,
+    })
+}
+
+#[inline(always)]
+fn parse_compact_fd_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_FD_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_FD_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactFdEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    let (event_type, typed) = match raw.event_type {
+        11 => (EventType::FDOpen, TypedEvent::FDOpen),
+        12 => (EventType::FDClose, TypedEvent::FDClose),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
+        }
+    };
+
+    Ok(ParsedEventParts {
+        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        event_type_raw: raw.event_type,
+        client_type_raw,
+        secondary_event_type_raw: 0,
+        secondary_client_type_raw: 0,
     })
 }
 
@@ -950,24 +993,34 @@ mod tests {
 
     #[test]
     fn test_fd_open_header_only() {
-        let data = header(9_000_000, 108, 208, 11, 1); // FDOpen, Geth
+        let mut data = Vec::with_capacity(COMPACT_FD_EVENT_SIZE);
+        data.extend_from_slice(&108u32.to_le_bytes());
+        data.push(11); // FDOpen
+        data.push(1); // Geth
+        data.extend_from_slice(&[0u8; 2]);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::FDOpen = &parsed.typed else {
             panic!("expected FDOpen");
         };
         assert_eq!(parsed.raw.pid(), 108);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     #[test]
     fn test_fd_close_header_only() {
-        let data = header(10_000_000, 109, 209, 12, 4); // FDClose, Nethermind
+        let mut data = Vec::with_capacity(COMPACT_FD_EVENT_SIZE);
+        data.extend_from_slice(&109u32.to_le_bytes());
+        data.push(12); // FDClose
+        data.push(4); // Nethermind
+        data.extend_from_slice(&[0u8; 2]);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::FDClose = &parsed.typed else {
             panic!("expected FDClose");
         };
-        assert_eq!(parsed.raw.tid, 209);
+        assert_eq!(parsed.raw.pid(), 109);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     // -- Block merge --

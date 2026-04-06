@@ -470,7 +470,10 @@ int trace_sys_exit_openat(struct trace_event_raw_sys_exit *ctx)
     if (!e)
         return 0;
 
-    fill_header(&e->hdr, EVENT_FD_OPEN, ct);
+    e->pid = pid;
+    e->event_type = EVENT_FD_OPEN;
+    e->client_type = ct;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
@@ -493,7 +496,10 @@ int trace_sys_enter_close(struct trace_event_raw_sys_enter *ctx)
     if (!e)
         return 0;
 
-    fill_header(&e->hdr, EVENT_FD_CLOSE, ct);
+    e->pid = pid;
+    e->event_type = EVENT_FD_CLOSE;
+    e->client_type = ct;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
     bpf_ringbuf_submit(e, 0);
     return 0;
 }
