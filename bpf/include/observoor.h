@@ -46,10 +46,11 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Syscall event (28 bytes total).
+// Syscall event (24 bytes total).
+// Latency is stored in hdr.pad[0..3] (little-endian) so the hottest event
+// family stays header-only on the ring buffer.
 struct syscall_event {
     struct event_header hdr;
-    __u32 latency_ns;
 };
 
 // Disk I/O event (44 bytes total).

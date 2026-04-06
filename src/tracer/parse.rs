@@ -36,12 +36,6 @@ struct RawCompactFdEvent {
     pad: [u8; 2],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct RawSyscallPayload {
-    latency_ns: u32,
-}
-
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawDiskIOPayload {
@@ -218,35 +212,35 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 0,
                 0,
                 0,
-                TypedEvent::SyscallRead(parse_syscall(payload)?),
+                TypedEvent::SyscallRead(parse_syscall(&header)),
             ),
             2 => (
                 EventType::SyscallWrite,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallWrite(parse_syscall(payload)?),
+                TypedEvent::SyscallWrite(parse_syscall(&header)),
             ),
             3 => (
                 EventType::SyscallFutex,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallFutex(parse_syscall(payload)?),
+                TypedEvent::SyscallFutex(parse_syscall(&header)),
             ),
             4 => (
                 EventType::SyscallMmap,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallMmap(parse_syscall(payload)?),
+                TypedEvent::SyscallMmap(parse_syscall(&header)),
             ),
             5 => (
                 EventType::SyscallEpollWait,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallEpollWait(parse_syscall(payload)?),
+                TypedEvent::SyscallEpollWait(parse_syscall(&header)),
             ),
             6 => (
                 EventType::DiskIO,
@@ -302,21 +296,21 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 0,
                 0,
                 0,
-                TypedEvent::SyscallFsync(parse_syscall(payload)?),
+                TypedEvent::SyscallFsync(parse_syscall(&header)),
             ),
             14 => (
                 EventType::SyscallFdatasync,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallFdatasync(parse_syscall(payload)?),
+                TypedEvent::SyscallFdatasync(parse_syscall(&header)),
             ),
             15 => (
                 EventType::SyscallPwrite,
                 0,
                 0,
                 0,
-                TypedEvent::SyscallPwrite(parse_syscall(payload)?),
+                TypedEvent::SyscallPwrite(parse_syscall(&header)),
             ),
             16 => (
                 EventType::SchedRunqueue,
@@ -504,15 +498,14 @@ fn decode_u32_from_pad(pad: &[u8; 6], offset: usize) -> u32 {
 // Per-event-type parsers
 // ---------------------------------------------------------------------------
 
-/// Syscall events: types 1-5, 13-15. Payload: 4 bytes.
+/// Syscall events: types 1-5, 13-15.
 ///
-/// The kernel emits latency-only syscall payloads so the hottest event family
-/// stays small on the ring buffer and in tracer batch handoff.
-fn parse_syscall(data: &[u8]) -> Result<SyscallEvent, ParseError> {
-    let raw = read_payload::<RawSyscallPayload>(data, "syscall event")?;
-    Ok(SyscallEvent {
-        latency_ns: u64::from(u32::from_le(raw.latency_ns)),
-    })
+/// The kernel stores the 32-bit latency directly in `hdr.pad[0..3]`, keeping
+/// the hottest event family header-only on the ring buffer.
+fn parse_syscall(header: &RawEventHeader) -> SyscallEvent {
+    SyscallEvent {
+        latency_ns: u64::from(decode_u32_from_pad(&header.pad, 0)),
+    }
 }
 
 /// Disk I/O event: type 6. Payload: 20 bytes.
@@ -725,8 +718,8 @@ mod tests {
 
     #[test]
     fn test_header_only_truncates_payload() {
-        // SyscallRead needs 8 bytes of payload, none provided.
-        let data = header(1000, 42, 43, 1, 1);
+        // DiskIO still requires a payload; a bare header should fail.
+        let data = header(1000, 42, 43, 6, 1);
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::PayloadTruncated { .. }
@@ -734,15 +727,15 @@ mod tests {
     }
 
     #[test]
-    fn test_syscall_short_payload() {
+    fn test_syscall_header_only() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 2]); // need 4
-        assert!(matches!(
-            parse_event(&data).unwrap_err(),
-            ParseError::PayloadTruncated {
-                event_name: "syscall event"
-            }
-        ));
+        set_header_pad_u32(&mut data, 0, 1_234);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
+        };
+        assert_eq!(e.latency_ns, 1_234);
     }
 
     #[test]
@@ -763,7 +756,7 @@ mod tests {
     #[test]
     fn test_syscall_read() {
         let mut data = header(1_000_000, 100, 200, 1, 1); // SyscallRead, Geth
-        data.extend_from_slice(&500_000u32.to_le_bytes());
+        set_header_pad_u32(&mut data, 0, 500_000);
 
         let parsed = parse_event(&data).unwrap();
         assert_header(&parsed.raw, 1_000_000, 100, 200, EventType::SyscallRead, 1);
@@ -776,7 +769,7 @@ mod tests {
     #[test]
     fn test_syscall_write_negative_return() {
         let mut data = header(2_000_000, 101, 201, 2, 2); // SyscallWrite, Reth
-        data.extend_from_slice(&750_000u32.to_le_bytes());
+        set_header_pad_u32(&mut data, 0, 750_000);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::SyscallWrite(e) = &parsed.typed else {
@@ -790,7 +783,7 @@ mod tests {
     fn test_all_syscall_types_parse() {
         for event_type in [1u8, 2, 3, 4, 5, 13, 14, 15] {
             let mut data = header(1000, 42, 43, event_type, 0);
-            data.extend_from_slice(&[0u8; 4]);
+            set_header_pad_u32(&mut data, 0, 1);
             let parsed = parse_event(&data).expect("syscall should parse");
             let matches_expected_variant = match event_type {
                 1 => matches!(parsed.typed, TypedEvent::SyscallRead(_)),
@@ -1162,7 +1155,7 @@ mod tests {
     #[test]
     fn test_extra_trailing_data_ignored() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 4]); // syscall payload
+        set_header_pad_u32(&mut data, 0, 1);
         data.extend_from_slice(&[0xFF; 100]); // trailing garbage
 
         assert!(parse_event(&data).is_ok());
@@ -1172,7 +1165,7 @@ mod tests {
     fn test_all_client_types_accepted() {
         for ct in 0..=11u8 {
             let mut data = header(1000, 42, 43, 1, ct); // SyscallRead
-            data.extend_from_slice(&[0u8; 4]);
+            set_header_pad_u32(&mut data, 0, 1);
             assert!(
                 parse_event(&data).is_ok(),
                 "client type {} should be accepted",
@@ -1201,11 +1194,8 @@ mod tests {
         assert_eq!(e.to_string(), "unknown event type: 99");
 
         let e = ParseError::PayloadTruncated {
-            event_name: "syscall event",
+            event_name: "disk IO event",
         };
-        assert_eq!(
-            e.to_string(),
-            "reading syscall event: unexpected end of data"
-        );
+        assert_eq!(e.to_string(), "reading disk IO event: unexpected end of data");
     }
 }

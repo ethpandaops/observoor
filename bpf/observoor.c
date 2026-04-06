@@ -103,7 +103,7 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_READ, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -151,7 +151,7 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_WRITE, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -199,7 +199,7 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -247,7 +247,7 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_MMAP, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -295,7 +295,7 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -343,7 +343,7 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -391,7 +391,7 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -439,7 +439,7 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
         goto cleanup;
 
     fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, val->client_type);
-    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts);
+    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
 
     bpf_ringbuf_submit(e, 0);
 

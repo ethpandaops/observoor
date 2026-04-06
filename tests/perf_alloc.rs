@@ -32,7 +32,7 @@ fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u
 
 fn syscall_payload() -> Vec<u8> {
     let mut data = header(123_456_789, 1337, 1337, EventType::SyscallFutex as u8, 1);
-    data.extend_from_slice(&2_500u32.to_le_bytes());
+    data[HEADER_SIZE - 6..HEADER_SIZE - 2].copy_from_slice(&2_500u32.to_le_bytes());
     data
 }
 
