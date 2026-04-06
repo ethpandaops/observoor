@@ -8,13 +8,13 @@ use std::mem::size_of;
 
 use thiserror::Error;
 
-use super::ParsedEventBatch;
 use super::event::{
-    BlockMergeEvent, Direction, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
+    BlockMergeEvent, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
     NetIOTcpTxMetricsEvent, NetTransport, PageFaultEvent, ParsedEvent, SchedCombinedEvent,
     SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TypedEvent,
     MAX_CLIENT_TYPE,
 };
+use super::ParsedEventBatch;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -240,7 +240,7 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
                 EventType::NetRX,
                 0,
                 0,
-                TypedEvent::NetIORx(parse_net_io(payload, Direction::RX as u8, &header)?),
+                TypedEvent::NetIORx(parse_net_rx(payload, &header)?),
             ),
             9 => match parse_sched_variant(&header, payload)? {
                 TypedEvent::SchedCombined(event) => (
@@ -331,13 +331,7 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     let pid = u32::from_le(header.pid);
     let tid = u32::from_le(header.tid);
     let event = if secondary_event_type_raw == 0 {
-        Event::new_validated(
-            timestamp_ns,
-            pid,
-            tid,
-            event_type,
-            client_type_raw,
-        )
+        Event::new_validated(timestamp_ns, pid, tid, event_type, client_type_raw)
     } else {
         Event::new_validated_with_secondary(
             timestamp_ns,
@@ -481,13 +475,9 @@ fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, Pars
 }
 
 /// Net I/O RX event payload.
-/// transport is stored in `hdr.pad[0]`, and `direction` only drives
-/// local/remote port normalization.
-fn parse_net_io(
-    data: &[u8],
-    direction: u8,
-    header: &RawEventHeader,
-) -> Result<NetIOEvent, ParseError> {
+/// transport is stored in `hdr.pad[0]`, and ports are normalized to
+/// local=destination, remote=source for receive-side events.
+fn parse_net_rx(data: &[u8], header: &RawEventHeader) -> Result<NetIOEvent, ParseError> {
     let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
     let transport_raw = header.pad[0];
     if transport_raw > NetTransport::Udp as u8 {
@@ -496,16 +486,8 @@ fn parse_net_io(
 
     Ok(NetIOEvent {
         bytes: u32::from_le(raw.bytes),
-        local_port: if direction == Direction::TX as u8 {
-            u16::from_le(raw.src_port)
-        } else {
-            u16::from_le(raw.dst_port)
-        },
-        remote_port: if direction == Direction::TX as u8 {
-            u16::from_le(raw.dst_port)
-        } else {
-            u16::from_le(raw.src_port)
-        },
+        local_port: u16::from_le(raw.dst_port),
+        remote_port: u16::from_le(raw.src_port),
         transport: transport_raw,
     })
 }
