@@ -57,11 +57,10 @@ struct syscall_event {
     __u8  client_type;
 } __attribute__((packed));
 
-// Compact generic network I/O event (23-byte populated prefix).
-// Aggregation uses timestamp + pid + client + transport + ports + bytes but
-// never reads tid, so keep the hot UDP/TCP RX paths smaller on the ring buffer.
+// Compact generic network I/O event (15-byte populated prefix).
+// Aggregation only uses pid + client + transport + ports + bytes, so drop the
+// unused timestamp/tid fields from the hottest UDP/TCP RX/TX records.
 struct compact_net_io_event {
-    __u64 timestamp_ns;
     __u32 pid;
     __u32 bytes;
     __u16 sport;
@@ -69,7 +68,7 @@ struct compact_net_io_event {
     __u8  event_type;
     __u8  client_type;
     __u8  transport;
-};
+} __attribute__((packed));
 
 // Compact disk I/O event (35-byte populated prefix).
 // Aggregation uses timestamp + pid + client + latency + device + queue depth
@@ -105,16 +104,18 @@ struct net_io_event {
     __u16 dport;
 };
 
-// TCP TX network I/O event with inline metrics (40 bytes total).
-// Transport is implicitly TCP for this specialized event type.
-struct net_io_metrics_event {
-    struct event_header hdr;
+// Compact TCP TX event with inline metrics (22-byte populated prefix).
+// Transport is implicitly TCP, and aggregation does not read timestamp/tid.
+struct compact_net_io_metrics_event {
+    __u32 pid;
     __u32 bytes;
     __u16 sport;
     __u16 dport;
     __u32 srtt_us;      // Smoothed RTT
     __u32 snd_cwnd;     // Congestion window
-};
+    __u8  event_type;
+    __u8  client_type;
+} __attribute__((packed));
 
 // Scheduler event (32 bytes total).
 // voluntary is stored in hdr.pad[0], cpu_id in hdr.pad[1..4] (little-endian).

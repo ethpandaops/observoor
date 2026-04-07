@@ -48,7 +48,6 @@ struct RawCompactSyscallEvent {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawCompactNetIOEvent {
-    timestamp_ns: u64,
     pid: u32,
     bytes: u32,
     src_port: u16,
@@ -56,6 +55,19 @@ struct RawCompactNetIOEvent {
     event_type: u8,
     client_type: u8,
     transport: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactNetIOMetricsEvent {
+    pid: u32,
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    srtt_us: u32,
+    cwnd: u32,
+    event_type: u8,
+    client_type: u8,
 }
 
 #[repr(C, packed)]
@@ -156,12 +168,14 @@ const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 const COMPACT_FD_EVENT_SIZE: usize = size_of::<RawCompactFdEvent>();
 const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
 const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
+const COMPACT_NET_IO_METRICS_EVENT_SIZE: usize = size_of::<RawCompactNetIOMetricsEvent>();
 const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
 const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
-const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 23);
+const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
+const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
 const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 35);
 
 /// Errors that can occur during event parsing.
@@ -238,6 +252,9 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     }
     if data.len() == COMPACT_NET_IO_EVENT_SIZE {
         return parse_compact_net_io_event(data);
+    }
+    if data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE {
+        return parse_compact_net_io_metrics_event(data);
     }
     if data.len() == COMPACT_DISK_IO_EVENT_SIZE {
         return parse_compact_disk_io_event(data);
@@ -595,14 +612,45 @@ fn parse_compact_net_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseErro
     };
 
     Ok(ParsedEventParts {
+        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        event_type_raw: raw.event_type,
+        client_type_raw,
+        secondary_event_type_raw: 0,
+        secondary_client_type_raw: 0,
+    })
+}
+
+#[inline(always)]
+fn parse_compact_net_io_metrics_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_NET_IO_METRICS_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactNetIOMetricsEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    if raw.event_type != EventType::NetTX as u8 {
+        return Err(ParseError::Truncated { size: data.len() });
+    }
+
+    Ok(ParsedEventParts {
         raw: Event::new_validated(
-            u64::from_le(raw.timestamp_ns),
+            0,
             u32::from_le(raw.pid),
             0,
-            event_type,
+            EventType::NetTX,
             client_type_raw,
         ),
-        typed,
+        typed: TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+            bytes: u32::from_le(raw.bytes),
+            local_port: u16::from_le(raw.src_port),
+            remote_port: u16::from_le(raw.dst_port),
+            srtt_us: u32::from_le(raw.srtt_us),
+            cwnd: u32::from_le(raw.cwnd),
+        }),
         event_type_raw: raw.event_type,
         client_type_raw,
         secondary_event_type_raw: 0,
@@ -897,7 +945,6 @@ mod tests {
     }
 
     fn compact_net_io(
-        ts: u64,
         pid: u32,
         event_type: u8,
         client_type: u8,
@@ -907,7 +954,6 @@ mod tests {
         dst_port: u16,
     ) -> Vec<u8> {
         let mut buf = Vec::with_capacity(COMPACT_NET_IO_EVENT_SIZE);
-        buf.extend_from_slice(&ts.to_le_bytes());
         buf.extend_from_slice(&pid.to_le_bytes());
         buf.extend_from_slice(&bytes.to_le_bytes());
         buf.extend_from_slice(&src_port.to_le_bytes());
@@ -915,6 +961,27 @@ mod tests {
         buf.push(event_type);
         buf.push(client_type);
         buf.push(transport);
+        buf
+    }
+
+    fn compact_net_io_metrics(
+        pid: u32,
+        client_type: u8,
+        bytes: u32,
+        src_port: u16,
+        dst_port: u16,
+        srtt_us: u32,
+        cwnd: u32,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_NET_IO_METRICS_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&src_port.to_le_bytes());
+        buf.extend_from_slice(&dst_port.to_le_bytes());
+        buf.extend_from_slice(&srtt_us.to_le_bytes());
+        buf.extend_from_slice(&cwnd.to_le_bytes());
+        buf.push(EventType::NetTX as u8);
+        buf.push(client_type);
         buf
     }
 
@@ -1044,7 +1111,6 @@ mod tests {
     #[test]
     fn test_compact_net_tx_no_metrics() {
         let data = compact_net_io(
-            4_500_000,
             103,
             EventType::NetTX as u8,
             1,
@@ -1055,7 +1121,7 @@ mod tests {
         );
 
         let parsed = parse_event(&data).unwrap();
-        assert_eq!(parsed.raw.timestamp_ns, 4_500_000);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
         assert_eq!(parsed.raw.pid(), 103);
         assert_eq!(parsed.raw.tid, 0);
         let TypedEvent::NetIOTx(e) = &parsed.typed else {
@@ -1070,7 +1136,6 @@ mod tests {
     #[test]
     fn test_compact_net_rx_no_metrics() {
         let data = compact_net_io(
-            5_000_000,
             104,
             EventType::NetRX as u8,
             7,
@@ -1081,7 +1146,7 @@ mod tests {
         );
 
         let parsed = parse_event(&data).unwrap();
-        assert_eq!(parsed.raw.timestamp_ns, 5_000_000);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
         assert_eq!(parsed.raw.pid(), 104);
         assert_eq!(parsed.raw.tid, 0);
         let TypedEvent::NetIORx(e) = &parsed.typed else {
@@ -1091,6 +1156,24 @@ mod tests {
         assert_eq!(e.bytes, 2048);
         assert_eq!(e.local_port, 12345);
         assert_eq!(e.remote_port, 443);
+    }
+
+    #[test]
+    fn test_compact_net_tx_with_metrics() {
+        let data = compact_net_io_metrics(105, 2, 4096, 30303, 9000, 50_000, 10);
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 105);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIOTcpTxMetrics(e) = &parsed.typed else {
+            panic!("expected NetIOTcpTxMetrics");
+        };
+        assert_eq!(e.bytes, 4096);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
+        assert_eq!(e.srtt_us, 50_000);
+        assert_eq!(e.cwnd, 10);
     }
 
     #[test]

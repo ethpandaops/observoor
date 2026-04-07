@@ -23,7 +23,7 @@ const struct compact_net_io_event *__unused_compact_net_io_ev __attribute__((unu
 const struct compact_disk_io_event *__unused_compact_disk_io_ev __attribute__((unused));
 const struct disk_io_event    *__unused_disk_io_ev    __attribute__((unused));
 const struct net_io_event     *__unused_net_io_ev     __attribute__((unused));
-const struct net_io_metrics_event *__unused_net_io_metrics_ev __attribute__((unused));
+const struct compact_net_io_metrics_event *__unused_net_io_metrics_ev __attribute__((unused));
 const struct sched_event      *__unused_sched_ev      __attribute__((unused));
 const struct sched_switch_runqueue_event *__unused_sched_combo_ev __attribute__((unused));
 const struct page_fault_event *__unused_page_fault_ev __attribute__((unused));
@@ -85,16 +85,15 @@ static __always_inline void emit_compact_net_io_event(__u8 event_type,
                                                       __u16 sport,
                                                       __u16 dport)
 {
-    // Only the 23-byte populated prefix goes over the ring buffer; the C
+    // Only the 15-byte populated prefix goes over the ring buffer; the C
     // struct keeps its natural alignment and tail padding stays local.
     const __u64 compact_net_io_event_size =
-        sizeof(__u64) + (2 * sizeof(__u32)) + (2 * sizeof(__u16)) + (3 * sizeof(__u8));
+        (2 * sizeof(__u32)) + (2 * sizeof(__u16)) + (3 * sizeof(__u8));
     struct compact_net_io_event *e =
         bpf_ringbuf_reserve(&events, compact_net_io_event_size, 0);
     if (!e)
         return;
 
-    e->timestamp_ns = bpf_ktime_get_ns();
     e->pid = bpf_get_current_pid_tgid() >> 32;
     e->bytes = bytes;
     e->sport = sport;
@@ -102,6 +101,34 @@ static __always_inline void emit_compact_net_io_event(__u8 event_type,
     e->event_type = event_type;
     e->client_type = client_type;
     e->transport = transport;
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline void emit_compact_net_io_metrics_event(__u8 client_type,
+                                                              __u32 bytes,
+                                                              __u16 sport,
+                                                              __u16 dport,
+                                                              __u32 srtt_us,
+                                                              __u32 snd_cwnd)
+{
+    // Only the 22-byte populated prefix goes over the ring buffer; the C
+    // struct keeps its natural alignment and tail padding stays local.
+    const __u64 compact_net_io_metrics_event_size =
+        (4 * sizeof(__u32)) + (2 * sizeof(__u16)) + (2 * sizeof(__u8));
+    struct compact_net_io_metrics_event *e =
+        bpf_ringbuf_reserve(&events, compact_net_io_metrics_event_size, 0);
+    if (!e)
+        return;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->bytes = bytes;
+    e->sport = sport;
+    e->dport = dport;
+    e->srtt_us = srtt_us;
+    e->snd_cwnd = snd_cwnd;
+    e->event_type = EVENT_NET_TX;
+    e->client_type = client_type;
 
     bpf_ringbuf_submit(e, 0);
 }
@@ -743,19 +770,13 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     if (!should_emit_event(EVENT_NET_TX))
         goto cleanup;
 
-    struct net_io_metrics_event *e =
-        bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
-    e->bytes = (__u32)ret;
-    e->sport = val->sport;
-    e->dport = val->dport;
-    e->srtt_us = val->srtt_us;
-    e->snd_cwnd = val->snd_cwnd;
-
-    bpf_ringbuf_submit(e, 0);
+    emit_compact_net_io_metrics_event(
+        val->client_type,
+        (__u32)ret,
+        val->sport,
+        val->dport,
+        val->srtt_us,
+        val->snd_cwnd);
 
 cleanup:
     bpf_map_delete_elem(&net_send_start, &key);
