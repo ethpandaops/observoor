@@ -46,7 +46,7 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Compact syscall event (12 bytes total).
+// Compact syscall event (10-byte populated prefix).
 // The aggregated pipeline only needs pid + client + syscall type + latency,
 // so skip timestamp/tid on the hottest event family to cut ring-buffer copy
 // and userspace parse work.
@@ -55,8 +55,7 @@ struct syscall_event {
     __u32 latency_ns;
     __u8  event_type;
     __u8  client_type;
-    __u8  pad[2];
-};
+} __attribute__((packed));
 
 // Compact generic network I/O event (23-byte populated prefix).
 // Aggregation uses timestamp + pid + client + transport + ports + bytes but

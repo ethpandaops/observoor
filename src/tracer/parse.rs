@@ -36,14 +36,13 @@ struct RawCompactFdEvent {
     pad: [u8; 2],
 }
 
-#[repr(C)]
+#[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawCompactSyscallEvent {
     pid: u32,
     latency_ns: u32,
     event_type: u8,
     client_type: u8,
-    pad: [u8; 2],
 }
 
 #[repr(C, packed)]
@@ -161,7 +160,7 @@ const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
-const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 12);
+const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
 const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 23);
 const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 35);
 
@@ -890,7 +889,6 @@ mod tests {
         buf.extend_from_slice(&latency_ns.to_le_bytes());
         buf.push(event_type);
         buf.push(client_type);
-        buf.extend_from_slice(&[0u8; 2]);
         buf
     }
 

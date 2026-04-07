@@ -74,7 +74,6 @@ static __always_inline void emit_syscall_event(__u8 event_type,
     e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - start_ns);
     e->event_type = event_type;
     e->client_type = client_type;
-    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 }
