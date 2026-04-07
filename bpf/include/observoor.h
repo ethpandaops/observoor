@@ -137,10 +137,16 @@ struct sched_switch_runqueue_event {
     __u32 next_tid;
 };
 
-// Page fault event (24 bytes total).
-// The major/minor flag is stored in hdr.pad[0] to keep this hot event header-only.
+// Page fault event (8 bytes total).
+// Aggregation only needs pid + client + event tag + major/minor, so keep this
+// hot event in a compact marker-style record instead of carrying the full
+// generic header.
 struct page_fault_event {
-    struct event_header hdr;
+    __u32 pid;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  major;
+    __u8  pad;
 };
 
 // FD event (8 bytes total).

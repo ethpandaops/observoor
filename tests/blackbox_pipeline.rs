@@ -133,8 +133,13 @@ fn tcp_state_payload(
 }
 
 fn page_fault_payload(pid: u32, tid: u32, major: bool) -> Vec<u8> {
-    let mut data = header(123_456_789, pid, tid, EventType::PageFault as u8, 1);
-    data[18] = u8::from(major);
+    let _ = tid;
+    let mut data = Vec::with_capacity(8);
+    data.extend_from_slice(&pid.to_le_bytes());
+    data.push(EventType::PageFault as u8);
+    data.push(1);
+    data.push(u8::from(major));
+    data.push(0);
     data
 }
 

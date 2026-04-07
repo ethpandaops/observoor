@@ -29,11 +29,12 @@ struct RawEventHeader {
 
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct RawCompactFdEvent {
+struct RawCompactBasicMarkerEvent {
     pid: u32,
     event_type: u8,
     client_type: u8,
-    pad: [u8; 2],
+    marker: u8,
+    pad: u8,
 }
 
 #[repr(C, packed)]
@@ -165,14 +166,14 @@ struct RawSwapPayload {
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
-const COMPACT_FD_EVENT_SIZE: usize = size_of::<RawCompactFdEvent>();
+const COMPACT_BASIC_MARKER_EVENT_SIZE: usize = size_of::<RawCompactBasicMarkerEvent>();
 const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
 const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
 const COMPACT_NET_IO_METRICS_EVENT_SIZE: usize = size_of::<RawCompactNetIOMetricsEvent>();
 const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
-const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
+const _: () = assert!(COMPACT_BASIC_MARKER_EVENT_SIZE == 8);
 const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
 const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
 const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
@@ -244,8 +245,8 @@ pub(crate) fn parse_event_into_batch(
 
 #[inline(always)]
 fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
-    if data.len() == COMPACT_FD_EVENT_SIZE {
-        return parse_compact_fd_event(data);
+    if data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE {
+        return parse_compact_basic_marker_event(data);
     }
     if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
         return parse_compact_syscall_event(data);
@@ -480,10 +481,10 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
 }
 
 #[inline(always)]
-fn parse_compact_fd_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
-    debug_assert_eq!(data.len(), COMPACT_FD_EVENT_SIZE);
-    // Safety: caller only enters this path when `data.len() == COMPACT_FD_EVENT_SIZE`.
-    let raw = unsafe { read_unaligned_struct::<RawCompactFdEvent>(data) };
+fn parse_compact_basic_marker_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_BASIC_MARKER_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactBasicMarkerEvent>(data) };
     let client_type_raw = raw.client_type;
 
     if client_type_raw > MAX_CLIENT_TYPE as u8 {
@@ -491,6 +492,12 @@ fn parse_compact_fd_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     }
 
     let (event_type, typed) = match raw.event_type {
+        10 => (
+            EventType::PageFault,
+            TypedEvent::PageFault(PageFaultEvent {
+                major: raw.marker != 0,
+            }),
+        ),
         11 => (EventType::FDOpen, TypedEvent::FDOpen),
         12 => (EventType::FDClose, TypedEvent::FDClose),
         _ => {
@@ -1403,20 +1410,30 @@ mod tests {
 
     #[test]
     fn test_page_fault_major() {
-        let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
-        data[18] = 1; // hdr.pad[0] = major
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&107u32.to_le_bytes());
+        data.push(10); // PageFault
+        data.push(2); // Reth
+        data.push(1); // major
+        data.push(0);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
             panic!("expected PageFault");
         };
         assert!(e.major);
+        assert_eq!(parsed.raw.pid(), 107);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     #[test]
     fn test_page_fault_minor() {
-        let mut data = header(8_000_000, 107, 207, 10, 2);
-        data[18] = 0; // hdr.pad[0] = minor
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&107u32.to_le_bytes());
+        data.push(10); // PageFault
+        data.push(2); // Reth
+        data.push(0); // minor
+        data.push(0);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
@@ -1425,11 +1442,25 @@ mod tests {
         assert!(!e.major);
     }
 
+    #[test]
+    fn test_page_fault_header_format_still_parses() {
+        let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
+        data[18] = 1; // hdr.pad[0] = major
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::PageFault(e) = &parsed.typed else {
+            panic!("expected PageFault");
+        };
+        assert!(e.major);
+        assert_eq!(parsed.raw.pid(), 107);
+        assert_eq!(parsed.raw.tid, 207);
+    }
+
     // -- FD events --
 
     #[test]
     fn test_fd_open_header_only() {
-        let mut data = Vec::with_capacity(COMPACT_FD_EVENT_SIZE);
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
         data.extend_from_slice(&108u32.to_le_bytes());
         data.push(11); // FDOpen
         data.push(1); // Geth
@@ -1445,7 +1476,7 @@ mod tests {
 
     #[test]
     fn test_fd_close_header_only() {
-        let mut data = Vec::with_capacity(COMPACT_FD_EVENT_SIZE);
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
         data.extend_from_slice(&109u32.to_le_bytes());
         data.push(12); // FDClose
         data.push(4); // Nethermind

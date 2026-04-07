@@ -1192,10 +1192,11 @@ int BPF_KRETPROBE(kretprobe_handle_mm_fault, unsigned long ret)
     if (!e)
         return 0;
 
-    fill_header(&e->hdr, EVENT_PAGE_FAULT, ct);
-    // VM_FAULT_MAJOR is typically bit 2 (0x04). Reuse header padding so
-    // page-fault events stay header-only on the ring buffer.
-    e->hdr.pad[0] = (ret & 0x04) ? 1 : 0;
+    e->pid = pid;
+    e->event_type = EVENT_PAGE_FAULT;
+    e->client_type = ct;
+    e->major = (ret & 0x04) ? 1 : 0;
+    e->pad = 0;
 
     bpf_ringbuf_submit(e, 0);
     return 0;
