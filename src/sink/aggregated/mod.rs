@@ -1220,6 +1220,10 @@ impl Sink for AggregatedSink {
             let mut current_buf = initial_buf;
             let mut reusable_buf =
                 AggregatedSink::new_buffer_from_state(&state, SystemTime::now(), 0);
+            // Slot-aligned rotations are flushed asynchronously through
+            // `rotation_rx`, so keep a separate pool entry instead of
+            // reallocating a fresh buffer at every slot boundary.
+            let mut reusable_slot_rotation_buf: Option<Buffer> = None;
 
             // Emit host specs once on startup, then on the configured ticker.
             {
@@ -1375,14 +1379,25 @@ impl Sink for AggregatedSink {
                         if slot_aligned {
                             // keep slot-aligned rotation behavior in run loop so scheduler carry
                             // can be applied exactly at the boundary.
-                            let mut old_buf = std::mem::replace(
-                                &mut current_buf,
+                            let now = SystemTime::now();
+                            let next_buf = if let Some(mut buf) =
+                                reusable_slot_rotation_buf.take()
+                            {
+                                AggregatedSink::reset_buffer_from_state(
+                                    &state,
+                                    &mut buf,
+                                    now,
+                                    rotation.new_slot,
+                                );
+                                buf
+                            } else {
                                 AggregatedSink::new_buffer_from_state(
-                                &state,
-                                SystemTime::now(),
-                                rotation.new_slot,
-                            ),
-                            );
+                                    &state,
+                                    now,
+                                    rotation.new_slot,
+                                )
+                            };
+                            let mut old_buf = std::mem::replace(&mut current_buf, next_buf);
                             scheduler_state.flush_running_to_boundary(&mut old_buf, monotonic_ns());
                             if rotation_tx.send(old_buf).is_err() {
                                 warn!(
@@ -1437,6 +1452,7 @@ impl Sink for AggregatedSink {
                                 "slot-aligned buffer flushed"
                             );
                         }
+                        reusable_slot_rotation_buf = Some(rotated_buf);
                     }
 
                     _ = ticker.tick() => {
