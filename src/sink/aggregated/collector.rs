@@ -376,7 +376,7 @@ impl Collector {
     }
 
     fn estimate_counter_capacity(&self, buf: &Buffer) -> usize {
-        (map_len(&buf.fd_metrics) * 2)
+        (buf.fd_metrics.len() * 2)
             + (map_len(&buf.page_fault_metrics) * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.net_io_tx)

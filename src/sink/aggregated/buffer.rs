@@ -310,6 +310,95 @@ impl HotBasicLatencyMap {
     }
 }
 
+/// Keeps the hottest `BasicDimension -> FdAggregate` entry inline.
+///
+/// Stress-bench opens and closes the same process-local file descriptors in a
+/// tight loop. Keeping that dominant FD counter entry out of the hash map
+/// avoids the remaining lookup/probe cost on this hot path while preserving
+/// exact aggregation for additional dimensions via the spill map.
+pub struct HotBasicFdMap {
+    inline: Option<(BasicDimension, FdAggregate)>,
+    spill: FastMap<BasicDimension, FdAggregate>,
+}
+
+impl HotBasicFdMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&FdAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &FdAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record_open(&mut self, key: BasicDimension) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record_open();
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record_open();
+            return;
+        }
+
+        let mut aggregate = FdAggregate::new();
+        aggregate.record_open();
+        self.inline = Some((key, aggregate));
+    }
+
+    #[inline(always)]
+    fn record_close(&mut self, key: BasicDimension) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record_close();
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record_close();
+            return;
+        }
+
+        let mut aggregate = FdAggregate::new();
+        aggregate.record_close();
+        self.inline = Some((key, aggregate));
+    }
+}
+
 #[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
@@ -524,7 +613,7 @@ pub struct Buffer {
     // --- BasicDimension counters ---
     // `fd_open`/`fd_close` dominate this counter path in stress-bench, so keep
     // them in their own smaller map entry instead of carrying page-fault state.
-    pub fd_metrics: FastMap<BasicDimension, FdAggregate>,
+    pub fd_metrics: HotBasicFdMap,
     pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
     pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
@@ -579,7 +668,7 @@ impl Buffer {
             syscall_mmap: HotBasicLatencyMap::with_capacity(8),
             syscall_fsync: HotBasicLatencyMap::with_capacity(8),
             // BasicDimension counters.
-            fd_metrics: fast_map_with_capacity(16),
+            fd_metrics: HotBasicFdMap::with_capacity(16),
             page_fault_metrics: fast_map_with_capacity(16),
             sched_wait: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
@@ -841,12 +930,12 @@ impl Buffer {
 
     /// Adds an FD open event.
     pub fn add_fd_open(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.fd_metrics, dim).record_open();
+        self.fd_metrics.record_open(dim);
     }
 
     /// Adds an FD close event.
     pub fn add_fd_close(&mut self, dim: BasicDimension) {
-        get_or_default_mut(&mut self.fd_metrics, dim).record_close();
+        self.fd_metrics.record_close(dim);
     }
 
     /// Adds a memory reclaim event.
@@ -959,6 +1048,26 @@ mod tests {
             map.get(&key2).expect("spill entry exists").snapshot().sum,
             11_000
         );
+    }
+
+    #[test]
+    fn test_hot_basic_fd_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicFdMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record_open(key1);
+        map.record_close(key1);
+        map.record_open(key2);
+
+        assert_eq!(map.len(), 2);
+        let inline = map.get(&key1).expect("inline entry exists");
+        assert_eq!(inline.open_snapshot().count, 1);
+        assert_eq!(inline.close_snapshot().count, 1);
+
+        let spill = map.get(&key2).expect("spill entry exists");
+        assert_eq!(spill.open_snapshot().count, 1);
+        assert_eq!(spill.close_snapshot().count, 0);
     }
 
     #[test]
