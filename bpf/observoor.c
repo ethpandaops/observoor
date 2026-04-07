@@ -60,6 +60,23 @@ static __always_inline void encode_u32_le(__u8 *dst, __u32 value)
     dst[3] = (value >> 24) & 0xff;
 }
 
+static __always_inline void emit_syscall_event(__u8 event_type,
+                                               __u8 client_type,
+                                               __u64 start_ns)
+{
+    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
+    if (!e)
+        return;
+
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->latency_ns = clamp_u64_to_u32(bpf_ktime_get_ns() - start_ns);
+    e->event_type = event_type;
+    e->client_type = client_type;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
+
+    bpf_ringbuf_submit(e, 0);
+}
+
 // =========================================================
 // Syscall tracers: read, write, futex, mmap, epoll_wait
 // =========================================================
@@ -98,14 +115,7 @@ int trace_sys_exit_read(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_READ))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_READ, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_READ, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -146,14 +156,7 @@ int trace_sys_exit_write(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_WRITE))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_WRITE, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_WRITE, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -194,14 +197,7 @@ int trace_sys_exit_futex(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_FUTEX))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_FUTEX, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_FUTEX, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -242,14 +238,7 @@ int trace_sys_exit_mmap(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_MMAP))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_MMAP, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_MMAP, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -290,14 +279,7 @@ int trace_sys_exit_epoll_wait(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_EPOLL_WAIT))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_EPOLL_WAIT, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_EPOLL_WAIT, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -338,14 +320,7 @@ int trace_sys_exit_fsync(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_FSYNC))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_FSYNC, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_FSYNC, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -386,14 +361,7 @@ int trace_sys_exit_fdatasync(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_FDATASYNC))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_FDATASYNC, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_FDATASYNC, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);
@@ -434,14 +402,7 @@ int trace_sys_exit_pwrite64(struct trace_event_raw_sys_exit *ctx)
     if (!should_emit_event(EVENT_SYSCALL_PWRITE))
         goto cleanup;
 
-    struct syscall_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_SYSCALL_PWRITE, val->client_type);
-    encode_u32_le(e->hdr.pad, clamp_u64_to_u32(bpf_ktime_get_ns() - val->ts));
-
-    bpf_ringbuf_submit(e, 0);
+    emit_syscall_event(EVENT_SYSCALL_PWRITE, val->client_type, val->ts);
 
 cleanup:
     bpf_map_delete_elem(&syscall_start, &key);

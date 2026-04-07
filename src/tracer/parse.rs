@@ -36,6 +36,16 @@ struct RawCompactFdEvent {
     pad: [u8; 2],
 }
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawCompactSyscallEvent {
+    pid: u32,
+    latency_ns: u32,
+    event_type: u8,
+    client_type: u8,
+    pad: [u8; 2],
+}
+
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawDiskIOPayload {
@@ -118,9 +128,11 @@ struct RawSwapPayload {
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 const COMPACT_FD_EVENT_SIZE: usize = size_of::<RawCompactFdEvent>();
+const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
+const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 12);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -187,6 +199,9 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     if data.len() < HEADER_SIZE {
         if data.len() == COMPACT_FD_EVENT_SIZE {
             return parse_compact_fd_event(data);
+        }
+        if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
+            return parse_compact_syscall_event(data);
         }
         return Err(ParseError::Truncated { size: data.len() });
     }
@@ -420,6 +435,66 @@ fn parse_compact_fd_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     let (event_type, typed) = match raw.event_type {
         11 => (EventType::FDOpen, TypedEvent::FDOpen),
         12 => (EventType::FDClose, TypedEvent::FDClose),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
+        }
+    };
+
+    Ok(ParsedEventParts {
+        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        event_type_raw: raw.event_type,
+        client_type_raw,
+        secondary_event_type_raw: 0,
+        secondary_client_type_raw: 0,
+    })
+}
+
+#[inline(always)]
+fn parse_compact_syscall_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_SYSCALL_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_SYSCALL_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactSyscallEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    let latency_ns = u64::from(u32::from_le(raw.latency_ns));
+    let (event_type, typed) = match raw.event_type {
+        1 => (
+            EventType::SyscallRead,
+            TypedEvent::SyscallRead(SyscallEvent { latency_ns }),
+        ),
+        2 => (
+            EventType::SyscallWrite,
+            TypedEvent::SyscallWrite(SyscallEvent { latency_ns }),
+        ),
+        3 => (
+            EventType::SyscallFutex,
+            TypedEvent::SyscallFutex(SyscallEvent { latency_ns }),
+        ),
+        4 => (
+            EventType::SyscallMmap,
+            TypedEvent::SyscallMmap(SyscallEvent { latency_ns }),
+        ),
+        5 => (
+            EventType::SyscallEpollWait,
+            TypedEvent::SyscallEpollWait(SyscallEvent { latency_ns }),
+        ),
+        13 => (
+            EventType::SyscallFsync,
+            TypedEvent::SyscallFsync(SyscallEvent { latency_ns }),
+        ),
+        14 => (
+            EventType::SyscallFdatasync,
+            TypedEvent::SyscallFdatasync(SyscallEvent { latency_ns }),
+        ),
+        15 => (
+            EventType::SyscallPwrite,
+            TypedEvent::SyscallPwrite(SyscallEvent { latency_ns }),
+        ),
         _ => {
             return Err(ParseError::Truncated { size: data.len() });
         }
@@ -675,6 +750,16 @@ mod tests {
             .copy_from_slice(&value.to_le_bytes());
     }
 
+    fn compact_syscall(pid: u32, event_type: u8, client_type: u8, latency_ns: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_SYSCALL_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&latency_ns.to_le_bytes());
+        buf.push(event_type);
+        buf.push(client_type);
+        buf.extend_from_slice(&[0u8; 2]);
+        buf
+    }
+
     fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
         assert_eq!(event.pid(), pid);
@@ -740,6 +825,20 @@ mod tests {
         let TypedEvent::SyscallRead(e) = &parsed.typed else {
             panic!("expected SyscallRead");
         };
+        assert_eq!(e.latency_ns, 1_234);
+    }
+
+    #[test]
+    fn test_compact_syscall_event() {
+        let data = compact_syscall(42, 1, 1, 1_234);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
+        };
+        assert_eq!(parsed.raw.pid(), 42);
+        assert_eq!(parsed.raw.tid, 0);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
         assert_eq!(e.latency_ns, 1_234);
     }
 

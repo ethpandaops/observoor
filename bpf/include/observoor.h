@@ -46,11 +46,16 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Syscall event (24 bytes total).
-// Latency is stored in hdr.pad[0..3] (little-endian) so the hottest event
-// family stays header-only on the ring buffer.
+// Compact syscall event (12 bytes total).
+// The aggregated pipeline only needs pid + client + syscall type + latency,
+// so skip timestamp/tid on the hottest event family to cut ring-buffer copy
+// and userspace parse work.
 struct syscall_event {
-    struct event_header hdr;
+    __u32 pid;
+    __u32 latency_ns;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  pad[2];
 };
 
 // Disk I/O event (44 bytes total).
