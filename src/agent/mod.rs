@@ -5,8 +5,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-#[cfg(feature = "bpf")]
-use prometheus::Counter;
+use prometheus::IntCounter;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
@@ -21,10 +20,8 @@ use crate::sink::aggregated::exporter::Exporter;
 use crate::sink::aggregated::http::HttpExporter;
 use crate::sink::aggregated::AggregatedSink;
 use crate::sink::Sink;
-use crate::tracer::event::{ClientType, CLIENT_TYPE_CARDINALITY};
-#[cfg(feature = "bpf")]
-use crate::tracer::event::{EventType, MAX_CLIENT_TYPE, MAX_EVENT_TYPE};
-use crate::tracer::stats::EventStats;
+use crate::tracer::event::{ClientType, EventType, CLIENT_TYPE_CARDINALITY, MAX_EVENT_TYPE};
+use crate::tracer::stats::{ClientStats, EventStats};
 
 #[cfg(feature = "bpf")]
 use crate::tracer::bpf::BpfTracer;
@@ -41,11 +38,81 @@ pub struct Agent {
     #[cfg(feature = "bpf")]
     tracer: Option<Arc<tokio::sync::Mutex<BpfTracer>>>,
     captured_stats: Arc<EventStats>,
+    captured_client_stats: Arc<ClientStats>,
     cancel: CancellationToken,
 }
 
 #[cfg(feature = "bpf")]
-fn build_event_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
+const TRACER_STATS_FLUSH_INTERVAL: u32 = 1024;
+
+#[cfg(feature = "bpf")]
+struct BufferedCapturedStats {
+    event_totals: [u64; MAX_EVENT_TYPE + 1],
+    client_totals: [u64; CLIENT_TYPE_CARDINALITY],
+    buffered_events: u32,
+    event_stats: Arc<EventStats>,
+    client_stats: Arc<ClientStats>,
+}
+
+#[cfg(feature = "bpf")]
+impl BufferedCapturedStats {
+    fn new(event_stats: Arc<EventStats>, client_stats: Arc<ClientStats>) -> Self {
+        Self {
+            event_totals: [0; MAX_EVENT_TYPE + 1],
+            client_totals: [0; CLIENT_TYPE_CARDINALITY],
+            buffered_events: 0,
+            event_stats,
+            client_stats,
+        }
+    }
+
+    fn record_batch(&mut self, batch: &crate::tracer::ParsedEventBatch) {
+        for (dst, src) in self
+            .event_totals
+            .iter_mut()
+            .zip(batch.event_totals().iter().copied())
+        {
+            *dst += u64::from(src);
+        }
+
+        for (dst, src) in self
+            .client_totals
+            .iter_mut()
+            .zip(batch.client_totals().iter().copied())
+        {
+            *dst += u64::from(src);
+        }
+
+        self.buffered_events = self
+            .buffered_events
+            .saturating_add(u32::try_from(batch.len()).unwrap_or(u32::MAX));
+
+        if self.buffered_events >= TRACER_STATS_FLUSH_INTERVAL {
+            self.flush();
+        }
+    }
+
+    fn flush(&mut self) {
+        if self.buffered_events == 0 {
+            return;
+        }
+
+        self.event_stats.record_batch(&self.event_totals);
+        self.client_stats.record_batch(&self.client_totals);
+        self.event_totals.fill(0);
+        self.client_totals.fill(0);
+        self.buffered_events = 0;
+    }
+}
+
+#[cfg(feature = "bpf")]
+impl Drop for BufferedCapturedStats {
+    fn drop(&mut self) {
+        self.flush();
+    }
+}
+
+fn build_event_type_counters(health: &HealthMetrics) -> Vec<Option<IntCounter>> {
     let mut counters = vec![None; MAX_EVENT_TYPE + 1];
     for raw in 1..=MAX_EVENT_TYPE {
         if let Ok(raw_u8) = u8::try_from(raw) {
@@ -63,10 +130,9 @@ fn build_event_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
     counters
 }
 
-#[cfg(feature = "bpf")]
-fn build_client_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
-    let mut counters = vec![None; MAX_CLIENT_TYPE + 1];
-    for raw in 0..=MAX_CLIENT_TYPE {
+fn build_client_type_counters(health: &HealthMetrics) -> Vec<Option<IntCounter>> {
+    let mut counters = vec![None; CLIENT_TYPE_CARDINALITY];
+    for raw in 0..CLIENT_TYPE_CARDINALITY {
         if let Ok(raw_u8) = u8::try_from(raw) {
             if let Some(client_type) = ClientType::from_u8(raw_u8) {
                 if let Some(slot) = counters.get_mut(raw) {
@@ -80,6 +146,69 @@ fn build_client_type_counters(health: &HealthMetrics) -> Vec<Option<Counter>> {
         }
     }
     counters
+}
+
+fn flush_buffered_event_metrics(
+    health: &HealthMetrics,
+    event_stats: &EventStats,
+    client_stats: &ClientStats,
+    event_type_counters: &[Option<IntCounter>],
+    client_type_counters: &[Option<IntCounter>],
+    log_totals: &mut [u64; MAX_EVENT_TYPE + 1],
+    log_total: &mut u64,
+) {
+    // Batch Prometheus updates off the tracer callback to keep ingestion lean.
+    for (event_type, count) in event_stats.snapshot() {
+        health.events_received.inc_by(count);
+        *log_total += count;
+
+        if let Some(counter) = event_type_counters
+            .get(usize::from(event_type as u8))
+            .and_then(Option::as_ref)
+        {
+            counter.inc_by(count);
+        }
+
+        if let Some(slot) = log_totals.get_mut(usize::from(event_type as u8)) {
+            *slot += count;
+        }
+    }
+
+    for (client_type, count) in client_stats.snapshot() {
+        if let Some(counter) = client_type_counters
+            .get(usize::from(client_type as u8))
+            .and_then(Option::as_ref)
+        {
+            counter.inc_by(count);
+        }
+    }
+}
+
+fn log_event_window(log_totals: &mut [u64; MAX_EVENT_TYPE + 1], log_total: &mut u64) {
+    if *log_total == 0 {
+        return;
+    }
+
+    info!(captured = *log_total, "event stats (60s)");
+
+    for (raw, count) in log_totals.iter().enumerate() {
+        if *count == 0 {
+            continue;
+        }
+
+        if let Ok(raw_u8) = u8::try_from(raw) {
+            if let Some(event_type) = EventType::from_u8(raw_u8) {
+                debug!(
+                    event_type = %event_type,
+                    count,
+                    "  by type (60s)",
+                );
+            }
+        }
+    }
+
+    *log_total = 0;
+    log_totals.fill(0);
 }
 
 impl Agent {
@@ -97,6 +226,7 @@ impl Agent {
             #[cfg(feature = "bpf")]
             tracer: None,
             captured_stats: Arc::new(EventStats::new()),
+            captured_client_stats: Arc::new(ClientStats::new()),
             cancel: CancellationToken::new(),
         })
     }
@@ -286,30 +416,14 @@ impl Agent {
             let mut tracer = BpfTracer::new(ring_buf_size, disabled_probes);
 
             // Register event handler.
-            let health_ev = Arc::clone(&self.health);
             let captured_stats = Arc::clone(&self.captured_stats);
+            let captured_client_stats = Arc::clone(&self.captured_client_stats);
             let sink_ev = Arc::clone(&sink);
-            let event_type_counters = build_event_type_counters(&health_ev);
-            let client_type_counters = build_client_type_counters(&health_ev);
-            tracer.on_event(Box::new(move |event| {
-                health_ev.events_received.inc();
-                captured_stats.record(event.raw.event_type);
-
-                if let Some(counter) = event_type_counters
-                    .get(usize::from(event.raw.event_type as u8))
-                    .and_then(Option::as_ref)
-                {
-                    counter.inc();
-                }
-
-                if let Some(counter) = client_type_counters
-                    .get(usize::from(event.raw.client_type as u8))
-                    .and_then(Option::as_ref)
-                {
-                    counter.inc();
-                }
-
-                sink_ev.handle_event(event);
+            let mut buffered_stats =
+                BufferedCapturedStats::new(captured_stats, captured_client_stats);
+            tracer.on_event_batch(Box::new(move |batch| {
+                buffered_stats.record_batch(&batch);
+                sink_ev.handle_event_batch(batch);
             }));
 
             // Register error handler.
@@ -603,31 +717,52 @@ impl Agent {
     /// Spawn background event stats reporter.
     fn spawn_event_stats_reporter(&self) {
         let cancel = self.cancel.clone();
+        let health = Arc::clone(&self.health);
         let captured_stats = Arc::clone(&self.captured_stats);
+        let captured_client_stats = Arc::clone(&self.captured_client_stats);
+        let event_type_counters = build_event_type_counters(&health);
+        let client_type_counters = build_client_type_counters(&health);
 
         tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(Duration::from_secs(60));
+            let mut ticker = tokio::time::interval_at(
+                tokio::time::Instant::now() + Duration::from_secs(1),
+                Duration::from_secs(1),
+            );
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut seconds_since_log = 0u32;
+            let mut log_totals = [0u64; MAX_EVENT_TYPE + 1];
+            let mut log_total = 0u64;
 
             loop {
                 tokio::select! {
-                    _ = cancel.cancelled() => return,
+                    _ = cancel.cancelled() => {
+                        flush_buffered_event_metrics(
+                            &health,
+                            &captured_stats,
+                            &captured_client_stats,
+                            &event_type_counters,
+                            &client_type_counters,
+                            &mut log_totals,
+                            &mut log_total,
+                        );
+                        log_event_window(&mut log_totals, &mut log_total);
+                        return;
+                    },
                     _ = ticker.tick() => {
-                        let snapshot = captured_stats.snapshot();
-                        let total: u64 = snapshot.iter().map(|(_, n)| n).sum();
+                        flush_buffered_event_metrics(
+                            &health,
+                            &captured_stats,
+                            &captured_client_stats,
+                            &event_type_counters,
+                            &client_type_counters,
+                            &mut log_totals,
+                            &mut log_total,
+                        );
 
-                        if total == 0 {
-                            continue;
-                        }
-
-                        info!(captured = total, "event stats (60s)");
-
-                        for (event_type, count) in &snapshot {
-                            debug!(
-                                event_type = %event_type,
-                                count,
-                                "  by type (60s)",
-                            );
+                        seconds_since_log += 1;
+                        if seconds_since_log >= 60 {
+                            log_event_window(&mut log_totals, &mut log_total);
+                            seconds_since_log = 0;
                         }
                     }
                 }

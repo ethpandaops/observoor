@@ -1,15 +1,12 @@
-use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
-
 use super::histogram::{Histogram, NUM_BUCKETS};
 
 /// Tracks latency statistics with histogram.
 /// Used for syscalls, disk I/O latency, scheduler events, memory latency.
-/// All operations are atomic and safe for concurrent use.
 pub struct LatencyAggregate {
-    sum: AtomicI64,
-    count: AtomicU32,
-    min: AtomicI64,
-    max: AtomicI64,
+    sum: u64,
+    count: u32,
+    min: u64,
+    max: u64,
     histogram: Histogram,
 }
 
@@ -17,57 +14,63 @@ impl LatencyAggregate {
     /// Creates a new aggregate with min initialized to MAX and max to MIN.
     pub fn new() -> Self {
         Self {
-            sum: AtomicI64::new(0),
-            count: AtomicU32::new(0),
-            min: AtomicI64::new(i64::MAX),
-            max: AtomicI64::new(i64::MIN),
+            sum: 0,
+            count: 0,
+            min: u64::MAX,
+            max: 0,
             histogram: Histogram::new(),
         }
     }
 
     /// Records a latency value in nanoseconds.
-    pub fn record(&self, value_ns: u64) {
-        let val = value_ns as i64;
-        self.sum.fetch_add(val, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.histogram.record(value_ns);
-
-        // CAS loop for min.
-        loop {
-            let old_min = self.min.load(Ordering::Relaxed);
-            if val >= old_min {
-                break;
-            }
-            if self
-                .min
-                .compare_exchange_weak(old_min, val, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+    #[inline(always)]
+    pub fn record(&mut self, value_ns: u64) {
+        if self.count == 0 {
+            self.sum = value_ns;
+            self.count = 1;
+            self.min = value_ns;
+            self.max = value_ns;
+            self.histogram.record(value_ns);
+            return;
         }
 
-        // CAS loop for max.
-        loop {
-            let old_max = self.max.load(Ordering::Relaxed);
-            if val <= old_max {
-                break;
-            }
-            if self
-                .max
-                .compare_exchange_weak(old_max, val, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+        self.sum += value_ns;
+        self.count += 1;
+        self.histogram.record(value_ns);
+        if value_ns < self.min {
+            self.min = value_ns;
+        } else if value_ns > self.max {
+            self.max = value_ns;
+        }
+    }
+
+    /// Merges a pre-aggregated snapshot into this aggregate.
+    #[inline(always)]
+    pub fn merge_snapshot(&mut self, snapshot: &LatencySnapshot) {
+        if snapshot.count == 0 {
+            return;
+        }
+
+        self.sum += latency_i64_to_u64(snapshot.sum);
+        self.count += snapshot.count;
+        self.histogram.merge_snapshot(&snapshot.histogram);
+
+        let snapshot_min = latency_i64_to_u64(snapshot.min);
+        if snapshot_min < self.min {
+            self.min = snapshot_min;
+        }
+        let snapshot_max = latency_i64_to_u64(snapshot.max);
+        if snapshot_max > self.max {
+            self.max = snapshot_max;
         }
     }
 
     /// Returns a point-in-time snapshot of all statistics.
+    #[inline(always)]
     pub fn snapshot(&self) -> LatencySnapshot {
-        let count = self.count.load(Ordering::Relaxed);
-        let mut min_val = self.min.load(Ordering::Relaxed);
-        let mut max_val = self.max.load(Ordering::Relaxed);
+        let count = self.count;
+        let mut min_val = self.min;
+        let mut max_val = self.max;
 
         // Handle case where no values were recorded.
         if count == 0 {
@@ -76,10 +79,10 @@ impl LatencyAggregate {
         }
 
         LatencySnapshot {
-            sum: self.sum.load(Ordering::Relaxed),
+            sum: latency_u64_to_i64(self.sum),
             count,
-            min: min_val,
-            max: max_val,
+            min: latency_u64_to_i64(min_val),
+            max: latency_u64_to_i64(max_val),
             histogram: self.histogram.snapshot(),
         }
     }
@@ -89,6 +92,17 @@ impl Default for LatencyAggregate {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[inline(always)]
+fn latency_u64_to_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+#[inline(always)]
+fn latency_i64_to_u64(value: i64) -> u64 {
+    debug_assert!(value >= 0);
+    u64::try_from(value).unwrap_or(0)
 }
 
 /// Point-in-time view of latency statistics.
@@ -101,44 +115,316 @@ pub struct LatencySnapshot {
     pub histogram: [u32; NUM_BUCKETS],
 }
 
+/// Tracks page-fault counters behind their own compact per-dimension entry.
+///
+/// Stress-bench emits `fd_open`/`fd_close` on every iteration but page faults
+/// only around the mmap path. Keeping faults out of the FD map shrinks the
+/// hotter entry without changing aggregation behavior.
+pub struct PageFaultAggregate {
+    page_fault_major: CountAggregate,
+    page_fault_minor: CountAggregate,
+}
+
+impl PageFaultAggregate {
+    pub fn new() -> Self {
+        Self {
+            page_fault_major: CountAggregate::new(),
+            page_fault_minor: CountAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_page_fault(&mut self, major: bool) {
+        if major {
+            self.page_fault_major.add_count(1);
+        } else {
+            self.page_fault_minor.add_count(1);
+        }
+    }
+
+    #[inline(always)]
+    pub fn page_fault_major_snapshot(&self) -> CounterSnapshot {
+        self.page_fault_major.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn page_fault_minor_snapshot(&self) -> CounterSnapshot {
+        self.page_fault_minor.snapshot()
+    }
+}
+
+impl Default for PageFaultAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks rarely-hit BasicDimension metrics outside the hottest map entry.
+///
+/// Stress-bench spends most of its time in syscall, scheduler, FD, and page
+/// fault ingestion. Moving colder memory/process counters and infrequent
+/// syscall families out of the hot BasicDimension maps keeps those entries
+/// smaller, improving cache density on the hot path while keeping full
+/// aggregation coverage intact.
+pub struct BasicColdAggregate {
+    syscall_epoll_wait: LatencyAggregate,
+    syscall_fdatasync: LatencyAggregate,
+    syscall_pwrite: LatencyAggregate,
+    mem_reclaim: LatencyAggregate,
+    mem_compaction: LatencyAggregate,
+    swap_in: CounterAggregate,
+    swap_out: CounterAggregate,
+    oom_kill: CountAggregate,
+    process_exit: CountAggregate,
+    tcp_state_change: CountAggregate,
+}
+
+impl BasicColdAggregate {
+    pub fn new() -> Self {
+        Self {
+            syscall_epoll_wait: LatencyAggregate::new(),
+            syscall_fdatasync: LatencyAggregate::new(),
+            syscall_pwrite: LatencyAggregate::new(),
+            mem_reclaim: LatencyAggregate::new(),
+            mem_compaction: LatencyAggregate::new(),
+            swap_in: CounterAggregate::new(),
+            swap_out: CounterAggregate::new(),
+            oom_kill: CountAggregate::new(),
+            process_exit: CountAggregate::new(),
+            tcp_state_change: CountAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_epoll_wait(&mut self, duration_ns: u64) {
+        self.syscall_epoll_wait.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_fdatasync(&mut self, duration_ns: u64) {
+        self.syscall_fdatasync.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_syscall_pwrite(&mut self, duration_ns: u64) {
+        self.syscall_pwrite.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_mem_reclaim(&mut self, duration_ns: u64) {
+        self.mem_reclaim.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_mem_compaction(&mut self, duration_ns: u64) {
+        self.mem_compaction.record(duration_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_in(&mut self, pages: u64) {
+        self.swap_in.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_swap_out(&mut self, pages: u64) {
+        self.swap_out.add(pages as i64);
+    }
+
+    #[inline(always)]
+    pub fn record_oom_kill(&mut self) {
+        self.oom_kill.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_process_exit(&mut self) {
+        self.process_exit.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn record_tcp_state_change(&mut self) {
+        self.tcp_state_change.add_count(1);
+    }
+
+    #[inline(always)]
+    pub fn syscall_epoll_wait_snapshot(&self) -> LatencySnapshot {
+        self.syscall_epoll_wait.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn syscall_fdatasync_snapshot(&self) -> LatencySnapshot {
+        self.syscall_fdatasync.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn syscall_pwrite_snapshot(&self) -> LatencySnapshot {
+        self.syscall_pwrite.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn mem_reclaim_snapshot(&self) -> LatencySnapshot {
+        self.mem_reclaim.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn mem_compaction_snapshot(&self) -> LatencySnapshot {
+        self.mem_compaction.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn swap_in_snapshot(&self) -> CounterSnapshot {
+        self.swap_in.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn swap_out_snapshot(&self) -> CounterSnapshot {
+        self.swap_out.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn oom_kill_snapshot(&self) -> CounterSnapshot {
+        self.oom_kill.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn process_exit_snapshot(&self) -> CounterSnapshot {
+        self.process_exit.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn tcp_state_change_snapshot(&self) -> CounterSnapshot {
+        self.tcp_state_change.snapshot()
+    }
+}
+
+impl Default for BasicColdAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Tracks count and sum for counter-type metrics.
 /// Used for network bytes, FD operations, page faults, etc.
-/// All operations are atomic and safe for concurrent use.
 pub struct CounterAggregate {
-    count: AtomicU32,
-    sum: AtomicI64,
+    count: u32,
+    sum: i64,
 }
 
 impl CounterAggregate {
     /// Creates a new counter aggregate.
     pub fn new() -> Self {
-        Self {
-            count: AtomicU32::new(0),
-            sum: AtomicI64::new(0),
-        }
+        Self { count: 0, sum: 0 }
     }
 
     /// Records a value (typically bytes), incrementing count by 1.
-    pub fn add(&self, value: i64) {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.sum.fetch_add(value, Ordering::Relaxed);
+    #[inline(always)]
+    pub fn add(&mut self, value: i64) {
+        self.count += 1;
+        self.sum += value;
     }
 
     /// Increments only the count by n.
-    pub fn add_count(&self, n: u32) {
-        self.count.fetch_add(n, Ordering::Relaxed);
+    #[inline(always)]
+    pub fn add_count(&mut self, n: u32) {
+        self.count += n;
     }
 
     /// Returns a point-in-time snapshot.
+    #[inline(always)]
     pub fn snapshot(&self) -> CounterSnapshot {
         CounterSnapshot {
-            count: self.count.load(Ordering::Relaxed),
-            sum: self.sum.load(Ordering::Relaxed),
+            count: self.count,
+            sum: self.sum,
         }
     }
 }
 
 impl Default for CounterAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks only the count for counter metrics whose exported sum is always zero.
+/// Used for count-only events like FD operations and page faults.
+pub struct CountAggregate {
+    count: u32,
+}
+
+impl CountAggregate {
+    /// Creates a new count-only aggregate.
+    pub fn new() -> Self {
+        Self { count: 0 }
+    }
+
+    /// Increments the count by n.
+    #[inline(always)]
+    pub fn add_count(&mut self, n: u32) {
+        self.count += n;
+    }
+
+    /// Returns a point-in-time snapshot with a fixed zero sum.
+    #[inline(always)]
+    pub fn snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.count,
+            sum: 0,
+        }
+    }
+}
+
+impl Default for CountAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks FD open/close counters behind a single per-dimension map entry.
+pub struct FdAggregate {
+    open_count: u32,
+    close_count: u32,
+}
+
+impl FdAggregate {
+    /// Creates a new FD aggregate.
+    pub fn new() -> Self {
+        Self {
+            open_count: 0,
+            close_count: 0,
+        }
+    }
+
+    /// Records one FD open event.
+    #[inline(always)]
+    pub fn record_open(&mut self) {
+        self.open_count += 1;
+    }
+
+    /// Records one FD close event.
+    #[inline(always)]
+    pub fn record_close(&mut self) {
+        self.close_count += 1;
+    }
+
+    /// Returns a point-in-time snapshot of FD opens.
+    #[inline(always)]
+    pub fn open_snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.open_count,
+            sum: 0,
+        }
+    }
+
+    /// Returns a point-in-time snapshot of FD closes.
+    #[inline(always)]
+    pub fn close_snapshot(&self) -> CounterSnapshot {
+        CounterSnapshot {
+            count: self.close_count,
+            sum: 0,
+        }
+    }
+}
+
+impl Default for FdAggregate {
     fn default() -> Self {
         Self::new()
     }
@@ -153,66 +439,50 @@ pub struct CounterSnapshot {
 
 /// Tracks statistics for gauge-type metrics.
 /// Used for TCP RTT, CWND, queue depth, etc.
-/// All operations are atomic and safe for concurrent use.
 pub struct GaugeAggregate {
-    sum: AtomicI64,
-    count: AtomicU32,
-    min: AtomicI64,
-    max: AtomicI64,
+    sum: i64,
+    count: u32,
+    min: i64,
+    max: i64,
 }
 
 impl GaugeAggregate {
     /// Creates a new gauge aggregate with min initialized to MAX and max to MIN.
     pub fn new() -> Self {
         Self {
-            sum: AtomicI64::new(0),
-            count: AtomicU32::new(0),
-            min: AtomicI64::new(i64::MAX),
-            max: AtomicI64::new(i64::MIN),
+            sum: 0,
+            count: 0,
+            min: i64::MAX,
+            max: i64::MIN,
         }
     }
 
     /// Records a gauge value.
-    pub fn record(&self, value: i64) {
-        self.sum.fetch_add(value, Ordering::Relaxed);
-        self.count.fetch_add(1, Ordering::Relaxed);
-
-        // CAS loop for min.
-        loop {
-            let old_min = self.min.load(Ordering::Relaxed);
-            if value >= old_min {
-                break;
-            }
-            if self
-                .min
-                .compare_exchange_weak(old_min, value, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+    #[inline(always)]
+    pub fn record(&mut self, value: i64) {
+        if self.count == 0 {
+            self.sum = value;
+            self.count = 1;
+            self.min = value;
+            self.max = value;
+            return;
         }
 
-        // CAS loop for max.
-        loop {
-            let old_max = self.max.load(Ordering::Relaxed);
-            if value <= old_max {
-                break;
-            }
-            if self
-                .max
-                .compare_exchange_weak(old_max, value, Ordering::Relaxed, Ordering::Relaxed)
-                .is_ok()
-            {
-                break;
-            }
+        self.sum += value;
+        self.count += 1;
+        if value < self.min {
+            self.min = value;
+        } else if value > self.max {
+            self.max = value;
         }
     }
 
     /// Returns a point-in-time snapshot.
+    #[inline(always)]
     pub fn snapshot(&self) -> GaugeSnapshot {
-        let count = self.count.load(Ordering::Relaxed);
-        let mut min_val = self.min.load(Ordering::Relaxed);
-        let mut max_val = self.max.load(Ordering::Relaxed);
+        let count = self.count;
+        let mut min_val = self.min;
+        let mut max_val = self.max;
 
         if count == 0 {
             min_val = 0;
@@ -220,7 +490,7 @@ impl GaugeAggregate {
         }
 
         GaugeSnapshot {
-            sum: self.sum.load(Ordering::Relaxed),
+            sum: self.sum,
             count,
             min: min_val,
             max: max_val,
@@ -243,13 +513,260 @@ pub struct GaugeSnapshot {
     pub max: i64,
 }
 
+/// Tracks all metrics emitted by a disk I/O completion.
+/// Used to avoid hashing the same disk dimension multiple times per event.
+pub struct DiskAggregate {
+    latency: LatencyAggregate,
+    bytes: CounterAggregate,
+    queue_depth: GaugeAggregate,
+}
+
+impl DiskAggregate {
+    /// Creates a new aggregate for disk latency, bytes, and queue depth.
+    pub fn new() -> Self {
+        Self {
+            latency: LatencyAggregate::new(),
+            bytes: CounterAggregate::new(),
+            queue_depth: GaugeAggregate::new(),
+        }
+    }
+
+    /// Records all per-disk metrics emitted by one disk I/O event.
+    #[inline(always)]
+    pub fn record(&mut self, latency_ns: u64, bytes: u32, queue_depth: u32) {
+        self.latency.record(latency_ns);
+        self.bytes.add(i64::from(bytes));
+        self.queue_depth.record(i64::from(queue_depth));
+    }
+
+    /// Returns a point-in-time snapshot of disk latency.
+    #[inline(always)]
+    pub fn latency_snapshot(&self) -> LatencySnapshot {
+        self.latency.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of disk bytes.
+    #[inline(always)]
+    pub fn bytes_snapshot(&self) -> CounterSnapshot {
+        self.bytes.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of disk queue depth.
+    #[inline(always)]
+    pub fn queue_depth_snapshot(&self) -> GaugeSnapshot {
+        self.queue_depth.snapshot()
+    }
+}
+
+impl Default for DiskAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks all TCP gauge metrics emitted by one network event.
+/// Used to avoid hashing the same TCP dimension multiple times per event.
+pub struct TcpMetricsAggregate {
+    rtt: GaugeAggregate,
+    cwnd: GaugeAggregate,
+}
+
+impl TcpMetricsAggregate {
+    /// Creates a new aggregate for TCP RTT and congestion window.
+    pub fn new() -> Self {
+        Self {
+            rtt: GaugeAggregate::new(),
+            cwnd: GaugeAggregate::new(),
+        }
+    }
+
+    /// Records both gauge values emitted by one TCP event.
+    #[inline(always)]
+    pub fn record(&mut self, rtt_us: u32, cwnd: u32) {
+        self.rtt.record(i64::from(rtt_us));
+        self.cwnd.record(i64::from(cwnd));
+    }
+
+    /// Returns a point-in-time snapshot of RTT.
+    #[inline(always)]
+    pub fn rtt_snapshot(&self) -> GaugeSnapshot {
+        self.rtt.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of CWND.
+    #[inline(always)]
+    pub fn cwnd_snapshot(&self) -> GaugeSnapshot {
+        self.cwnd.snapshot()
+    }
+}
+
+/// Tracks both wait components emitted by one sched_runqueue event.
+/// Used to avoid hashing the same scheduler dimension twice per event.
+pub struct SchedWaitAggregate {
+    runqueue: LatencyAggregate,
+    off_cpu: LatencyAggregate,
+}
+
+impl SchedWaitAggregate {
+    /// Creates a new aggregate for runqueue and off-CPU latency.
+    pub fn new() -> Self {
+        Self {
+            runqueue: LatencyAggregate::new(),
+            off_cpu: LatencyAggregate::new(),
+        }
+    }
+
+    /// Records both wait components emitted by one scheduler event.
+    #[inline(always)]
+    pub fn record(&mut self, runqueue_ns: u64, off_cpu_ns: u64) {
+        if runqueue_ns > 0 {
+            self.runqueue.record(runqueue_ns);
+        }
+        if off_cpu_ns > 0 {
+            self.off_cpu.record(off_cpu_ns);
+        }
+    }
+
+    /// Returns a point-in-time snapshot of runqueue latency.
+    #[inline(always)]
+    pub fn runqueue_snapshot(&self) -> LatencySnapshot {
+        self.runqueue.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of off-CPU latency.
+    #[inline(always)]
+    pub fn off_cpu_snapshot(&self) -> LatencySnapshot {
+        self.off_cpu.snapshot()
+    }
+}
+
+impl Default for SchedWaitAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Default for TcpMetricsAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks scheduler on-CPU latency alongside per-core time in one entry.
+///
+/// Every completed running slice currently updates both `sched_on_cpu` and
+/// `cpu_on_core`. Co-locating them behind one per-CPU map entry removes a hot
+/// second lookup while preserving exact exported metrics.
+pub struct SchedulerCpuAggregate {
+    sched_on_cpu: LatencyAggregate,
+    cpu_on_core: CounterAggregate,
+}
+
+impl SchedulerCpuAggregate {
+    pub fn new() -> Self {
+        Self {
+            sched_on_cpu: LatencyAggregate::new(),
+            cpu_on_core: CounterAggregate::new(),
+        }
+    }
+
+    #[inline(always)]
+    pub fn record_sched_on_cpu(&mut self, on_cpu_ns: u64) {
+        self.sched_on_cpu.record(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    pub fn record_sched_slice(&mut self, sched_on_cpu_ns: u64, cpu_on_core_ns: u64) {
+        self.record_sched_on_cpu(sched_on_cpu_ns);
+        self.cpu_on_core.add(cpu_on_core_ns as i64);
+    }
+
+    #[inline(always)]
+    pub fn add_cpu_on_core(&mut self, on_cpu_ns: u64) {
+        self.cpu_on_core.add(on_cpu_ns as i64);
+    }
+
+    #[inline(always)]
+    pub fn sched_on_cpu_snapshot(&self) -> LatencySnapshot {
+        self.sched_on_cpu.snapshot()
+    }
+
+    #[inline(always)]
+    pub fn cpu_on_core_snapshot(&self) -> CounterSnapshot {
+        self.cpu_on_core.snapshot()
+    }
+}
+
+impl Default for SchedulerCpuAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Tracks TCP TX bytes alongside inline TCP gauge metrics from the same event.
+/// Used to avoid hashing the same network dimension twice for metric-bearing
+/// TCP transmit events.
+pub struct TcpTxAggregate {
+    bytes: CounterAggregate,
+    metrics: TcpMetricsAggregate,
+}
+
+impl TcpTxAggregate {
+    /// Creates a new aggregate for TCP TX bytes, RTT, and congestion window.
+    pub fn new() -> Self {
+        Self {
+            bytes: CounterAggregate::new(),
+            metrics: TcpMetricsAggregate::new(),
+        }
+    }
+
+    /// Records bytes plus inline TCP gauge metrics from one transmit event.
+    #[inline(always)]
+    pub fn record(&mut self, bytes: i64, rtt_us: u32, cwnd: u32) {
+        self.bytes.add(bytes);
+        self.metrics.record(rtt_us, cwnd);
+    }
+
+    /// Records only the inline TCP gauge metrics.
+    ///
+    /// Kept for compatibility helpers that still build a TCP-only dimension.
+    #[inline(always)]
+    pub fn record_metrics(&mut self, rtt_us: u32, cwnd: u32) {
+        self.metrics.record(rtt_us, cwnd);
+    }
+
+    /// Returns a point-in-time snapshot of TX bytes.
+    #[inline(always)]
+    pub fn bytes_snapshot(&self) -> CounterSnapshot {
+        self.bytes.snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of RTT.
+    #[inline(always)]
+    pub fn rtt_snapshot(&self) -> GaugeSnapshot {
+        self.metrics.rtt_snapshot()
+    }
+
+    /// Returns a point-in-time snapshot of CWND.
+    #[inline(always)]
+    pub fn cwnd_snapshot(&self) -> GaugeSnapshot {
+        self.metrics.cwnd_snapshot()
+    }
+}
+
+impl Default for TcpTxAggregate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_latency_aggregate_single_value() {
-        let agg = LatencyAggregate::new();
+        let mut agg = LatencyAggregate::new();
         agg.record(5_000); // 5us
 
         let snap = agg.snapshot();
@@ -263,7 +780,7 @@ mod tests {
 
     #[test]
     fn test_latency_aggregate_multiple_values() {
-        let agg = LatencyAggregate::new();
+        let mut agg = LatencyAggregate::new();
         agg.record(1_000);
         agg.record(5_000);
         agg.record(10_000);
@@ -286,7 +803,7 @@ mod tests {
 
     #[test]
     fn test_counter_aggregate_add() {
-        let agg = CounterAggregate::new();
+        let mut agg = CounterAggregate::new();
         agg.add(100);
         agg.add(200);
 
@@ -297,7 +814,7 @@ mod tests {
 
     #[test]
     fn test_counter_aggregate_add_count() {
-        let agg = CounterAggregate::new();
+        let mut agg = CounterAggregate::new();
         agg.add_count(5);
         agg.add_count(3);
 
@@ -315,8 +832,27 @@ mod tests {
     }
 
     #[test]
+    fn test_count_aggregate_add_count() {
+        let mut agg = CountAggregate::new();
+        agg.add_count(5);
+        agg.add_count(3);
+
+        let snap = agg.snapshot();
+        assert_eq!(snap.count, 8);
+        assert_eq!(snap.sum, 0);
+    }
+
+    #[test]
+    fn test_count_aggregate_empty_snapshot() {
+        let agg = CountAggregate::new();
+        let snap = agg.snapshot();
+        assert_eq!(snap.count, 0);
+        assert_eq!(snap.sum, 0);
+    }
+
+    #[test]
     fn test_gauge_aggregate_single_value() {
-        let agg = GaugeAggregate::new();
+        let mut agg = GaugeAggregate::new();
         agg.record(42);
 
         let snap = agg.snapshot();
@@ -328,7 +864,7 @@ mod tests {
 
     #[test]
     fn test_gauge_aggregate_multiple_values() {
-        let agg = GaugeAggregate::new();
+        let mut agg = GaugeAggregate::new();
         agg.record(10);
         agg.record(50);
         agg.record(30);
@@ -351,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_gauge_aggregate_negative_values() {
-        let agg = GaugeAggregate::new();
+        let mut agg = GaugeAggregate::new();
         agg.record(-10);
         agg.record(20);
         agg.record(-30);
@@ -364,27 +900,48 @@ mod tests {
     }
 
     #[test]
-    fn test_latency_aggregate_concurrent() {
-        use std::sync::Arc;
-        use std::thread;
-
-        let agg = Arc::new(LatencyAggregate::new());
-        let mut handles = Vec::new();
-
-        for t in 0..4 {
-            let agg = Arc::clone(&agg);
-            handles.push(thread::spawn(move || {
-                for i in 0..1000 {
-                    agg.record((t * 1000 + i) as u64);
-                }
-            }));
+    fn test_latency_aggregate_many_values() {
+        let mut agg = LatencyAggregate::new();
+        for i in 0..4000 {
+            agg.record(i as u64);
         }
-
-        for h in handles {
-            h.join().expect("thread panicked");
-        }
-
         let snap = agg.snapshot();
         assert_eq!(snap.count, 4000);
+    }
+
+    #[test]
+    fn test_disk_aggregate_records_all_components() {
+        let mut agg = DiskAggregate::new();
+        agg.record(50_000, 4096, 3);
+
+        let latency = agg.latency_snapshot();
+        assert_eq!(latency.count, 1);
+        assert_eq!(latency.sum, 50_000);
+
+        let bytes = agg.bytes_snapshot();
+        assert_eq!(bytes.count, 1);
+        assert_eq!(bytes.sum, 4096);
+
+        let queue_depth = agg.queue_depth_snapshot();
+        assert_eq!(queue_depth.count, 1);
+        assert_eq!(queue_depth.sum, 3);
+    }
+
+    #[test]
+    fn test_tcp_tx_aggregate_records_all_components() {
+        let mut agg = TcpTxAggregate::new();
+        agg.record(1_500, 120, 64_000);
+
+        let bytes = agg.bytes_snapshot();
+        assert_eq!(bytes.count, 1);
+        assert_eq!(bytes.sum, 1_500);
+
+        let rtt = agg.rtt_snapshot();
+        assert_eq!(rtt.count, 1);
+        assert_eq!(rtt.sum, 120);
+
+        let cwnd = agg.cwnd_snapshot();
+        assert_eq!(cwnd.count, 1);
+        assert_eq!(cwnd.sum, 64_000);
     }
 }

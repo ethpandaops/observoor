@@ -1,20 +1,182 @@
 //! Event parsing for raw BPF ring buffer samples.
 //!
 //! Decodes byte slices from the ring buffer into typed [`ParsedEvent`] values.
-//! Length checks happen once per event payload, then fixed-width reads use
-//! unchecked unaligned loads to minimize parser overhead.
+//! Length checks happen once per event payload, then fixed-width records are
+//! decoded with single unaligned struct loads to minimize parser overhead.
+
+use std::mem::size_of;
 
 use thiserror::Error;
 
 use super::event::{
-    BlockMergeEvent, ClientType, Direction, DiskIOEvent, Event, EventType, FDEvent,
-    MemLatencyEvent, NetIOEvent, NetTransport, OOMKillEvent, PageFaultEvent, ParsedEvent,
-    ProcessExitEvent, SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent,
-    TcpStateEvent, TypedEvent,
+    BlockMergeEvent, DiskIOEvent, Event, EventType, MemLatencyEvent, NetIOEvent,
+    NetIOTcpTxMetricsEvent, NetTransport, PageFaultEvent, ParsedEvent, SchedCombinedEvent,
+    SchedEvent, SchedRunqueueEvent, SwapEvent, SyscallEvent, TcpRetransmitEvent, TypedEvent,
+    MAX_CLIENT_TYPE,
 };
+use super::ParsedEventBatch;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawEventHeader {
+    timestamp_ns: u64,
+    pid: u32,
+    tid: u32,
+    event_type: u8,
+    client_type: u8,
+    pad: [u8; 6],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawCompactBasicMarkerEvent {
+    pid: u32,
+    event_type: u8,
+    client_type: u8,
+    marker: u8,
+    pad: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactSyscallEvent {
+    pid: u32,
+    latency_ns: u32,
+    event_type: u8,
+    client_type: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactNetIOEvent {
+    pid: u32,
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    event_type: u8,
+    client_type: u8,
+    transport: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactNetIOMetricsEvent {
+    pid: u32,
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    srtt_us: u32,
+    cwnd: u32,
+    event_type: u8,
+    client_type: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactDiskIOEvent {
+    latency_ns: u64,
+    pid: u32,
+    bytes: u32,
+    queue_depth: u32,
+    device_id: u32,
+    rw: u8,
+    event_type: u8,
+    client_type: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawDiskIOPayload {
+    latency_ns: u64,
+    bytes: u32,
+    queue_depth: u32,
+    device_id: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawNetIOPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawNetIOMetricsPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    srtt_us: u32,
+    cwnd: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedPayload {
+    on_cpu_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedCombinedPayload {
+    on_cpu_ns: u64,
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+    next_pid: u32,
+    next_tid: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSchedRunqueuePayload {
+    runqueue_ns: u64,
+    off_cpu_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawBlockMergePayload {
+    bytes: u32,
+    rw: u8,
+    _pad: [u8; 3],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawTcpRetransmitPayload {
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    _pad: [u8; 8],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawMemLatencyPayload {
+    duration_ns: u64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct RawSwapPayload {
+    pages: u64,
+}
 
 /// Event header size in bytes (matches `struct event_header` in observoor.h).
-const HEADER_SIZE: usize = 24;
+const HEADER_SIZE: usize = size_of::<RawEventHeader>();
+const COMPACT_BASIC_MARKER_EVENT_SIZE: usize = size_of::<RawCompactBasicMarkerEvent>();
+const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
+const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
+const COMPACT_NET_IO_METRICS_EVENT_SIZE: usize = size_of::<RawCompactNetIOMetricsEvent>();
+const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
+const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
+const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
+const _: () = assert!(COMPACT_BASIC_MARKER_EVENT_SIZE == 8);
+const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
+const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
+const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
+const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 27);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -31,319 +193,780 @@ pub enum ParseError {
     #[error("reading {event_name}: unexpected end of data")]
     PayloadTruncated { event_name: &'static str },
 
-    #[error("reading {event_name}: invalid direction byte {raw}")]
-    InvalidDirection { event_name: &'static str, raw: u8 },
-
     #[error("reading {event_name}: invalid transport byte {raw}")]
     InvalidNetTransport { event_name: &'static str, raw: u8 },
 }
 
+#[cfg_attr(not(feature = "bpf"), allow(dead_code))]
+trait ParsedEventSink {
+    type Output;
+
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        event_type_raw: u8,
+        client_type_raw: u8,
+        secondary_event_type_raw: u8,
+        secondary_client_type_raw: u8,
+    ) -> Self::Output;
+}
+
+struct ParsedEventOnlySink;
+
+impl ParsedEventSink for ParsedEventOnlySink {
+    type Output = ParsedEvent;
+
+    #[inline(always)]
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        _event_type_raw: u8,
+        _client_type_raw: u8,
+        _secondary_event_type_raw: u8,
+        _secondary_client_type_raw: u8,
+    ) -> Self::Output {
+        ParsedEvent { raw, typed }
+    }
+}
+
+struct ParsedEventBatchSink<'a> {
+    batch: &'a mut ParsedEventBatch,
+}
+
+impl ParsedEventSink for ParsedEventBatchSink<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        event_type_raw: u8,
+        client_type_raw: u8,
+        secondary_event_type_raw: u8,
+        secondary_client_type_raw: u8,
+    ) -> Self::Output {
+        // Safety: the ring-buffer read loop dispatches or swaps batches before
+        // they reach capacity, so pooled tracer batches always have spare room
+        // here.
+        unsafe {
+            self.batch.push_counted_unchecked(
+                ParsedEvent { raw, typed },
+                event_type_raw,
+                client_type_raw,
+                secondary_event_type_raw,
+                secondary_client_type_raw,
+            );
+        }
+    }
+}
+
 /// Parse a raw ring buffer sample into a [`ParsedEvent`].
+#[inline(always)]
 pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
+    let mut sink = ParsedEventOnlySink;
+    parse_event_with_sink(data, &mut sink)
+}
+
+/// Parse a raw ring buffer sample and append it directly into a batch.
+#[inline(always)]
+#[cfg_attr(not(feature = "bpf"), allow(dead_code))]
+pub(crate) fn parse_event_into_batch(
+    data: &[u8],
+    batch: &mut ParsedEventBatch,
+) -> Result<(), ParseError> {
+    let mut sink = ParsedEventBatchSink { batch };
+    parse_event_with_sink(data, &mut sink)
+}
+
+#[inline(always)]
+fn parse_event_with_sink<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    if data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE {
+        return parse_compact_basic_marker_event(data, sink);
+    }
+    if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
+        return parse_compact_syscall_event(data, sink);
+    }
+    if data.len() == COMPACT_NET_IO_EVENT_SIZE {
+        return parse_compact_net_io_event(data, sink);
+    }
+    if data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE {
+        return parse_compact_net_io_metrics_event(data, sink);
+    }
+    if data.len() == COMPACT_DISK_IO_EVENT_SIZE {
+        return parse_compact_disk_io_event(data, sink);
+    }
+
     if data.len() < HEADER_SIZE {
         return Err(ParseError::Truncated { size: data.len() });
     }
 
-    let event_type_raw = read_u8(data, 16);
-    let client_type_raw = read_u8(data, 17);
+    // Safety: `data.len() >= HEADER_SIZE` is checked above and the raw header
+    // layout matches the BPF event header exactly.
+    let header = unsafe { read_unaligned_struct::<RawEventHeader>(data) };
+    let event_type_raw = header.event_type;
+    let client_type_raw = header.client_type;
 
-    let event_type = EventType::from_u8(event_type_raw).ok_or(ParseError::UnknownEventType {
-        raw: event_type_raw,
-    })?;
-    let client_type =
-        ClientType::from_u8(client_type_raw).ok_or(ParseError::UnknownClientType {
-            raw: client_type_raw,
-        })?;
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
 
-    let event = Event {
-        timestamp_ns: read_u64_le(data, 0),
-        pid: read_u32_le(data, 8),
-        tid: read_u32_le(data, 12),
-        event_type,
-        client_type,
-    };
-
+    // Decode the raw event tag once and build the typed payload from the same
+    // dispatch to avoid a second hot-path match on `EventType`.
     // Safety: `data.len() >= HEADER_SIZE` is checked at function entry.
     let payload = unsafe { data.get_unchecked(HEADER_SIZE..) };
+    let (event_type, secondary_event_type_raw, secondary_client_type_raw, scheduler_cpu_id, typed) =
+        match event_type_raw {
+            1 => (
+                EventType::SyscallRead,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallRead(parse_syscall(&header)),
+            ),
+            2 => (
+                EventType::SyscallWrite,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallWrite(parse_syscall(&header)),
+            ),
+            3 => (
+                EventType::SyscallFutex,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallFutex(parse_syscall(&header)),
+            ),
+            4 => (
+                EventType::SyscallMmap,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallMmap(parse_syscall(&header)),
+            ),
+            5 => (
+                EventType::SyscallEpollWait,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallEpollWait(parse_syscall(&header)),
+            ),
+            6 => (
+                EventType::DiskIO,
+                0,
+                0,
+                0,
+                TypedEvent::DiskIO(parse_disk_io(&header, payload)?),
+            ),
+            7 => (EventType::NetTX, 0, 0, 0, parse_net_tx(&header, payload)?),
+            8 => (
+                EventType::NetRX,
+                0,
+                0,
+                0,
+                TypedEvent::NetIORx(parse_net_rx(payload, &header)?),
+            ),
+            9 => {
+                let cpu_id = decode_u32_from_pad(&header.pad, 1);
+                if payload.len() >= SCHED_COMBINED_PAYLOAD_SIZE {
+                    let next_client_type = header.pad[5];
+                    if next_client_type > MAX_CLIENT_TYPE as u8 {
+                        return Err(unknown_client_type(next_client_type));
+                    }
 
-    let typed = match event_type {
-        EventType::SyscallRead
-        | EventType::SyscallWrite
-        | EventType::SyscallFutex
-        | EventType::SyscallMmap
-        | EventType::SyscallEpollWait
-        | EventType::SyscallFsync
-        | EventType::SyscallFdatasync
-        | EventType::SyscallPwrite => TypedEvent::Syscall(parse_syscall(event, payload)?),
+                    (
+                        EventType::SchedSwitch,
+                        EventType::SchedRunqueue as u8,
+                        next_client_type,
+                        cpu_id,
+                        TypedEvent::SchedCombined(parse_sched_combined(payload)?),
+                    )
+                } else {
+                    (
+                        EventType::SchedSwitch,
+                        0,
+                        0,
+                        cpu_id,
+                        TypedEvent::Sched(parse_sched(payload)?),
+                    )
+                }
+            }
+            10 => (
+                EventType::PageFault,
+                0,
+                0,
+                0,
+                TypedEvent::PageFault(parse_page_fault(&header)),
+            ),
+            11 => (EventType::FDOpen, 0, 0, 0, TypedEvent::FDOpen),
+            12 => (EventType::FDClose, 0, 0, 0, TypedEvent::FDClose),
+            13 => (
+                EventType::SyscallFsync,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallFsync(parse_syscall(&header)),
+            ),
+            14 => (
+                EventType::SyscallFdatasync,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallFdatasync(parse_syscall(&header)),
+            ),
+            15 => (
+                EventType::SyscallPwrite,
+                0,
+                0,
+                0,
+                TypedEvent::SyscallPwrite(parse_syscall(&header)),
+            ),
+            16 => (
+                EventType::SchedRunqueue,
+                0,
+                0,
+                decode_u32_from_pad(&header.pad, 0),
+                TypedEvent::SchedRunqueue(parse_sched_runqueue(&header, payload)?),
+            ),
+            17 => (
+                EventType::BlockMerge,
+                0,
+                0,
+                0,
+                TypedEvent::BlockMerge(parse_block_merge(payload)?),
+            ),
+            18 => (
+                EventType::TcpRetransmit,
+                0,
+                0,
+                0,
+                TypedEvent::TcpRetransmit(parse_tcp_retransmit(payload)?),
+            ),
+            19 => (EventType::TcpState, 0, 0, 0, TypedEvent::TcpState),
+            20 => (
+                EventType::MemReclaim,
+                0,
+                0,
+                0,
+                TypedEvent::MemReclaim(parse_mem_latency(payload)?),
+            ),
+            21 => (
+                EventType::MemCompaction,
+                0,
+                0,
+                0,
+                TypedEvent::MemCompaction(parse_mem_latency(payload)?),
+            ),
+            22 => (
+                EventType::SwapIn,
+                0,
+                0,
+                0,
+                TypedEvent::SwapIn(parse_swap(payload)?),
+            ),
+            23 => (
+                EventType::SwapOut,
+                0,
+                0,
+                0,
+                TypedEvent::SwapOut(parse_swap(payload)?),
+            ),
+            24 => (EventType::OOMKill, 0, 0, 0, TypedEvent::OOMKill),
+            25 => (EventType::ProcessExit, 0, 0, 0, TypedEvent::ProcessExit),
+            _ => {
+                return Err(unknown_event_type(event_type_raw));
+            }
+        };
 
-        EventType::DiskIO => TypedEvent::DiskIO(parse_disk_io(event, payload)?),
+    let timestamp_ns = u64::from_le(header.timestamp_ns);
+    let pid = u32::from_le(header.pid);
+    let tid = u32::from_le(header.tid);
+    let event = if scheduler_cpu_id != 0 {
+        Event::new_validated_with_secondary_and_cpu(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            client_type_raw,
+            secondary_event_type_raw,
+            secondary_client_type_raw,
+            scheduler_cpu_id,
+        )
+    } else if secondary_event_type_raw != 0 {
+        Event::new_validated_with_secondary(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            client_type_raw,
+            secondary_event_type_raw,
+            secondary_client_type_raw,
+        )
+    } else {
+        Event::new_validated(timestamp_ns, pid, tid, event_type, client_type_raw)
+    };
+    Ok(sink.emit(
+        event,
+        typed,
+        event_type_raw,
+        client_type_raw,
+        secondary_event_type_raw,
+        secondary_client_type_raw,
+    ))
+}
 
-        EventType::NetTX | EventType::NetRX => TypedEvent::NetIO(parse_net_io(event, payload)?),
+#[inline(always)]
+fn parse_compact_basic_marker_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_BASIC_MARKER_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactBasicMarkerEvent>(data) };
+    let client_type_raw = raw.client_type;
 
-        EventType::SchedSwitch => TypedEvent::Sched(parse_sched(event, payload)?),
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
 
-        EventType::SchedRunqueue => {
-            TypedEvent::SchedRunqueue(parse_sched_runqueue(event, payload)?)
+    let (event_type, typed) = match raw.event_type {
+        10 => (
+            EventType::PageFault,
+            TypedEvent::PageFault(PageFaultEvent {
+                major: raw.marker != 0,
+            }),
+        ),
+        11 => (EventType::FDOpen, TypedEvent::FDOpen),
+        12 => (EventType::FDClose, TypedEvent::FDClose),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
         }
-
-        EventType::PageFault => TypedEvent::PageFault(parse_page_fault(event, payload)?),
-
-        EventType::FDOpen | EventType::FDClose => TypedEvent::FD(parse_fd(event, payload)?),
-
-        EventType::BlockMerge => TypedEvent::BlockMerge(parse_block_merge(event, payload)?),
-
-        EventType::TcpRetransmit => {
-            TypedEvent::TcpRetransmit(parse_tcp_retransmit(event, payload)?)
-        }
-
-        EventType::TcpState => TypedEvent::TcpState(parse_tcp_state(event, payload)?),
-
-        EventType::MemReclaim | EventType::MemCompaction => {
-            TypedEvent::MemLatency(parse_mem_latency(event, payload)?)
-        }
-
-        EventType::SwapIn | EventType::SwapOut => TypedEvent::Swap(parse_swap(event, payload)?),
-
-        EventType::OOMKill => TypedEvent::OOMKill(parse_oom_kill(event, payload)?),
-
-        EventType::ProcessExit => TypedEvent::ProcessExit(parse_process_exit(event, payload)?),
     };
 
-    Ok(ParsedEvent { raw: event, typed })
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
+fn parse_compact_syscall_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_SYSCALL_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_SYSCALL_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactSyscallEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    let latency_ns = u64::from(u32::from_le(raw.latency_ns));
+    let (event_type, typed) = match raw.event_type {
+        1 => (
+            EventType::SyscallRead,
+            TypedEvent::SyscallRead(SyscallEvent { latency_ns }),
+        ),
+        2 => (
+            EventType::SyscallWrite,
+            TypedEvent::SyscallWrite(SyscallEvent { latency_ns }),
+        ),
+        3 => (
+            EventType::SyscallFutex,
+            TypedEvent::SyscallFutex(SyscallEvent { latency_ns }),
+        ),
+        4 => (
+            EventType::SyscallMmap,
+            TypedEvent::SyscallMmap(SyscallEvent { latency_ns }),
+        ),
+        5 => (
+            EventType::SyscallEpollWait,
+            TypedEvent::SyscallEpollWait(SyscallEvent { latency_ns }),
+        ),
+        13 => (
+            EventType::SyscallFsync,
+            TypedEvent::SyscallFsync(SyscallEvent { latency_ns }),
+        ),
+        14 => (
+            EventType::SyscallFdatasync,
+            TypedEvent::SyscallFdatasync(SyscallEvent { latency_ns }),
+        ),
+        15 => (
+            EventType::SyscallPwrite,
+            TypedEvent::SyscallPwrite(SyscallEvent { latency_ns }),
+        ),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
+        }
+    };
+
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
+fn parse_compact_net_io_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_NET_IO_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactNetIOEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    let transport_raw = raw.transport;
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(invalid_net_transport("net IO event", transport_raw));
+    }
+
+    let bytes = u32::from_le(raw.bytes);
+    let src_port = u16::from_le(raw.src_port);
+    let dst_port = u16::from_le(raw.dst_port);
+    let (event_type, typed) = match raw.event_type {
+        7 => (
+            EventType::NetTX,
+            TypedEvent::NetIOTx(NetIOEvent {
+                bytes,
+                local_port: src_port,
+                remote_port: dst_port,
+                transport: transport_raw,
+            }),
+        ),
+        8 => (
+            EventType::NetRX,
+            TypedEvent::NetIORx(NetIOEvent {
+                bytes,
+                local_port: dst_port,
+                remote_port: src_port,
+                transport: transport_raw,
+            }),
+        ),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
+        }
+    };
+
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+        typed,
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
+fn parse_compact_net_io_metrics_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_NET_IO_METRICS_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactNetIOMetricsEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    if raw.event_type != EventType::NetTX as u8 {
+        return Err(ParseError::Truncated { size: data.len() });
+    }
+
+    Ok(sink.emit(
+        Event::new_validated(
+            0,
+            u32::from_le(raw.pid),
+            0,
+            EventType::NetTX,
+            client_type_raw,
+        ),
+        TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+            bytes: u32::from_le(raw.bytes),
+            local_port: u16::from_le(raw.src_port),
+            remote_port: u16::from_le(raw.dst_port),
+            srtt_us: u32::from_le(raw.srtt_us),
+            cwnd: u32::from_le(raw.cwnd),
+        }),
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
+fn parse_compact_disk_io_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_DISK_IO_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_DISK_IO_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactDiskIOEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    if raw.event_type != EventType::DiskIO as u8 {
+        return Err(ParseError::Truncated { size: data.len() });
+    }
+
+    Ok(sink.emit(
+        Event::new_validated(
+            0,
+            u32::from_le(raw.pid),
+            0,
+            EventType::DiskIO,
+            client_type_raw,
+        ),
+        TypedEvent::DiskIO(DiskIOEvent {
+            latency_ns: u64::from_le(raw.latency_ns),
+            bytes: u32::from_le(raw.bytes),
+            rw: raw.rw,
+            queue_depth: u32::from_le(raw.queue_depth),
+            device_id: u32::from_le(raw.device_id),
+        }),
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
 }
 
 // ---------------------------------------------------------------------------
-// Safe byte-reading helpers (no indexing, no panics)
+// Safe fixed-record helpers (no indexing, no panics)
 // ---------------------------------------------------------------------------
 
-#[inline(always)]
-fn read_u8(data: &[u8], offset: usize) -> u8 {
-    debug_assert!(offset < data.len());
-    // Safety: callers verify payload lengths before reading fixed offsets.
-    unsafe { *data.as_ptr().add(offset) }
+#[cold]
+#[inline(never)]
+fn payload_truncated(name: &'static str) -> ParseError {
+    ParseError::PayloadTruncated { event_name: name }
+}
+
+#[cold]
+#[inline(never)]
+fn unknown_event_type(raw: u8) -> ParseError {
+    ParseError::UnknownEventType { raw }
+}
+
+#[cold]
+#[inline(never)]
+fn unknown_client_type(raw: u8) -> ParseError {
+    ParseError::UnknownClientType { raw }
+}
+
+#[cold]
+#[inline(never)]
+fn invalid_net_transport(name: &'static str, raw: u8) -> ParseError {
+    ParseError::InvalidNetTransport {
+        event_name: name,
+        raw,
+    }
 }
 
 #[inline(always)]
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes(read_fixed::<2>(data, offset))
-}
-
-#[inline(always)]
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes(read_fixed::<4>(data, offset))
-}
-
-#[inline(always)]
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes(read_fixed::<8>(data, offset))
-}
-
-#[inline(always)]
-fn read_fixed<const N: usize>(data: &[u8], offset: usize) -> [u8; N] {
-    debug_assert!(offset + N <= data.len());
-    // Safety: callers ensure `offset + N <= data.len()` via upfront payload checks.
-    unsafe { (data.as_ptr().add(offset) as *const [u8; N]).read_unaligned() }
-}
-
-fn read_i32_le(data: &[u8], offset: usize) -> i32 {
-    read_u32_le(data, offset) as i32
-}
-
-fn read_i64_le(data: &[u8], offset: usize) -> i64 {
-    read_u64_le(data, offset) as i64
-}
-
 fn ensure_payload(data: &[u8], need: usize, name: &'static str) -> Result<(), ParseError> {
     if data.len() < need {
-        Err(ParseError::PayloadTruncated { event_name: name })
+        Err(payload_truncated(name))
     } else {
         Ok(())
     }
+}
+
+#[inline(always)]
+unsafe fn read_unaligned_struct<T: Copy>(data: &[u8]) -> T {
+    debug_assert!(size_of::<T>() <= data.len());
+    (data.as_ptr() as *const T).read_unaligned()
+}
+
+#[inline(always)]
+fn read_payload<T: Copy>(data: &[u8], name: &'static str) -> Result<T, ParseError> {
+    ensure_payload(data, size_of::<T>(), name)?;
+    // Safety: `ensure_payload` guarantees the payload is large enough for `T`.
+    Ok(unsafe { read_unaligned_struct::<T>(data) })
+}
+
+#[inline(always)]
+fn decode_u32_from_pad(pad: &[u8; 6], offset: usize) -> u32 {
+    debug_assert!(offset <= 2);
+    u32::from_le_bytes([
+        pad[offset],
+        pad[offset + 1],
+        pad[offset + 2],
+        pad[offset + 3],
+    ])
 }
 
 // ---------------------------------------------------------------------------
 // Per-event-type parsers
 // ---------------------------------------------------------------------------
 
-/// Syscall events: types 1-5, 13-15. Payload: 24 bytes.
-fn parse_syscall(event: Event, data: &[u8]) -> Result<SyscallEvent, ParseError> {
-    ensure_payload(data, 24, "syscall event")?;
-    Ok(SyscallEvent {
-        event,
-        latency_ns: read_u64_le(data, 0),
-        ret: read_i64_le(data, 8),
-        syscall_nr: read_u32_le(data, 16),
-        fd: read_i32_le(data, 20),
-    })
+/// Syscall events: types 1-5, 13-15.
+///
+/// The kernel stores the 32-bit latency directly in `hdr.pad[0..3]`, keeping
+/// the hottest event family header-only on the ring buffer.
+fn parse_syscall(header: &RawEventHeader) -> SyscallEvent {
+    SyscallEvent {
+        latency_ns: u64::from(decode_u32_from_pad(&header.pad, 0)),
+    }
 }
 
-/// Disk I/O event: type 6. Payload: 24 bytes.
-fn parse_disk_io(event: Event, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
-    ensure_payload(data, 24, "disk IO event")?;
+/// Disk I/O event: type 6. Payload: 20 bytes.
+/// read/write is stored in `hdr.pad[0]`.
+fn parse_disk_io(header: &RawEventHeader, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
+    let raw = read_payload::<RawDiskIOPayload>(data, "disk IO event")?;
     Ok(DiskIOEvent {
-        event,
-        latency_ns: read_u64_le(data, 0),
-        bytes: read_u32_le(data, 8),
-        rw: read_u8(data, 12),
-        // pad[3] at 13-15
-        queue_depth: read_u32_le(data, 16),
-        device_id: read_u32_le(data, 20),
+        latency_ns: u64::from_le(raw.latency_ns),
+        bytes: u32::from_le(raw.bytes),
+        rw: header.pad[0],
+        queue_depth: u32::from_le(raw.queue_depth),
+        device_id: u32::from_le(raw.device_id),
     })
 }
 
-/// Net I/O event: types 7-8. Payload: 20 bytes minimum.
-fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
-    ensure_payload(data, 20, "net IO event")?;
-    let direction_raw = read_u8(data, 8);
-    let direction = Direction::from_u8(direction_raw).ok_or(ParseError::InvalidDirection {
-        event_name: "net IO event",
-        raw: direction_raw,
-    })?;
-    let transport_raw = read_u8(data, 10);
-    let transport =
-        NetTransport::from_u8(transport_raw).ok_or(ParseError::InvalidNetTransport {
-            event_name: "net IO event",
-            raw: transport_raw,
-        })?;
+/// Net I/O TX event: type 7. Payload is either:
+/// - 8-byte generic TX data with transport stored in `hdr.pad[0]`, or
+/// - 16-byte TCP metrics data where transport is implied by the payload shape.
+fn parse_net_tx(header: &RawEventHeader, data: &[u8]) -> Result<TypedEvent, ParseError> {
+    if data.len() >= size_of::<RawNetIOMetricsPayload>() {
+        let metrics = read_payload::<RawNetIOMetricsPayload>(data, "net IO event")?;
+        return Ok(TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+            bytes: u32::from_le(metrics.bytes),
+            local_port: u16::from_le(metrics.src_port),
+            remote_port: u16::from_le(metrics.dst_port),
+            srtt_us: u32::from_le(metrics.srtt_us),
+            cwnd: u32::from_le(metrics.cwnd),
+        }));
+    }
+
+    let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
+    let transport_raw = header.pad[0];
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(invalid_net_transport("net IO event", transport_raw));
+    }
+
+    Ok(TypedEvent::NetIOTx(NetIOEvent {
+        bytes: u32::from_le(raw.bytes),
+        local_port: u16::from_le(raw.src_port),
+        remote_port: u16::from_le(raw.dst_port),
+        transport: transport_raw,
+    }))
+}
+
+/// Net I/O RX event payload.
+/// transport is stored in `hdr.pad[0]`, and ports are normalized to
+/// local=destination, remote=source for receive-side events.
+fn parse_net_rx(data: &[u8], header: &RawEventHeader) -> Result<NetIOEvent, ParseError> {
+    let raw = read_payload::<RawNetIOPayload>(data, "net IO event")?;
+    let transport_raw = header.pad[0];
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(invalid_net_transport("net IO event", transport_raw));
+    }
+
     Ok(NetIOEvent {
-        event,
-        bytes: read_u32_le(data, 0),
-        src_port: read_u16_le(data, 4),
-        dst_port: read_u16_le(data, 6),
-        direction,
-        transport,
-        has_metrics: read_u8(data, 9) != 0,
-        // pad[1] at 11
-        srtt_us: read_u32_le(data, 12),
-        cwnd: read_u32_le(data, 16),
+        bytes: u32::from_le(raw.bytes),
+        local_port: u16::from_le(raw.dst_port),
+        remote_port: u16::from_le(raw.src_port),
+        transport: transport_raw,
     })
 }
 
-/// Scheduler context-switch event: type 9. Payload: 16 bytes.
-fn parse_sched(event: Event, data: &[u8]) -> Result<SchedEvent, ParseError> {
-    ensure_payload(data, 16, "sched event")?;
+/// Scheduler context-switch event payload: 8 bytes.
+fn parse_sched(data: &[u8]) -> Result<SchedEvent, ParseError> {
+    let raw = read_payload::<RawSchedPayload>(data, "sched event")?;
     Ok(SchedEvent {
-        event,
-        on_cpu_ns: read_u64_le(data, 0),
-        voluntary: read_u8(data, 8) != 0,
-        cpu_id: read_u32_le(data, 12),
+        on_cpu_ns: u64::from_le(raw.on_cpu_ns),
     })
 }
 
-/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 24 bytes.
-fn parse_sched_runqueue(event: Event, data: &[u8]) -> Result<SchedRunqueueEvent, ParseError> {
-    ensure_payload(data, 24, "sched runqueue event")?;
+/// Combined scheduler switch-out + switch-in payload: 32 bytes.
+fn parse_sched_combined(data: &[u8]) -> Result<SchedCombinedEvent, ParseError> {
+    let raw = read_payload::<RawSchedCombinedPayload>(data, "sched combined event")?;
+    Ok(SchedCombinedEvent {
+        on_cpu_ns: u64::from_le(raw.on_cpu_ns),
+        runqueue_ns: u64::from_le(raw.runqueue_ns),
+        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
+        next_pid: u32::from_le(raw.next_pid),
+        next_tid: u32::from_le(raw.next_tid),
+    })
+}
+
+/// Scheduler runqueue/off-CPU latency event: type 16. Payload: 16 bytes.
+fn parse_sched_runqueue(
+    _header: &RawEventHeader,
+    data: &[u8],
+) -> Result<SchedRunqueueEvent, ParseError> {
+    let raw = read_payload::<RawSchedRunqueuePayload>(data, "sched runqueue event")?;
     Ok(SchedRunqueueEvent {
-        event,
-        runqueue_ns: read_u64_le(data, 0),
-        off_cpu_ns: read_u64_le(data, 8),
-        cpu_id: read_u32_le(data, 16),
+        runqueue_ns: u64::from_le(raw.runqueue_ns),
+        off_cpu_ns: u64::from_le(raw.off_cpu_ns),
     })
 }
 
-/// Page fault event: type 10. Payload: 16 bytes.
-fn parse_page_fault(event: Event, data: &[u8]) -> Result<PageFaultEvent, ParseError> {
-    ensure_payload(data, 16, "page fault event")?;
-    Ok(PageFaultEvent {
-        event,
-        address: read_u64_le(data, 0),
-        major: read_u8(data, 8) != 0,
-    })
-}
-
-/// File descriptor open/close event: types 11-12. Payload: 72 bytes.
-fn parse_fd(event: Event, data: &[u8]) -> Result<FDEvent, ParseError> {
-    ensure_payload(data, 72, "FD event")?;
-    // Safety: ensure_payload above guarantees `data[8..72]` is in-bounds.
-    let filename_bytes = unsafe { data.get_unchecked(8..72) };
-    let filename = if filename_bytes.first().copied().unwrap_or(0) == 0 {
-        String::new()
-    } else {
-        let null_pos = filename_bytes
-            .iter()
-            .position(|&b| b == 0)
-            .unwrap_or(filename_bytes.len());
-        let trimmed = filename_bytes.get(..null_pos).unwrap_or(&[]);
-
-        match std::str::from_utf8(trimmed) {
-            Ok(s) => s.to_owned(),
-            Err(_) => String::from_utf8_lossy(trimmed).into_owned(),
-        }
-    };
-    Ok(FDEvent {
-        event,
-        fd: read_i32_le(data, 0),
-        // pad[4] at 4-7
-        filename,
-    })
+/// Page fault event: type 10. No payload; major/minor is carried in `hdr.pad[0]`.
+fn parse_page_fault(header: &RawEventHeader) -> PageFaultEvent {
+    PageFaultEvent {
+        major: header.pad[0] != 0,
+    }
 }
 
 /// Block merge event: type 17. Payload: 8 bytes.
-fn parse_block_merge(event: Event, data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
-    ensure_payload(data, 8, "block merge event")?;
+fn parse_block_merge(data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
+    let raw = read_payload::<RawBlockMergePayload>(data, "block merge event")?;
     Ok(BlockMergeEvent {
-        event,
-        bytes: read_u32_le(data, 0),
-        rw: read_u8(data, 4),
+        bytes: u32::from_le(raw.bytes),
+        rw: raw.rw,
     })
 }
 
 /// TCP retransmit event: type 18. Payload: 16 bytes (8 meaningful + 8 pad).
-fn parse_tcp_retransmit(event: Event, data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
-    ensure_payload(data, 16, "tcp retransmit event")?;
+fn parse_tcp_retransmit(data: &[u8]) -> Result<TcpRetransmitEvent, ParseError> {
+    let raw = read_payload::<RawTcpRetransmitPayload>(data, "tcp retransmit event")?;
     Ok(TcpRetransmitEvent {
-        event,
-        bytes: read_u32_le(data, 0),
-        src_port: read_u16_le(data, 4),
-        dst_port: read_u16_le(data, 6),
-    })
-}
-
-/// TCP state change event: type 19. Payload: 16 bytes (6 meaningful + 10 pad).
-fn parse_tcp_state(event: Event, data: &[u8]) -> Result<TcpStateEvent, ParseError> {
-    ensure_payload(data, 16, "tcp state event")?;
-    Ok(TcpStateEvent {
-        event,
-        src_port: read_u16_le(data, 0),
-        dst_port: read_u16_le(data, 2),
-        new_state: read_u8(data, 4),
-        old_state: read_u8(data, 5),
+        bytes: u32::from_le(raw.bytes),
+        local_port: u16::from_le(raw.src_port),
+        remote_port: u16::from_le(raw.dst_port),
     })
 }
 
 /// Memory reclaim/compaction latency event: types 20-21. Payload: 8 bytes.
-fn parse_mem_latency(event: Event, data: &[u8]) -> Result<MemLatencyEvent, ParseError> {
-    ensure_payload(data, 8, "mem latency event")?;
+fn parse_mem_latency(data: &[u8]) -> Result<MemLatencyEvent, ParseError> {
+    let raw = read_payload::<RawMemLatencyPayload>(data, "mem latency event")?;
     Ok(MemLatencyEvent {
-        event,
-        duration_ns: read_u64_le(data, 0),
+        duration_ns: u64::from_le(raw.duration_ns),
     })
 }
 
 /// Swap in/out event: types 22-23. Payload: 8 bytes.
-fn parse_swap(event: Event, data: &[u8]) -> Result<SwapEvent, ParseError> {
-    ensure_payload(data, 8, "swap event")?;
+fn parse_swap(data: &[u8]) -> Result<SwapEvent, ParseError> {
+    let raw = read_payload::<RawSwapPayload>(data, "swap event")?;
     Ok(SwapEvent {
-        event,
-        pages: read_u64_le(data, 0),
-    })
-}
-
-/// OOM kill event: type 24. Payload: 8 bytes.
-fn parse_oom_kill(event: Event, data: &[u8]) -> Result<OOMKillEvent, ParseError> {
-    ensure_payload(data, 8, "oom kill event")?;
-    Ok(OOMKillEvent {
-        event,
-        target_pid: read_u32_le(data, 0),
-    })
-}
-
-/// Process exit event: type 25. Payload: 8 bytes.
-fn parse_process_exit(event: Event, data: &[u8]) -> Result<ProcessExitEvent, ParseError> {
-    ensure_payload(data, 8, "process exit event")?;
-    Ok(ProcessExitEvent {
-        event,
-        exit_code: read_u32_le(data, 0),
+        pages: u64::from_le(raw.pages),
     })
 }
 
@@ -355,6 +978,8 @@ fn parse_process_exit(event: Event, data: &[u8]) -> Result<ProcessExitEvent, Par
 #[allow(clippy::unwrap_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    const HEADER_PAD_OFFSET: usize = HEADER_SIZE - 6;
 
     /// Build a 24-byte event header.
     fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u8> {
@@ -368,12 +993,142 @@ mod tests {
         buf
     }
 
-    fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: ClientType) {
+    fn set_header_pad_u32(data: &mut [u8], offset: usize, value: u32) {
+        data[HEADER_PAD_OFFSET + offset..HEADER_PAD_OFFSET + offset + 4]
+            .copy_from_slice(&value.to_le_bytes());
+    }
+
+    fn compact_syscall(pid: u32, event_type: u8, client_type: u8, latency_ns: u32) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_SYSCALL_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&latency_ns.to_le_bytes());
+        buf.push(event_type);
+        buf.push(client_type);
+        buf
+    }
+
+    fn compact_net_io(
+        pid: u32,
+        event_type: u8,
+        client_type: u8,
+        transport: u8,
+        bytes: u32,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_NET_IO_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&src_port.to_le_bytes());
+        buf.extend_from_slice(&dst_port.to_le_bytes());
+        buf.push(event_type);
+        buf.push(client_type);
+        buf.push(transport);
+        buf
+    }
+
+    fn compact_net_io_metrics(
+        pid: u32,
+        client_type: u8,
+        bytes: u32,
+        src_port: u16,
+        dst_port: u16,
+        srtt_us: u32,
+        cwnd: u32,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_NET_IO_METRICS_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&src_port.to_le_bytes());
+        buf.extend_from_slice(&dst_port.to_le_bytes());
+        buf.extend_from_slice(&srtt_us.to_le_bytes());
+        buf.extend_from_slice(&cwnd.to_le_bytes());
+        buf.push(EventType::NetTX as u8);
+        buf.push(client_type);
+        buf
+    }
+
+    #[test]
+    fn test_parse_event_into_batch_compact_syscall_records_counts() {
+        let data = compact_syscall(1337, EventType::SyscallFutex as u8, 1, 2_500);
+        let mut batch = ParsedEventBatch::with_capacity(4);
+
+        parse_event_into_batch(&data, &mut batch).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.event_totals()[EventType::SyscallFutex as usize], 1);
+        assert_eq!(batch.client_totals()[1], 1);
+
+        let parsed = &batch.events[0];
+        assert_eq!(parsed.raw.pid(), 1337);
+        let TypedEvent::SyscallFutex(event) = &parsed.typed else {
+            panic!("expected SyscallFutex");
+        };
+        assert_eq!(event.latency_ns, 2_500);
+    }
+
+    #[test]
+    fn test_parse_event_into_batch_sched_combined_records_secondary_counts() {
+        let mut data = header(6_500_000, 105, 205, 9, 6);
+        data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.extend_from_slice(&50_000u64.to_le_bytes());
+        data.extend_from_slice(&70_000u64.to_le_bytes());
+        data.extend_from_slice(&303u32.to_le_bytes());
+        data.extend_from_slice(&404u32.to_le_bytes());
+        data[HEADER_PAD_OFFSET] = 1;
+        set_header_pad_u32(&mut data, 1, 15);
+        data[HEADER_PAD_OFFSET + 5] = 2;
+
+        let mut batch = ParsedEventBatch::with_capacity(4);
+        parse_event_into_batch(&data, &mut batch).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.event_totals()[EventType::SchedSwitch as usize], 1);
+        assert_eq!(batch.event_totals()[EventType::SchedRunqueue as usize], 1);
+        assert_eq!(batch.client_totals()[6], 1);
+        assert_eq!(batch.client_totals()[2], 1);
+
+        let parsed = &batch.events[0];
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
+        assert_eq!(
+            parsed.raw.secondary_event_type_raw(),
+            EventType::SchedRunqueue as u8
+        );
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
+        let TypedEvent::SchedCombined(event) = &parsed.typed else {
+            panic!("expected SchedCombined");
+        };
+        assert_eq!(event.next_pid, 303);
+        assert_eq!(event.next_tid, 404);
+    }
+
+    fn compact_disk_io(
+        pid: u32,
+        client_type: u8,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+        device_id: u32,
+        rw: u8,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_DISK_IO_EVENT_SIZE);
+        buf.extend_from_slice(&latency_ns.to_le_bytes());
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&queue_depth.to_le_bytes());
+        buf.extend_from_slice(&device_id.to_le_bytes());
+        buf.push(rw);
+        buf.push(EventType::DiskIO as u8);
+        buf.push(client_type);
+        buf
+    }
+
+    fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
-        assert_eq!(event.pid, pid);
+        assert_eq!(event.pid(), pid);
         assert_eq!(event.tid, tid);
         assert_eq!(event.event_type, et);
-        assert_eq!(event.client_type, ct);
+        assert_eq!(event.client_type(), ct);
     }
 
     // -- Error cases --
@@ -416,8 +1171,8 @@ mod tests {
 
     #[test]
     fn test_header_only_truncates_payload() {
-        // SyscallRead needs 24 byte payload, none provided.
-        let data = header(1000, 42, 43, 1, 1);
+        // DiskIO still requires a payload; a bare header should fail.
+        let data = header(1000, 42, 43, 6, 1);
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::PayloadTruncated { .. }
@@ -425,42 +1180,124 @@ mod tests {
     }
 
     #[test]
-    fn test_syscall_short_payload() {
+    fn test_syscall_header_only() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 10]); // need 24
-        assert!(matches!(
-            parse_event(&data).unwrap_err(),
-            ParseError::PayloadTruncated {
-                event_name: "syscall event"
-            }
-        ));
+        set_header_pad_u32(&mut data, 0, 1_234);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
+        };
+        assert_eq!(e.latency_ns, 1_234);
     }
 
     #[test]
-    fn test_net_io_invalid_direction() {
-        let mut data = header(1000, 42, 43, 7, 1);
-        data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
-        data.extend_from_slice(&80u16.to_le_bytes()); // sport
-        data.extend_from_slice(&90u16.to_le_bytes()); // dport
-        data.push(5); // invalid direction
-        data.push(0);
-        data.extend_from_slice(&[0u8; 10]); // rest of payload
-        assert!(matches!(
-            parse_event(&data).unwrap_err(),
-            ParseError::InvalidDirection { raw: 5, .. }
-        ));
+    fn test_compact_syscall_event() {
+        let data = compact_syscall(42, 1, 1, 1_234);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
+        };
+        assert_eq!(parsed.raw.pid(), 42);
+        assert_eq!(parsed.raw.tid, 0);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(e.latency_ns, 1_234);
+    }
+
+    #[test]
+    fn test_compact_disk_io_event() {
+        let data = compact_disk_io(102, 3, 1_000_000, 4096, 8, 66304, 1);
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 102);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::DiskIO(e) = &parsed.typed else {
+            panic!("expected DiskIO");
+        };
+        assert_eq!(e.latency_ns, 1_000_000);
+        assert_eq!(e.bytes, 4096);
+        assert_eq!(e.rw, 1);
+        assert_eq!(e.queue_depth, 8);
+        assert_eq!(e.device_id, 66304);
+    }
+
+    #[test]
+    fn test_compact_net_tx_no_metrics() {
+        let data = compact_net_io(
+            103,
+            EventType::NetTX as u8,
+            1,
+            NetTransport::Udp as u8,
+            1536,
+            30303,
+            9000,
+        );
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 103);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIOTx(e) = &parsed.typed else {
+            panic!("expected NetIOTx");
+        };
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 1536);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
+    }
+
+    #[test]
+    fn test_compact_net_rx_no_metrics() {
+        let data = compact_net_io(
+            104,
+            EventType::NetRX as u8,
+            7,
+            NetTransport::Udp as u8,
+            2048,
+            443,
+            12345,
+        );
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 104);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIORx(e) = &parsed.typed else {
+            panic!("expected NetIORx");
+        };
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 2048);
+        assert_eq!(e.local_port, 12345);
+        assert_eq!(e.remote_port, 443);
+    }
+
+    #[test]
+    fn test_compact_net_tx_with_metrics() {
+        let data = compact_net_io_metrics(105, 2, 4096, 30303, 9000, 50_000, 10);
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 105);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIOTcpTxMetrics(e) = &parsed.typed else {
+            panic!("expected NetIOTcpTxMetrics");
+        };
+        assert_eq!(e.bytes, 4096);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
+        assert_eq!(e.srtt_us, 50_000);
+        assert_eq!(e.cwnd, 10);
     }
 
     #[test]
     fn test_net_io_invalid_transport() {
         let mut data = header(1000, 42, 43, 7, 1);
+        data[HEADER_PAD_OFFSET] = 7; // invalid transport
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&80u16.to_le_bytes()); // sport
         data.extend_from_slice(&90u16.to_le_bytes()); // dport
-        data.push(0); // TX
-        data.push(0); // no metrics
-        data.push(7); // invalid transport
-        data.extend_from_slice(&[0u8; 9]); // rest of payload
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidNetTransport { raw: 7, .. }
@@ -472,53 +1309,51 @@ mod tests {
     #[test]
     fn test_syscall_read() {
         let mut data = header(1_000_000, 100, 200, 1, 1); // SyscallRead, Geth
-        data.extend_from_slice(&500_000u64.to_le_bytes());
-        data.extend_from_slice(&42i64.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&3i32.to_le_bytes());
+        set_header_pad_u32(&mut data, 0, 500_000);
 
         let parsed = parse_event(&data).unwrap();
-        assert_header(
-            &parsed.raw,
-            1_000_000,
-            100,
-            200,
-            EventType::SyscallRead,
-            ClientType::Geth,
-        );
-        let TypedEvent::Syscall(e) = &parsed.typed else {
-            panic!("expected Syscall");
+        assert_header(&parsed.raw, 1_000_000, 100, 200, EventType::SyscallRead, 1);
+        let TypedEvent::SyscallRead(e) = &parsed.typed else {
+            panic!("expected SyscallRead");
         };
         assert_eq!(e.latency_ns, 500_000);
-        assert_eq!(e.ret, 42);
-        assert_eq!(e.syscall_nr, 0);
-        assert_eq!(e.fd, 3);
     }
 
     #[test]
     fn test_syscall_write_negative_return() {
         let mut data = header(2_000_000, 101, 201, 2, 2); // SyscallWrite, Reth
-        data.extend_from_slice(&750_000u64.to_le_bytes());
-        data.extend_from_slice(&(-1i64).to_le_bytes());
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&5i32.to_le_bytes());
+        set_header_pad_u32(&mut data, 0, 750_000);
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Syscall(e) = &parsed.typed else {
-            panic!("expected Syscall");
+        let TypedEvent::SyscallWrite(e) = &parsed.typed else {
+            panic!("expected SyscallWrite");
         };
-        assert_eq!(e.ret, -1);
-        assert_eq!(e.event.event_type, EventType::SyscallWrite);
+        assert_eq!(e.latency_ns, 750_000);
+        assert_eq!(parsed.raw.event_type, EventType::SyscallWrite);
     }
 
     #[test]
     fn test_all_syscall_types_parse() {
         for event_type in [1u8, 2, 3, 4, 5, 13, 14, 15] {
             let mut data = header(1000, 42, 43, event_type, 0);
-            data.extend_from_slice(&[0u8; 24]);
-            let result = parse_event(&data);
-            assert!(result.is_ok(), "event type {} should parse", event_type);
-            assert!(matches!(result.unwrap().typed, TypedEvent::Syscall(_)));
+            set_header_pad_u32(&mut data, 0, 1);
+            let parsed = parse_event(&data).expect("syscall should parse");
+            let matches_expected_variant = match event_type {
+                1 => matches!(parsed.typed, TypedEvent::SyscallRead(_)),
+                2 => matches!(parsed.typed, TypedEvent::SyscallWrite(_)),
+                3 => matches!(parsed.typed, TypedEvent::SyscallFutex(_)),
+                4 => matches!(parsed.typed, TypedEvent::SyscallMmap(_)),
+                5 => matches!(parsed.typed, TypedEvent::SyscallEpollWait(_)),
+                13 => matches!(parsed.typed, TypedEvent::SyscallFsync(_)),
+                14 => matches!(parsed.typed, TypedEvent::SyscallFdatasync(_)),
+                15 => matches!(parsed.typed, TypedEvent::SyscallPwrite(_)),
+                _ => false,
+            };
+            assert!(
+                matches_expected_variant,
+                "event type {} should map to its specialized syscall variant",
+                event_type
+            );
         }
     }
 
@@ -527,10 +1362,9 @@ mod tests {
     #[test]
     fn test_disk_io() {
         let mut data = header(3_000_000, 102, 202, 6, 3); // DiskIO, Besu
+        data[HEADER_PAD_OFFSET] = 1; // rw = write
         data.extend_from_slice(&1_000_000u64.to_le_bytes()); // latency
         data.extend_from_slice(&4096u32.to_le_bytes()); // bytes
-        data.push(1); // rw = write
-        data.extend_from_slice(&[0u8; 3]); // pad
         data.extend_from_slice(&8u32.to_le_bytes()); // queue_depth
         data.extend_from_slice(&66304u32.to_le_bytes()); // device_id
 
@@ -553,48 +1387,54 @@ mod tests {
         data.extend_from_slice(&1024u32.to_le_bytes()); // bytes
         data.extend_from_slice(&8080u16.to_le_bytes()); // sport
         data.extend_from_slice(&9090u16.to_le_bytes()); // dport
-        data.push(0); // TX
-        data.push(1); // has_metrics
-        data.push(0); // TCP
-        data.push(0); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::NetIO(e) = &parsed.typed else {
-            panic!("expected NetIO");
+        let TypedEvent::NetIOTcpTxMetrics(e) = &parsed.typed else {
+            panic!("expected NetIOTcpTxMetrics");
         };
         assert_eq!(e.bytes, 1024);
-        assert_eq!(e.src_port, 8080);
-        assert_eq!(e.dst_port, 9090);
-        assert_eq!(e.direction, Direction::TX);
-        assert_eq!(e.transport, NetTransport::Tcp);
-        assert!(e.has_metrics);
+        assert_eq!(e.local_port, 8080);
+        assert_eq!(e.remote_port, 9090);
         assert_eq!(e.srtt_us, 50_000);
         assert_eq!(e.cwnd, 10);
     }
 
     #[test]
+    fn test_net_tx_no_metrics() {
+        let mut data = header(4_500_000, 103, 203, 7, 1); // NetTX, Geth
+        data[HEADER_PAD_OFFSET] = NetTransport::Udp as u8;
+        data.extend_from_slice(&1536u32.to_le_bytes());
+        data.extend_from_slice(&30303u16.to_le_bytes());
+        data.extend_from_slice(&9000u16.to_le_bytes());
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::NetIOTx(e) = &parsed.typed else {
+            panic!("expected NetIOTx");
+        };
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 1536);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
+    }
+
+    #[test]
     fn test_net_rx_no_metrics() {
         let mut data = header(5_000_000, 104, 204, 8, 7); // NetRX, Lighthouse
+        data[HEADER_PAD_OFFSET] = NetTransport::Udp as u8;
         data.extend_from_slice(&2048u32.to_le_bytes());
         data.extend_from_slice(&443u16.to_le_bytes());
         data.extend_from_slice(&12345u16.to_le_bytes());
-        data.push(1); // RX
-        data.push(0); // no metrics
-        data.push(1); // UDP
-        data.push(0); // pad
-        data.extend_from_slice(&0u32.to_le_bytes());
-        data.extend_from_slice(&0u32.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::NetIO(e) = &parsed.typed else {
-            panic!("expected NetIO");
+        let TypedEvent::NetIORx(e) = &parsed.typed else {
+            panic!("expected NetIORx");
         };
-        assert_eq!(e.direction, Direction::RX);
-        assert_eq!(e.transport, NetTransport::Udp);
-        assert!(!e.has_metrics);
+        assert_eq!(e.transport, NetTransport::Udp as u8);
         assert_eq!(e.bytes, 2048);
+        assert_eq!(e.local_port, 12345);
+        assert_eq!(e.remote_port, 443);
     }
 
     // -- Scheduler --
@@ -603,34 +1443,59 @@ mod tests {
     fn test_sched_switch_voluntary() {
         let mut data = header(6_000_000, 105, 205, 9, 6); // SchedSwitch, Prysm
         data.extend_from_slice(&100_000u64.to_le_bytes());
-        data.push(1); // voluntary
-        data.extend_from_slice(&[0u8; 3]);
-        data.extend_from_slice(&9u32.to_le_bytes());
+        data[HEADER_PAD_OFFSET] = 1; // voluntary
+        set_header_pad_u32(&mut data, 1, 9);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 100_000);
-        assert!(e.voluntary);
-        assert_eq!(e.cpu_id, 9);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 9);
     }
 
     #[test]
     fn test_sched_switch_involuntary() {
         let mut data = header(6_000_000, 105, 205, 9, 6);
         data.extend_from_slice(&200_000u64.to_le_bytes());
-        data.push(0); // involuntary
-        data.extend_from_slice(&[0u8; 3]);
-        data.extend_from_slice(&15u32.to_le_bytes());
+        set_header_pad_u32(&mut data, 1, 15);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::Sched(e) = &parsed.typed else {
             panic!("expected Sched");
         };
         assert_eq!(e.on_cpu_ns, 200_000);
-        assert!(!e.voluntary);
-        assert_eq!(e.cpu_id, 15);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
+    }
+
+    #[test]
+    fn test_sched_switch_combined() {
+        let mut data = header(6_500_000, 105, 205, 9, 6);
+        data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.extend_from_slice(&50_000u64.to_le_bytes());
+        data.extend_from_slice(&70_000u64.to_le_bytes());
+        data.extend_from_slice(&303u32.to_le_bytes());
+        data.extend_from_slice(&404u32.to_le_bytes());
+        data[HEADER_PAD_OFFSET] = 1;
+        set_header_pad_u32(&mut data, 1, 15);
+        data[HEADER_PAD_OFFSET + 5] = 2;
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::SchedCombined(e) = &parsed.typed else {
+            panic!("expected SchedCombined");
+        };
+        assert_eq!(e.on_cpu_ns, 200_000);
+        assert_eq!(e.runqueue_ns, 50_000);
+        assert_eq!(e.off_cpu_ns, 70_000);
+        assert_eq!(e.next_pid, 303);
+        assert_eq!(e.next_tid, 404);
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
+        assert_eq!(
+            parsed.raw.secondary_event_type_raw(),
+            EventType::SchedRunqueue as u8
+        );
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
     }
 
     #[test]
@@ -638,8 +1503,7 @@ mod tests {
         let mut data = header(7_000_000, 106, 206, 16, 7); // SchedRunqueue, Lighthouse
         data.extend_from_slice(&50_000u64.to_le_bytes());
         data.extend_from_slice(&200_000u64.to_le_bytes());
-        data.extend_from_slice(&4u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
+        set_header_pad_u32(&mut data, 0, 4);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::SchedRunqueue(e) = &parsed.typed else {
@@ -647,32 +1511,37 @@ mod tests {
         };
         assert_eq!(e.runqueue_ns, 50_000);
         assert_eq!(e.off_cpu_ns, 200_000);
-        assert_eq!(e.cpu_id, 4);
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 4);
     }
 
     // -- Page fault --
 
     #[test]
     fn test_page_fault_major() {
-        let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
-        data.extend_from_slice(&0xDEAD_BEEFu64.to_le_bytes());
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&107u32.to_le_bytes());
+        data.push(10); // PageFault
+        data.push(2); // Reth
         data.push(1); // major
-        data.extend_from_slice(&[0u8; 7]);
+        data.push(0);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
             panic!("expected PageFault");
         };
-        assert_eq!(e.address, 0xDEAD_BEEF);
         assert!(e.major);
+        assert_eq!(parsed.raw.pid(), 107);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     #[test]
     fn test_page_fault_minor() {
-        let mut data = header(8_000_000, 107, 207, 10, 2);
-        data.extend_from_slice(&0x1234u64.to_le_bytes());
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&107u32.to_le_bytes());
+        data.push(10); // PageFault
+        data.push(2); // Reth
         data.push(0); // minor
-        data.extend_from_slice(&[0u8; 7]);
+        data.push(0);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::PageFault(e) = &parsed.typed else {
@@ -681,58 +1550,52 @@ mod tests {
         assert!(!e.major);
     }
 
+    #[test]
+    fn test_page_fault_header_format_still_parses() {
+        let mut data = header(8_000_000, 107, 207, 10, 2); // PageFault, Reth
+        data[18] = 1; // hdr.pad[0] = major
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::PageFault(e) = &parsed.typed else {
+            panic!("expected PageFault");
+        };
+        assert!(e.major);
+        assert_eq!(parsed.raw.pid(), 107);
+        assert_eq!(parsed.raw.tid, 207);
+    }
+
     // -- FD events --
 
     #[test]
-    fn test_fd_open_with_filename() {
-        let mut data = header(9_000_000, 108, 208, 11, 1); // FDOpen, Geth
-        data.extend_from_slice(&7i32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
-        let mut filename = [0u8; 64];
-        let name = b"/var/log/geth.log";
-        filename[..name.len()].copy_from_slice(name);
-        data.extend_from_slice(&filename);
+    fn test_fd_open_header_only() {
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&108u32.to_le_bytes());
+        data.push(11); // FDOpen
+        data.push(1); // Geth
+        data.extend_from_slice(&[0u8; 2]);
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
+        let TypedEvent::FDOpen = &parsed.typed else {
+            panic!("expected FDOpen");
         };
-        assert_eq!(e.fd, 7);
-        assert_eq!(e.filename, "/var/log/geth.log");
+        assert_eq!(parsed.raw.pid(), 108);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     #[test]
-    fn test_fd_close_empty_filename() {
-        let mut data = header(10_000_000, 109, 209, 12, 4); // FDClose, Nethermind
-        data.extend_from_slice(&(-1i32).to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
-        data.extend_from_slice(&[0u8; 64]);
+    fn test_fd_close_header_only() {
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&109u32.to_le_bytes());
+        data.push(12); // FDClose
+        data.push(4); // Nethermind
+        data.extend_from_slice(&[0u8; 2]);
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
+        let TypedEvent::FDClose = &parsed.typed else {
+            panic!("expected FDClose");
         };
-        assert_eq!(e.fd, -1);
-        assert_eq!(e.filename, "");
-    }
-
-    #[test]
-    fn test_fd_filename_truncated_at_null() {
-        let mut data = header(1000, 42, 43, 11, 1);
-        data.extend_from_slice(&5i32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]);
-        let mut filename = [0u8; 64];
-        filename[0] = b'a';
-        filename[1] = b'b';
-        filename[2] = 0; // null terminates here
-        filename[3] = b'c'; // ignored
-        data.extend_from_slice(&filename);
-
-        let parsed = parse_event(&data).unwrap();
-        let TypedEvent::FD(e) = &parsed.typed else {
-            panic!("expected FD");
-        };
-        assert_eq!(e.filename, "ab");
+        assert_eq!(parsed.raw.pid(), 109);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     // -- Block merge --
@@ -767,29 +1630,20 @@ mod tests {
             panic!("expected TcpRetransmit");
         };
         assert_eq!(e.bytes, 512);
-        assert_eq!(e.src_port, 30303);
-        assert_eq!(e.dst_port, 30304);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 30304);
     }
 
     // -- TCP state --
 
     #[test]
     fn test_tcp_state() {
-        let mut data = header(13_000_000, 112, 212, 19, 7); // TcpState, Lighthouse
-        data.extend_from_slice(&8080u16.to_le_bytes());
-        data.extend_from_slice(&9090u16.to_le_bytes());
-        data.push(1); // new_state
-        data.push(2); // old_state
-        data.extend_from_slice(&[0u8; 10]); // pad
+        let data = header(13_000_000, 112, 212, 19, 7); // TcpState, Lighthouse
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::TcpState(e) = &parsed.typed else {
+        let TypedEvent::TcpState = &parsed.typed else {
             panic!("expected TcpState");
         };
-        assert_eq!(e.src_port, 8080);
-        assert_eq!(e.dst_port, 9090);
-        assert_eq!(e.new_state, 1);
-        assert_eq!(e.old_state, 2);
     }
 
     // -- Memory latency --
@@ -800,11 +1654,11 @@ mod tests {
         data.extend_from_slice(&5_000_000u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::MemLatency(e) = &parsed.typed else {
-            panic!("expected MemLatency");
+        let TypedEvent::MemReclaim(e) = &parsed.typed else {
+            panic!("expected MemReclaim");
         };
         assert_eq!(e.duration_ns, 5_000_000);
-        assert_eq!(e.event.event_type, EventType::MemReclaim);
+        assert_eq!(parsed.raw.event_type, EventType::MemReclaim);
     }
 
     #[test]
@@ -813,10 +1667,10 @@ mod tests {
         data.extend_from_slice(&3_000_000u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::MemLatency(e) = &parsed.typed else {
-            panic!("expected MemLatency");
+        let TypedEvent::MemCompaction(_e) = &parsed.typed else {
+            panic!("expected MemCompaction");
         };
-        assert_eq!(e.event.event_type, EventType::MemCompaction);
+        assert_eq!(parsed.raw.event_type, EventType::MemCompaction);
     }
 
     // -- Swap --
@@ -827,11 +1681,11 @@ mod tests {
         data.extend_from_slice(&1u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Swap(e) = &parsed.typed else {
-            panic!("expected Swap");
+        let TypedEvent::SwapIn(e) = &parsed.typed else {
+            panic!("expected SwapIn");
         };
         assert_eq!(e.pages, 1);
-        assert_eq!(e.event.event_type, EventType::SwapIn);
+        assert_eq!(parsed.raw.event_type, EventType::SwapIn);
     }
 
     #[test]
@@ -840,41 +1694,37 @@ mod tests {
         data.extend_from_slice(&100u64.to_le_bytes());
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::Swap(e) = &parsed.typed else {
-            panic!("expected Swap");
+        let TypedEvent::SwapOut(e) = &parsed.typed else {
+            panic!("expected SwapOut");
         };
         assert_eq!(e.pages, 100);
-        assert_eq!(e.event.event_type, EventType::SwapOut);
+        assert_eq!(parsed.raw.event_type, EventType::SwapOut);
     }
 
     // -- OOM kill --
 
     #[test]
     fn test_oom_kill() {
-        let mut data = header(18_000_000, 117, 217, 24, 1); // OOMKill, Geth
-        data.extend_from_slice(&999u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
+        let data = header(18_000_000, 117, 217, 24, 1); // OOMKill, Geth
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::OOMKill(e) = &parsed.typed else {
+        let TypedEvent::OOMKill = &parsed.typed else {
             panic!("expected OOMKill");
         };
-        assert_eq!(e.target_pid, 999);
+        assert_eq!(parsed.raw.pid(), 117);
     }
 
     // -- Process exit --
 
     #[test]
     fn test_process_exit() {
-        let mut data = header(19_000_000, 118, 218, 25, 5); // ProcessExit, Erigon
-        data.extend_from_slice(&1u32.to_le_bytes());
-        data.extend_from_slice(&[0u8; 4]); // pad
+        let data = header(19_000_000, 118, 218, 25, 5); // ProcessExit, Erigon
 
         let parsed = parse_event(&data).unwrap();
-        let TypedEvent::ProcessExit(e) = &parsed.typed else {
+        let TypedEvent::ProcessExit = &parsed.typed else {
             panic!("expected ProcessExit");
         };
-        assert_eq!(e.exit_code, 1);
+        assert_eq!(parsed.raw.tid, 218);
     }
 
     // -- Edge cases --
@@ -882,7 +1732,7 @@ mod tests {
     #[test]
     fn test_extra_trailing_data_ignored() {
         let mut data = header(1000, 42, 43, 1, 1);
-        data.extend_from_slice(&[0u8; 24]); // syscall payload
+        set_header_pad_u32(&mut data, 0, 1);
         data.extend_from_slice(&[0xFF; 100]); // trailing garbage
 
         assert!(parse_event(&data).is_ok());
@@ -892,7 +1742,7 @@ mod tests {
     fn test_all_client_types_accepted() {
         for ct in 0..=11u8 {
             let mut data = header(1000, 42, 43, 1, ct); // SyscallRead
-            data.extend_from_slice(&[0u8; 24]);
+            set_header_pad_u32(&mut data, 0, 1);
             assert!(
                 parse_event(&data).is_ok(),
                 "client type {} should be accepted",
@@ -903,14 +1753,12 @@ mod tests {
 
     #[test]
     fn test_exactly_minimum_payload() {
-        // OOM kill needs exactly 8 bytes of payload.
-        let mut data = header(1000, 42, 43, 24, 1);
-        data.extend_from_slice(&[0u8; 8]);
+        // Header-only marker events should parse without a payload.
+        let data = header(1000, 42, 43, 24, 1);
         assert!(parse_event(&data).is_ok());
 
-        // One byte short should fail.
-        let mut data = header(1000, 42, 43, 24, 1);
-        data.extend_from_slice(&[0u8; 7]);
+        // One byte short of the common header should fail.
+        let data = vec![0u8; HEADER_SIZE - 1];
         assert!(parse_event(&data).is_err());
     }
 
@@ -923,11 +1771,11 @@ mod tests {
         assert_eq!(e.to_string(), "unknown event type: 99");
 
         let e = ParseError::PayloadTruncated {
-            event_name: "syscall event",
+            event_name: "disk IO event",
         };
         assert_eq!(
             e.to_string(),
-            "reading syscall event: unexpected end of data"
+            "reading disk IO event: unexpected end of data"
         );
     }
 }

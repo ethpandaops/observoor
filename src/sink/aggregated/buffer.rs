@@ -1,28 +1,593 @@
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::hash::Hash;
+use std::hash::{BuildHasherDefault, Hasher};
+use std::ptr::NonNull;
 use std::time::SystemTime;
 
-use dashmap::DashMap;
-
-use crate::tracer::event::EventType;
-
-use super::aggregate::{CounterAggregate, GaugeAggregate, LatencyAggregate};
-use super::dimension::{
-    BasicDimension, CpuCoreDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+use hashbrown::{
+    hash_map::{IntoIter as HashMapIntoIter, Iter as HashMapIter, RawEntryMut},
+    HashMap,
 };
 
-/// Thread-safe aggregation buffer that collects events and aggregates
-/// them by dimension over a time window.
+use crate::tracer::event::{Direction, EventType};
+
+use super::aggregate::{
+    BasicColdAggregate, CounterAggregate, DiskAggregate, FdAggregate, LatencyAggregate,
+    PageFaultAggregate, SchedWaitAggregate, SchedulerCpuAggregate, TcpTxAggregate,
+};
+use super::dimension::{
+    BasicDimension, CpuCoreDimension, DiskDeviceDimension, DiskDimension, NetworkDimension,
+    TCPMetricsDimension,
+};
+
+#[derive(Default)]
+pub struct PackedKeyHasher {
+    hash: u64,
+}
+
+#[inline(always)]
+fn mix_key_u64(value: u64) -> u64 {
+    value ^ value.rotate_left(25)
+}
+
+impl Hasher for PackedKeyHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut folded = 0u64;
+        for (idx, byte) in bytes.iter().take(16).enumerate() {
+            folded ^= u64::from(*byte) << ((idx % 8) * 8);
+        }
+        self.hash = mix_key_u64(folded);
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, i: u32) {
+        self.hash = mix_key_u64(u64::from(i));
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, i: u64) {
+        self.hash = mix_key_u64(i);
+    }
+
+    #[inline(always)]
+    fn write_u128(&mut self, i: u128) {
+        self.hash = mix_key_u64((i as u64) ^ ((i >> 64) as u64).rotate_left(32));
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, i: usize) {
+        self.hash = mix_key_u64(i as u64);
+    }
+}
+
+pub type FastHashBuilder = BuildHasherDefault<PackedKeyHasher>;
+
+pub(crate) trait FastMapKey: Copy + Eq + Hash {
+    fn precomputed_hash(self) -> u64;
+}
+
+#[derive(Clone, Copy)]
+struct FastMapCacheEntry<K, V> {
+    key: K,
+    value: NonNull<V>,
+}
+
+// Safety: the cached pointer always points into the owning hash map allocation
+// stored in the same `FastMap`. The cache is private to `buffer.rs`, only
+// dereferenced through `&mut FastMap`, and the full `FastMap` moves together
+// with its backing allocation when sent across tasks.
+unsafe impl<K: Send, V: Send> Send for FastMapCacheEntry<K, V> {}
+unsafe impl<K: Sync, V: Sync> Sync for FastMapCacheEntry<K, V> {}
+
+#[inline(always)]
+fn precomputed_u32_hash(value: u32) -> u64 {
+    mix_key_u64(u64::from(value))
+}
+
+#[inline(always)]
+fn precomputed_u64_hash(value: u64) -> u64 {
+    mix_key_u64(value)
+}
+
+#[inline(always)]
+fn precomputed_u128_hash(value: u128) -> u64 {
+    mix_key_u64((value as u64) ^ ((value >> 64) as u64).rotate_left(32))
+}
+
+impl FastMapKey for u32 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u32_hash(self)
+    }
+}
+
+impl FastMapKey for u64 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self)
+    }
+}
+
+impl FastMapKey for u128 {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self)
+    }
+}
+
+impl FastMapKey for BasicDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for CpuCoreDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
+impl FastMapKey for NetworkDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for TCPMetricsDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u64_hash(self.packed())
+    }
+}
+
+impl FastMapKey for DiskDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
+impl FastMapKey for DiskDeviceDimension {
+    #[inline(always)]
+    fn precomputed_hash(self) -> u64 {
+        precomputed_u128_hash(self.packed())
+    }
+}
+
+pub struct FastMap<K, V> {
+    // Keep one consistent heap-backed layout for all aggregation maps.
+    // Large aggregates stay out of the map object itself, which avoids the
+    // inline/small-state cache pressure regressions seen in CPU benchmarks.
+    inner: HashMap<K, V, FastHashBuilder>,
+    // Hot-path event streams often update the same dimension repeatedly.
+    // Cache the most recently resolved entry to bypass hashing/probing on hits.
+    last_hit: Option<FastMapCacheEntry<K, V>>,
+}
+
+pub type FastMapIter<'a, K, V> = HashMapIter<'a, K, V>;
+pub type FastMapIntoIter<K, V> = HashMapIntoIter<K, V>;
+
+impl<K, V> FastMap<K, V> {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inner: HashMap::with_capacity_and_hasher(capacity, FastHashBuilder::default()),
+            last_hit: None,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.last_hit = None;
+        self.inner.clear();
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> FastMapIter<'_, K, V> {
+        self.inner.iter()
+    }
+}
+
+impl<K, V> FastMap<K, V>
+where
+    K: Eq + Hash,
+{
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &K) -> Option<&V> {
+        self.inner.get(key)
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn contains_key(&self, key: &K) -> bool {
+        self.inner.contains_key(key)
+    }
+}
+
+impl<K, V> IntoIterator for FastMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = FastMapIntoIter<K, V>;
+
+    #[inline(always)]
+    fn into_iter(self) -> Self::IntoIter {
+        self.inner.into_iter()
+    }
+}
+
+pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
+    FastMap::with_capacity(capacity)
+}
+
+/// Keeps the hottest `BasicDimension -> LatencyAggregate` entry inline.
 ///
-/// Uses `DashMap` for concurrent map access, eliminating the need for
-/// a global RWMutex. Each map entry is independently lockable.
+/// Stress-bench spends most of its syscall latency traffic on a single
+/// process/client key. Keeping that first key out of the hash map removes the
+/// remaining lookup/probe overhead on that path while preserving exact
+/// aggregation for additional dimensions via the existing spill map.
+pub struct HotBasicLatencyMap {
+    inline: Option<(BasicDimension, LatencyAggregate)>,
+    spill: FastMap<BasicDimension, LatencyAggregate>,
+}
+
+impl HotBasicLatencyMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&LatencyAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &LatencyAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record(&mut self, key: BasicDimension, latency_ns: u64) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record(latency_ns);
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record(latency_ns);
+            return;
+        }
+
+        let mut aggregate = LatencyAggregate::new();
+        aggregate.record(latency_ns);
+        self.inline = Some((key, aggregate));
+    }
+}
+
+/// Keeps the hottest `BasicDimension -> FdAggregate` entry inline.
+///
+/// Stress-bench opens and closes the same process-local file descriptors in a
+/// tight loop. Keeping that dominant FD counter entry out of the hash map
+/// avoids the remaining lookup/probe cost on this hot path while preserving
+/// exact aggregation for additional dimensions via the spill map.
+pub struct HotBasicFdMap {
+    inline: Option<(BasicDimension, FdAggregate)>,
+    spill: FastMap<BasicDimension, FdAggregate>,
+}
+
+impl HotBasicFdMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&FdAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &FdAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record_open(&mut self, key: BasicDimension) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record_open();
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record_open();
+            return;
+        }
+
+        let mut aggregate = FdAggregate::new();
+        aggregate.record_open();
+        self.inline = Some((key, aggregate));
+    }
+
+    #[inline(always)]
+    fn record_close(&mut self, key: BasicDimension) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record_close();
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record_close();
+            return;
+        }
+
+        let mut aggregate = FdAggregate::new();
+        aggregate.record_close();
+        self.inline = Some((key, aggregate));
+    }
+}
+
+#[inline(always)]
+pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
+where
+    K: FastMapKey,
+    V: Default,
+{
+    if let Some(cached) = map.last_hit.as_ref() {
+        if cached.key == key {
+            let value = cached.value;
+            // Safety: `last_hit` is populated from references returned by
+            // `hashbrown` and invalidated on any new insertion before reuse.
+            return unsafe { &mut *value.as_ptr() };
+        }
+    }
+
+    let hash = key.precomputed_hash();
+
+    let value = match map
+        .inner
+        .raw_entry_mut()
+        .from_key_hashed_nocheck(hash, &key)
+    {
+        RawEntryMut::Occupied(entry) => entry.into_mut(),
+        RawEntryMut::Vacant(entry) => entry.insert_hashed_nocheck(hash, key, V::default()).1,
+    };
+    map.last_hit = Some(FastMapCacheEntry {
+        key,
+        value: NonNull::from(&mut *value),
+    });
+    value
+}
+
+#[inline(always)]
+fn add_counter_value<K>(map: &mut FastMap<K, CounterAggregate>, key: K, value: i64)
+where
+    K: FastMapKey,
+{
+    get_or_default_mut(map, key).add(value);
+}
+
+#[inline(always)]
+fn record_disk(
+    map: &mut FastMap<DiskDeviceDimension, DiskAggregate>,
+    key: DiskDeviceDimension,
+    latency_ns: u64,
+    bytes: u32,
+    queue_depth: u32,
+) {
+    get_or_default_mut(map, key).record(latency_ns, bytes, queue_depth);
+}
+
+#[inline(always)]
+fn record_tcp_tx(
+    map: &mut FastMap<TCPMetricsDimension, TcpTxAggregate>,
+    key: TCPMetricsDimension,
+    bytes: i64,
+    rtt_us: u32,
+    cwnd: u32,
+) {
+    get_or_default_mut(map, key).record(bytes, rtt_us, cwnd);
+}
+
+#[inline(always)]
+fn record_tcp_metrics(
+    map: &mut FastMap<TCPMetricsDimension, TcpTxAggregate>,
+    key: TCPMetricsDimension,
+    rtt_us: u32,
+    cwnd: u32,
+) {
+    get_or_default_mut(map, key).record_metrics(rtt_us, cwnd);
+}
+
+#[inline(always)]
+fn tcp_metrics_key_for_network(dim: NetworkDimension) -> TCPMetricsDimension {
+    TCPMetricsDimension::new(dim.pid(), dim.client_type(), dim.port_label())
+}
+
+const CPU_ON_CORE_PER_CPU_CAPACITY: usize = 8;
+
+/// Per-core scheduler accounting maps keyed by BasicDimension.
+///
+/// Scheduler events from different CPUs interleave heavily. Keeping one map
+/// per CPU preserves a hot last-hit cache entry for each core instead of
+/// forcing all cores through a single shared `CpuCoreDimension` map.
+pub struct CpuOnCoreMap {
+    per_cpu: Vec<FastMap<BasicDimension, SchedulerCpuAggregate>>,
+}
+
+impl CpuOnCoreMap {
+    #[inline(always)]
+    fn with_cpu_capacity(cpu_capacity: usize) -> Self {
+        Self {
+            per_cpu: Vec::with_capacity(cpu_capacity),
+        }
+    }
+
+    #[inline(always)]
+    fn ensure_cpu_map(
+        &mut self,
+        cpu_id: u32,
+    ) -> &mut FastMap<BasicDimension, SchedulerCpuAggregate> {
+        let slot = cpu_id as usize;
+        while self.per_cpu.len() <= slot {
+            self.per_cpu
+                .push(fast_map_with_capacity(CPU_ON_CORE_PER_CPU_CAPACITY));
+        }
+
+        // Safety: the loop above grows `per_cpu` until `slot` is in range.
+        unsafe { self.per_cpu.get_unchecked_mut(slot) }
+    }
+
+    #[inline(always)]
+    fn record_sched_on_cpu(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim).record_sched_on_cpu(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    fn record_sched_slice(
+        &mut self,
+        dim: BasicDimension,
+        cpu_id: u32,
+        sched_on_cpu_ns: u64,
+        cpu_on_core_ns: u64,
+    ) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim)
+            .record_sched_slice(sched_on_cpu_ns, cpu_on_core_ns);
+    }
+
+    #[inline(always)]
+    fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        get_or_default_mut(self.ensure_cpu_map(cpu_id), dim).add_cpu_on_core(on_cpu_ns);
+    }
+
+    #[inline(always)]
+    fn add_packed(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
+        self.add_cpu_on_core(
+            BasicDimension::new(dim.pid(), dim.client_type()),
+            dim.cpu_id(),
+            on_cpu_ns,
+        );
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.per_cpu.iter().map(FastMap::len).sum()
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.per_cpu.iter().all(FastMap::is_empty)
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        for map in &mut self.per_cpu {
+            map.clear();
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &CpuCoreDimension) -> Option<&SchedulerCpuAggregate> {
+        self.per_cpu
+            .get(key.cpu_id() as usize)
+            .and_then(|map| map.get(&BasicDimension::new(key.pid(), key.client_type())))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(
+        &self,
+    ) -> impl Iterator<Item = (CpuCoreDimension, &SchedulerCpuAggregate)> + '_ {
+        self.per_cpu.iter().enumerate().flat_map(|(cpu_id, map)| {
+            map.iter().map(move |(dim, aggregate)| {
+                (CpuCoreDimension::from_basic(*dim, cpu_id as u32), aggregate)
+            })
+        })
+    }
+}
+
+/// Aggregation buffer that collects events and aggregates them by dimension
+/// over a time window.
+///
+/// Ingestion is serialized through the aggregated sink run loop, so these maps
+/// stay as plain hash maps with no per-event synchronization.
 #[allow(dead_code)]
 pub struct Buffer {
     /// Start of this aggregation window.
     pub start_time: SystemTime,
-    /// Monotonic timestamp when this buffer became active.
-    start_monotonic_ns: u64,
-    /// Actual elapsed window duration, fixed when the buffer is flushed.
-    interval_ns: AtomicU64,
     /// Current wallclock slot number.
     pub wallclock_slot: u64,
     /// Start time of the current wallclock slot.
@@ -36,52 +601,45 @@ pub struct Buffer {
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
 
-    // --- Syscalls (BasicDimension -> LatencyAggregate) ---
-    pub syscall_read: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_write: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_futex: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_mmap: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_epoll_wait: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fsync: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fdatasync: DashMap<BasicDimension, LatencyAggregate>,
-    pub syscall_pwrite: DashMap<BasicDimension, LatencyAggregate>,
+    // --- Hot BasicDimension metrics ---
+    // Each syscall family gets its own small aggregate so the hot path updates
+    // one compact value instead of bouncing around a larger multi-syscall blob.
+    pub syscall_read: HotBasicLatencyMap,
+    pub syscall_write: HotBasicLatencyMap,
+    pub syscall_futex: HotBasicLatencyMap,
+    pub syscall_mmap: HotBasicLatencyMap,
+    pub syscall_fsync: HotBasicLatencyMap,
 
-    // --- Network (NetworkDimension -> CounterAggregate) ---
-    pub net_io: DashMap<NetworkDimension, CounterAggregate>,
-    pub tcp_retransmit: DashMap<NetworkDimension, CounterAggregate>,
+    // --- BasicDimension counters ---
+    // `fd_open`/`fd_close` dominate this counter path in stress-bench, so keep
+    // them in their own smaller map entry instead of carrying page-fault state.
+    pub fd_metrics: HotBasicFdMap,
+    pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
+    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
+    pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
-    // --- TCP metrics (TCPMetricsDimension -> GaugeAggregate) ---
-    pub tcp_rtt: DashMap<TCPMetricsDimension, GaugeAggregate>,
-    pub tcp_cwnd: DashMap<TCPMetricsDimension, GaugeAggregate>,
+    // --- Network (TCPMetricsDimension -> CounterAggregate) ---
+    // TX/RX already live in separate maps, so the hot-path network key only
+    // needs pid/client/port-label and can skip packing direction entirely.
+    pub net_io_tx: FastMap<TCPMetricsDimension, CounterAggregate>,
+    pub net_io_rx: FastMap<TCPMetricsDimension, CounterAggregate>,
+    pub tcp_retransmit: FastMap<TCPMetricsDimension, CounterAggregate>,
 
-    // --- Disk (DiskDimension) ---
-    pub disk_latency: DashMap<DiskDimension, LatencyAggregate>,
-    pub disk_bytes: DashMap<DiskDimension, CounterAggregate>,
-    pub disk_queue_depth: DashMap<DiskDimension, GaugeAggregate>,
-    pub block_merge: DashMap<DiskDimension, CounterAggregate>,
+    // --- TCP TX bytes + metrics (TCPMetricsDimension -> TcpTxAggregate) ---
+    pub tcp_tx: FastMap<TCPMetricsDimension, TcpTxAggregate>,
 
-    // --- Scheduler (BasicDimension -> LatencyAggregate) ---
-    pub sched_on_cpu: DashMap<BasicDimension, LatencyAggregate>,
-    pub cpu_on_core: DashMap<CpuCoreDimension, CounterAggregate>,
-    pub sched_off_cpu: DashMap<BasicDimension, LatencyAggregate>,
-    pub sched_runqueue: DashMap<BasicDimension, LatencyAggregate>,
+    // --- Disk ---
+    // Disk completions frequently alternate read/write against the same device.
+    // Splitting by direction lets each map keep a stable last-hit cache entry,
+    // so the hot disk I/O key can omit the now-redundant rw bit.
+    pub disk_io_read: FastMap<DiskDeviceDimension, DiskAggregate>,
+    pub disk_io_write: FastMap<DiskDeviceDimension, DiskAggregate>,
+    pub block_merge: FastMap<DiskDimension, CounterAggregate>,
 
-    // --- Page faults (BasicDimension -> CounterAggregate) ---
-    pub page_fault_major: DashMap<BasicDimension, CounterAggregate>,
-    pub page_fault_minor: DashMap<BasicDimension, CounterAggregate>,
-
-    // --- FD operations (BasicDimension -> CounterAggregate) ---
-    pub fd_open: DashMap<BasicDimension, CounterAggregate>,
-    pub fd_close: DashMap<BasicDimension, CounterAggregate>,
-
-    // --- Memory pressure ---
-    pub mem_reclaim: DashMap<BasicDimension, LatencyAggregate>,
-    pub mem_compaction: DashMap<BasicDimension, LatencyAggregate>,
-    pub swap_in: DashMap<BasicDimension, CounterAggregate>,
-    pub swap_out: DashMap<BasicDimension, CounterAggregate>,
-    pub oom_kill: DashMap<BasicDimension, CounterAggregate>,
-    pub process_exit: DashMap<BasicDimension, CounterAggregate>,
-    pub tcp_state_change: DashMap<BasicDimension, CounterAggregate>,
+    // Scheduler slices update both per-core utilization and sched_on_cpu
+    // latency. Co-locating both metrics behind one per-CPU map removes a hot
+    // second lookup while keeping collection exact.
+    pub cpu_on_core: CpuOnCoreMap,
 }
 
 impl Buffer {
@@ -97,168 +655,256 @@ impl Buffer {
     ) -> Self {
         Self {
             start_time,
-            start_monotonic_ns: super::monotonic_ns(),
-            interval_ns: AtomicU64::new(0),
             wallclock_slot,
             wallclock_slot_start,
             cl_syncing,
             el_optimistic,
             el_offline,
             system_cores,
-            // Syscalls.
-            syscall_read: DashMap::with_capacity(16),
-            syscall_write: DashMap::with_capacity(16),
-            syscall_futex: DashMap::with_capacity(16),
-            syscall_mmap: DashMap::with_capacity(16),
-            syscall_epoll_wait: DashMap::with_capacity(16),
-            syscall_fsync: DashMap::with_capacity(16),
-            syscall_fdatasync: DashMap::with_capacity(16),
-            syscall_pwrite: DashMap::with_capacity(16),
+            // Hot BasicDimension metrics.
+            syscall_read: HotBasicLatencyMap::with_capacity(8),
+            syscall_write: HotBasicLatencyMap::with_capacity(8),
+            syscall_futex: HotBasicLatencyMap::with_capacity(8),
+            syscall_mmap: HotBasicLatencyMap::with_capacity(8),
+            syscall_fsync: HotBasicLatencyMap::with_capacity(8),
+            // BasicDimension counters.
+            fd_metrics: HotBasicFdMap::with_capacity(16),
+            page_fault_metrics: fast_map_with_capacity(16),
+            sched_wait: fast_map_with_capacity(8),
+            basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
-            net_io: DashMap::with_capacity(64),
-            tcp_retransmit: DashMap::with_capacity(32),
-            // TCP metrics.
-            tcp_rtt: DashMap::with_capacity(32),
-            tcp_cwnd: DashMap::with_capacity(32),
+            net_io_tx: fast_map_with_capacity(64),
+            net_io_rx: fast_map_with_capacity(64),
+            tcp_retransmit: fast_map_with_capacity(32),
+            // TCP TX bytes + metrics.
+            tcp_tx: fast_map_with_capacity(32),
             // Disk.
-            disk_latency: DashMap::with_capacity(16),
-            disk_bytes: DashMap::with_capacity(16),
-            disk_queue_depth: DashMap::with_capacity(16),
-            block_merge: DashMap::with_capacity(16),
+            disk_io_read: fast_map_with_capacity(16),
+            disk_io_write: fast_map_with_capacity(16),
+            block_merge: fast_map_with_capacity(16),
             // Scheduler.
-            sched_on_cpu: DashMap::with_capacity(16),
-            cpu_on_core: DashMap::with_capacity(64),
-            sched_off_cpu: DashMap::with_capacity(16),
-            sched_runqueue: DashMap::with_capacity(16),
-            // Page faults.
-            page_fault_major: DashMap::with_capacity(16),
-            page_fault_minor: DashMap::with_capacity(16),
-            // FD operations.
-            fd_open: DashMap::with_capacity(16),
-            fd_close: DashMap::with_capacity(16),
-            // Memory pressure.
-            mem_reclaim: DashMap::with_capacity(8),
-            mem_compaction: DashMap::with_capacity(8),
-            swap_in: DashMap::with_capacity(8),
-            swap_out: DashMap::with_capacity(8),
-            oom_kill: DashMap::with_capacity(8),
-            process_exit: DashMap::with_capacity(8),
-            tcp_state_change: DashMap::with_capacity(8),
+            cpu_on_core: CpuOnCoreMap::with_cpu_capacity(system_cores as usize),
         }
     }
 
-    /// Records the actual elapsed duration for this buffer at flush time.
-    pub fn mark_flushed(&self, boundary_ns: u64) {
-        let interval_ns = boundary_ns.saturating_sub(self.start_monotonic_ns);
-        if interval_ns > 0 {
-            self.interval_ns.store(interval_ns, Ordering::Relaxed);
-        }
-    }
+    /// Resets this buffer for a new aggregation window while preserving map allocations.
+    pub fn reset(
+        &mut self,
+        start_time: SystemTime,
+        wallclock_slot: u64,
+        wallclock_slot_start: SystemTime,
+        cl_syncing: bool,
+        el_optimistic: bool,
+        el_offline: bool,
+        system_cores: u16,
+    ) {
+        self.start_time = start_time;
+        self.wallclock_slot = wallclock_slot;
+        self.wallclock_slot_start = wallclock_slot_start;
+        self.cl_syncing = cl_syncing;
+        self.el_optimistic = el_optimistic;
+        self.el_offline = el_offline;
+        self.system_cores = system_cores;
 
-    /// Returns the flushed interval in nanoseconds, or the configured default.
-    pub fn interval_ns_or(&self, default_interval_ns: u64) -> u64 {
-        let actual = self.interval_ns.load(Ordering::Relaxed);
-        if actual > 0 {
-            actual
-        } else {
-            default_interval_ns
-        }
-    }
-
-    /// Returns whether a timestamp belongs to this buffer's active window.
-    pub fn contains_monotonic_timestamp(&self, timestamp_ns: u64) -> bool {
-        timestamp_ns >= self.start_monotonic_ns
-    }
-
-    /// Caps raw runtime to the time that could have elapsed inside this window.
-    pub fn cap_on_cpu_ns_to_window(&self, timestamp_ns: u64, on_cpu_ns: u64) -> u64 {
-        on_cpu_ns.min(timestamp_ns.saturating_sub(self.start_monotonic_ns))
-    }
-
-    #[cfg(test)]
-    pub fn set_interval_ns_for_test(&self, interval_ns: u64) {
-        self.interval_ns.store(interval_ns, Ordering::Relaxed);
-    }
-
-    #[cfg(test)]
-    pub fn set_start_monotonic_ns_for_test(&mut self, start_monotonic_ns: u64) {
-        self.start_monotonic_ns = start_monotonic_ns;
+        self.syscall_read.clear();
+        self.syscall_write.clear();
+        self.syscall_futex.clear();
+        self.syscall_mmap.clear();
+        self.syscall_fsync.clear();
+        self.fd_metrics.clear();
+        self.page_fault_metrics.clear();
+        self.sched_wait.clear();
+        self.basic_cold_metrics.clear();
+        self.net_io_tx.clear();
+        self.net_io_rx.clear();
+        self.tcp_retransmit.clear();
+        self.tcp_tx.clear();
+        self.disk_io_read.clear();
+        self.disk_io_write.clear();
+        self.block_merge.clear();
+        self.cpu_on_core.clear();
     }
 
     /// Adds a syscall latency event to the appropriate map.
-    pub fn add_syscall(&self, event_type: EventType, dim: BasicDimension, latency_ns: u64) {
-        let map = match event_type {
-            EventType::SyscallRead => &self.syscall_read,
-            EventType::SyscallWrite => &self.syscall_write,
-            EventType::SyscallFutex => &self.syscall_futex,
-            EventType::SyscallMmap => &self.syscall_mmap,
-            EventType::SyscallEpollWait => &self.syscall_epoll_wait,
-            EventType::SyscallFsync => &self.syscall_fsync,
-            EventType::SyscallFdatasync => &self.syscall_fdatasync,
-            EventType::SyscallPwrite => &self.syscall_pwrite,
+    pub fn add_syscall(&mut self, event_type: EventType, dim: BasicDimension, latency_ns: u64) {
+        match event_type {
+            EventType::SyscallRead => self.add_syscall_read(dim, latency_ns),
+            EventType::SyscallWrite => self.add_syscall_write(dim, latency_ns),
+            EventType::SyscallFutex => self.add_syscall_futex(dim, latency_ns),
+            EventType::SyscallMmap => self.add_syscall_mmap(dim, latency_ns),
+            EventType::SyscallEpollWait => self.add_syscall_epoll_wait(dim, latency_ns),
+            EventType::SyscallFsync => self.add_syscall_fsync(dim, latency_ns),
+            EventType::SyscallFdatasync => self.add_syscall_fdatasync(dim, latency_ns),
+            EventType::SyscallPwrite => self.add_syscall_pwrite(dim, latency_ns),
             _ => return,
-        };
-        map.entry(dim).or_default().record(latency_ns);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_read(&mut self, dim: BasicDimension, latency_ns: u64) {
+        self.syscall_read.record(dim, latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_write(&mut self, dim: BasicDimension, latency_ns: u64) {
+        self.syscall_write.record(dim, latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_futex(&mut self, dim: BasicDimension, latency_ns: u64) {
+        self.syscall_futex.record(dim, latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_mmap(&mut self, dim: BasicDimension, latency_ns: u64) {
+        self.syscall_mmap.record(dim, latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_epoll_wait(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_epoll_wait(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_fsync(&mut self, dim: BasicDimension, latency_ns: u64) {
+        self.syscall_fsync.record(dim, latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_fdatasync(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_fdatasync(latency_ns);
+    }
+
+    #[inline(always)]
+    pub fn add_syscall_pwrite(&mut self, dim: BasicDimension, latency_ns: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_syscall_pwrite(latency_ns);
     }
 
     /// Adds a network I/O event.
-    pub fn add_net_io(&self, dim: NetworkDimension, bytes: i64) {
-        self.net_io.entry(dim).or_default().add(bytes);
+    pub fn add_net_io(&mut self, dim: NetworkDimension, bytes: i64) {
+        if dim.direction() == Direction::RX as u8 {
+            self.add_net_io_rx(tcp_metrics_key_for_network(dim), bytes);
+        } else {
+            self.add_net_io_tx(tcp_metrics_key_for_network(dim), bytes);
+        }
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_tx(&mut self, dim: TCPMetricsDimension, bytes: i64) {
+        add_counter_value(&mut self.net_io_tx, dim, bytes);
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_rx(&mut self, dim: TCPMetricsDimension, bytes: i64) {
+        add_counter_value(&mut self.net_io_rx, dim, bytes);
     }
 
     /// Adds a TCP retransmit event.
-    pub fn add_tcp_retransmit(&self, dim: NetworkDimension, bytes: i64) {
-        self.tcp_retransmit.entry(dim).or_default().add(bytes);
+    pub fn add_tcp_retransmit(&mut self, dim: NetworkDimension, bytes: i64) {
+        self.add_tcp_retransmit_dim(tcp_metrics_key_for_network(dim), bytes);
+    }
+
+    #[inline(always)]
+    pub fn add_tcp_retransmit_dim(&mut self, dim: TCPMetricsDimension, bytes: i64) {
+        add_counter_value(&mut self.tcp_retransmit, dim, bytes);
+    }
+
+    /// Adds TCP TX bytes together with inline TCP metrics.
+    pub fn add_net_io_with_tcp_metrics(
+        &mut self,
+        dim: NetworkDimension,
+        bytes: i64,
+        rtt_us: u32,
+        cwnd: u32,
+    ) {
+        self.add_net_io_with_tcp_metrics_dim(tcp_metrics_key_for_network(dim), bytes, rtt_us, cwnd);
+    }
+
+    #[inline(always)]
+    pub fn add_net_io_with_tcp_metrics_dim(
+        &mut self,
+        dim: TCPMetricsDimension,
+        bytes: i64,
+        rtt_us: u32,
+        cwnd: u32,
+    ) {
+        record_tcp_tx(&mut self.tcp_tx, dim, bytes, rtt_us, cwnd);
     }
 
     /// Adds TCP metrics (RTT and CWND).
-    pub fn add_tcp_metrics(&self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
-        self.tcp_rtt
-            .entry(dim)
-            .or_default()
-            .record(i64::from(rtt_us));
-        self.tcp_cwnd
-            .entry(dim)
-            .or_default()
-            .record(i64::from(cwnd));
+    ///
+    /// Kept for tests and compatibility helpers that still construct a
+    /// TCP-only dimension directly.
+    pub fn add_tcp_metrics(&mut self, dim: TCPMetricsDimension, rtt_us: u32, cwnd: u32) {
+        record_tcp_metrics(&mut self.tcp_tx, dim, rtt_us, cwnd);
     }
 
     /// Adds a disk I/O event with latency, bytes, and queue depth.
-    pub fn add_disk_io(&self, dim: DiskDimension, latency_ns: u64, bytes: u32, queue_depth: u32) {
-        self.disk_latency.entry(dim).or_default().record(latency_ns);
-        self.disk_bytes
-            .entry(dim)
-            .or_default()
-            .add(i64::from(bytes));
-        self.disk_queue_depth
-            .entry(dim)
-            .or_default()
-            .record(i64::from(queue_depth));
+    pub fn add_disk_io(
+        &mut self,
+        dim: DiskDimension,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+    ) {
+        self.add_disk_io_with_device_key(
+            DiskDeviceDimension::new(dim.pid(), dim.client_type(), dim.device_id()),
+            dim.rw(),
+            latency_ns,
+            bytes,
+            queue_depth,
+        );
+    }
+
+    #[inline(always)]
+    pub(crate) fn add_disk_io_with_device_key(
+        &mut self,
+        dim: DiskDeviceDimension,
+        rw: u8,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+    ) {
+        if rw == 0 {
+            record_disk(&mut self.disk_io_read, dim, latency_ns, bytes, queue_depth);
+        } else {
+            record_disk(&mut self.disk_io_write, dim, latency_ns, bytes, queue_depth);
+        }
     }
 
     /// Adds a block merge event.
-    pub fn add_block_merge(&self, dim: DiskDimension, bytes: u32) {
-        self.block_merge
-            .entry(dim)
-            .or_default()
-            .add(i64::from(bytes));
+    pub fn add_block_merge(&mut self, dim: DiskDimension, bytes: u32) {
+        add_counter_value(&mut self.block_merge, dim, i64::from(bytes));
     }
 
     /// Records scheduler on-CPU latency distribution from sched_switch events.
-    pub fn add_sched_on_cpu(&self, dim: BasicDimension, on_cpu_ns: u64) {
-        self.sched_on_cpu.entry(dim).or_default().record(on_cpu_ns);
+    pub fn add_sched_on_cpu(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        self.cpu_on_core.record_sched_on_cpu(dim, cpu_id, on_cpu_ns);
+    }
+
+    /// Records a completed scheduler slice with separate raw and resolved durations.
+    #[inline(always)]
+    pub fn add_sched_slice(
+        &mut self,
+        dim: BasicDimension,
+        cpu_id: u32,
+        sched_on_cpu_ns: u64,
+        cpu_on_core_ns: u64,
+    ) {
+        self.cpu_on_core
+            .record_sched_slice(dim, cpu_id, sched_on_cpu_ns, cpu_on_core_ns);
     }
 
     /// Adds per-core on-CPU time used for utilization aggregation.
-    pub fn add_cpu_on_core(&self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
-        self.cpu_on_core
-            .entry(CpuCoreDimension {
-                pid: dim.pid,
-                client_type: dim.client_type,
-                cpu_id,
-            })
-            .or_default()
-            .add(on_cpu_ns as i64);
+    #[inline(always)]
+    pub fn add_cpu_on_core(&mut self, dim: BasicDimension, cpu_id: u32, on_cpu_ns: u64) {
+        self.cpu_on_core.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
+    }
+
+    /// Adds per-core on-CPU time using an already packed core dimension.
+    #[inline(always)]
+    pub fn add_cpu_on_core_dim(&mut self, dim: CpuCoreDimension, on_cpu_ns: u64) {
+        self.cpu_on_core.add_packed(dim, on_cpu_ns);
     }
 
     /// Adds a scheduler switch event (on-CPU time).
@@ -266,88 +912,97 @@ impl Buffer {
     /// This helper is kept for direct tests/benchmarks. Production code uses
     /// carried scheduler state and calls `add_sched_on_cpu`/`add_cpu_on_core`
     /// separately to keep window accounting exact across rotations.
-    pub fn add_sched_switch(&self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
-        self.add_sched_on_cpu(dim, on_cpu_ns);
-        self.add_cpu_on_core(dim, cpu_id, on_cpu_ns);
+    pub fn add_sched_switch(&mut self, dim: BasicDimension, on_cpu_ns: u64, cpu_id: u32) {
+        self.add_sched_slice(dim, cpu_id, on_cpu_ns, on_cpu_ns);
     }
 
     /// Adds scheduler runqueue and off-CPU latency.
-    pub fn add_sched_runqueue(&self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
-        if runqueue_ns > 0 {
-            self.sched_runqueue
-                .entry(dim)
-                .or_default()
-                .record(runqueue_ns);
-        }
-        if off_cpu_ns > 0 {
-            self.sched_off_cpu
-                .entry(dim)
-                .or_default()
-                .record(off_cpu_ns);
+    pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
+        if runqueue_ns > 0 || off_cpu_ns > 0 {
+            get_or_default_mut(&mut self.sched_wait, dim).record(runqueue_ns, off_cpu_ns);
         }
     }
 
     /// Adds a page fault event.
-    pub fn add_page_fault(&self, dim: BasicDimension, major: bool) {
-        if major {
-            self.page_fault_major.entry(dim).or_default().add_count(1);
-        } else {
-            self.page_fault_minor.entry(dim).or_default().add_count(1);
-        }
+    pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
+        get_or_default_mut(&mut self.page_fault_metrics, dim).record_page_fault(major);
     }
 
     /// Adds an FD open event.
-    pub fn add_fd_open(&self, dim: BasicDimension) {
-        self.fd_open.entry(dim).or_default().add_count(1);
+    pub fn add_fd_open(&mut self, dim: BasicDimension) {
+        self.fd_metrics.record_open(dim);
     }
 
     /// Adds an FD close event.
-    pub fn add_fd_close(&self, dim: BasicDimension) {
-        self.fd_close.entry(dim).or_default().add_count(1);
+    pub fn add_fd_close(&mut self, dim: BasicDimension) {
+        self.fd_metrics.record_close(dim);
     }
 
     /// Adds a memory reclaim event.
-    pub fn add_mem_reclaim(&self, dim: BasicDimension, duration_ns: u64) {
-        self.mem_reclaim.entry(dim).or_default().record(duration_ns);
+    pub fn add_mem_reclaim(&mut self, dim: BasicDimension, duration_ns: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_mem_reclaim(duration_ns);
     }
 
     /// Adds a memory compaction event.
-    pub fn add_mem_compaction(&self, dim: BasicDimension, duration_ns: u64) {
-        self.mem_compaction
-            .entry(dim)
-            .or_default()
-            .record(duration_ns);
+    pub fn add_mem_compaction(&mut self, dim: BasicDimension, duration_ns: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_mem_compaction(duration_ns);
     }
 
     /// Adds a swap-in event.
-    pub fn add_swap_in(&self, dim: BasicDimension, pages: u64) {
-        self.swap_in.entry(dim).or_default().add(pages as i64);
+    pub fn add_swap_in(&mut self, dim: BasicDimension, pages: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_swap_in(pages);
     }
 
     /// Adds a swap-out event.
-    pub fn add_swap_out(&self, dim: BasicDimension, pages: u64) {
-        self.swap_out.entry(dim).or_default().add(pages as i64);
+    pub fn add_swap_out(&mut self, dim: BasicDimension, pages: u64) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_swap_out(pages);
     }
 
     /// Adds an OOM kill event.
-    pub fn add_oom_kill(&self, dim: BasicDimension) {
-        self.oom_kill.entry(dim).or_default().add_count(1);
+    pub fn add_oom_kill(&mut self, dim: BasicDimension) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_oom_kill();
     }
 
     /// Adds a process exit event.
-    pub fn add_process_exit(&self, dim: BasicDimension) {
-        self.process_exit.entry(dim).or_default().add_count(1);
+    pub fn add_process_exit(&mut self, dim: BasicDimension) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_process_exit();
     }
 
     /// Adds a TCP state change event.
-    pub fn add_tcp_state_change(&self, dim: BasicDimension) {
-        self.tcp_state_change.entry(dim).or_default().add_count(1);
+    pub fn add_tcp_state_change(&mut self, dim: BasicDimension) {
+        get_or_default_mut(&mut self.basic_cold_metrics, dim).record_tcp_state_change();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn sched_on_cpu_snapshot(
+        &self,
+        dim: BasicDimension,
+    ) -> Option<super::aggregate::LatencySnapshot> {
+        let mut merged = LatencyAggregate::new();
+        let mut found = false;
+
+        for (cpu_dim, aggregate) in self.cpu_on_core.iter() {
+            if cpu_dim.pid() != dim.pid() || cpu_dim.client_type() != dim.client_type() {
+                continue;
+            }
+
+            let snapshot = aggregate.sched_on_cpu_snapshot();
+            if snapshot.count == 0 {
+                continue;
+            }
+
+            merged.merge_snapshot(&snapshot);
+            found = true;
+        }
+
+        found.then(|| merged.snapshot())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sink::aggregated::aggregate::CountAggregate;
 
     fn test_buffer() -> Buffer {
         Buffer::new(
@@ -363,212 +1018,336 @@ mod tests {
 
     #[test]
     fn test_add_syscall_read() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_syscall(EventType::SyscallRead, dim, 5_000);
         buf.add_syscall(EventType::SyscallRead, dim, 10_000);
 
-        let entry = buf.syscall_read.get(&dim).expect("entry exists");
-        let snap = entry.snapshot();
+        let snap = buf.syscall_read.get(&dim).expect("entry exists").snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
     }
 
     #[test]
+    fn test_hot_basic_latency_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicLatencyMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record(key1, 5_000);
+        map.record(key1, 7_000);
+        map.record(key2, 11_000);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get(&key1).expect("inline entry exists").snapshot().sum,
+            12_000
+        );
+        assert_eq!(
+            map.get(&key2).expect("spill entry exists").snapshot().sum,
+            11_000
+        );
+    }
+
+    #[test]
+    fn test_hot_basic_fd_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicFdMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record_open(key1);
+        map.record_close(key1);
+        map.record_open(key2);
+
+        assert_eq!(map.len(), 2);
+        let inline = map.get(&key1).expect("inline entry exists");
+        assert_eq!(inline.open_snapshot().count, 1);
+        assert_eq!(inline.close_snapshot().count, 1);
+
+        let spill = map.get(&key2).expect("spill entry exists");
+        assert_eq!(spill.open_snapshot().count, 1);
+        assert_eq!(spill.close_snapshot().count, 0);
+    }
+
+    #[test]
+    fn test_add_syscall_epoll_wait_uses_cold_basic_map() {
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
+
+        buf.add_syscall(EventType::SyscallEpollWait, dim, 8_000);
+
+        assert!(buf.fd_metrics.get(&dim).is_none());
+        assert!(buf.page_fault_metrics.get(&dim).is_none());
+        let entry = buf.basic_cold_metrics.get(&dim).expect("cold entry exists");
+        let snap = entry.syscall_epoll_wait_snapshot();
+        assert_eq!(snap.count, 1);
+        assert_eq!(snap.sum, 8_000);
+    }
+
+    #[test]
     fn test_add_syscall_unknown_type_is_noop() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         // DiskIO is not a syscall type, should be ignored.
         buf.add_syscall(EventType::DiskIO, dim, 5_000);
+        assert!(buf.fd_metrics.is_empty());
+        assert!(buf.page_fault_metrics.is_empty());
         assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscall_write.is_empty());
+        assert!(buf.syscall_futex.is_empty());
+        assert!(buf.syscall_mmap.is_empty());
+        assert!(buf.syscall_fsync.is_empty());
     }
 
     #[test]
     fn test_add_net_io() {
-        let buf = test_buffer();
-        let dim = NetworkDimension {
-            pid: 1,
-            client_type: 1,
-            port_label: 3, // ElJsonRpc
-            direction: 0,
-        };
+        let mut buf = test_buffer();
+        let dim = NetworkDimension::new(1, 1, 3, 0);
+        let key = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_net_io(dim, 1024);
         buf.add_net_io(dim, 2048);
 
-        let entry = buf.net_io.get(&dim).expect("entry exists");
+        let entry = buf.net_io_tx.get(&key).expect("entry exists");
         let snap = entry.snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 3072);
     }
 
     #[test]
+    fn test_add_net_io_separates_tx_and_rx_maps() {
+        let mut buf = test_buffer();
+        let tx = NetworkDimension::new(1, 1, 3, Direction::TX as u8);
+        let rx = NetworkDimension::new(1, 1, 3, Direction::RX as u8);
+        let key = TCPMetricsDimension::new(1, 1, 3);
+
+        buf.add_net_io(tx, 1024);
+        buf.add_net_io(rx, 2048);
+
+        assert_eq!(
+            buf.net_io_tx
+                .get(&key)
+                .expect("tx entry exists")
+                .snapshot()
+                .sum,
+            1024
+        );
+        assert_eq!(
+            buf.net_io_rx
+                .get(&key)
+                .expect("rx entry exists")
+                .snapshot()
+                .sum,
+            2048
+        );
+    }
+
+    #[test]
     fn test_add_tcp_metrics() {
-        let buf = test_buffer();
-        let dim = TCPMetricsDimension {
-            pid: 1,
-            client_type: 1,
-            port_label: 3, // ElJsonRpc
-        };
+        let mut buf = test_buffer();
+        let dim = TCPMetricsDimension::new(1, 1, 3);
 
         buf.add_tcp_metrics(dim, 100, 65535);
 
-        let rtt = buf.tcp_rtt.get(&dim).expect("rtt exists");
-        assert_eq!(rtt.snapshot().sum, 100);
-        let cwnd = buf.tcp_cwnd.get(&dim).expect("cwnd exists");
-        assert_eq!(cwnd.snapshot().sum, 65535);
+        let metrics = buf.tcp_tx.get(&dim).expect("tcp metrics exist");
+        assert_eq!(metrics.rtt_snapshot().sum, 100);
+        assert_eq!(metrics.cwnd_snapshot().sum, 65535);
+    }
+
+    #[test]
+    fn test_get_or_default_mut_cache_handles_repeated_hits_and_new_keys() {
+        let mut map = fast_map_with_capacity::<BasicDimension, CountAggregate>(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        get_or_default_mut(&mut map, key1).add_count(1);
+        get_or_default_mut(&mut map, key1).add_count(2);
+        get_or_default_mut(&mut map, key2).add_count(3);
+        get_or_default_mut(&mut map, key1).add_count(4);
+
+        assert_eq!(map.get(&key1).expect("key1 exists").snapshot().count, 7);
+        assert_eq!(map.get(&key2).expect("key2 exists").snapshot().count, 3);
+    }
+
+    #[test]
+    fn test_add_net_io_with_tcp_metrics() {
+        let mut buf = test_buffer();
+        let dim = NetworkDimension::new(1, 1, 3, 0);
+        let key = TCPMetricsDimension::new(1, 1, 3);
+
+        buf.add_net_io_with_tcp_metrics(dim, 1500, 100, 65535);
+
+        let metrics = buf.tcp_tx.get(&key).expect("tcp tx metrics exist");
+        assert_eq!(metrics.bytes_snapshot().sum, 1500);
+        assert_eq!(metrics.rtt_snapshot().sum, 100);
+        assert_eq!(metrics.cwnd_snapshot().sum, 65535);
     }
 
     #[test]
     fn test_add_disk_io() {
-        let buf = test_buffer();
-        let dim = DiskDimension {
-            pid: 1,
-            client_type: 1,
-            device_id: 259,
-            rw: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = DiskDimension::new(1, 1, 259, 1);
 
         buf.add_disk_io(dim, 50_000, 4096, 3);
 
-        let lat = buf.disk_latency.get(&dim).expect("latency exists");
-        assert_eq!(lat.snapshot().count, 1);
-        let bytes = buf.disk_bytes.get(&dim).expect("bytes exists");
-        assert_eq!(bytes.snapshot().sum, 4096);
-        let qd = buf.disk_queue_depth.get(&dim).expect("queue depth exists");
-        assert_eq!(qd.snapshot().sum, 3);
+        let disk = buf
+            .disk_io_write
+            .get(&DiskDeviceDimension::new(1, 1, 259))
+            .expect("disk aggregate exists");
+        assert_eq!(disk.latency_snapshot().count, 1);
+        assert_eq!(disk.bytes_snapshot().sum, 4096);
+        assert_eq!(disk.queue_depth_snapshot().sum, 3);
     }
 
     #[test]
     fn test_add_sched_switch_tracks_per_core() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_switch(dim, 1_000, 2);
         buf.add_sched_switch(dim, 2_000, 2);
         buf.add_sched_switch(dim, 500, 4);
 
-        let on_cpu = buf.sched_on_cpu.get(&dim).expect("sched_on_cpu exists");
-        let on_cpu_snap = on_cpu.snapshot();
+        let on_cpu_snap = buf.sched_on_cpu_snapshot(dim).expect("sched_on_cpu exists");
         assert_eq!(on_cpu_snap.count, 3);
         assert_eq!(on_cpu_snap.sum, 3_500);
 
         let core2 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 2,
-            })
+            .get(&CpuCoreDimension::new(1, 1, 2))
             .expect("core 2 exists");
-        let core2_snap = core2.snapshot();
+        let core2_sched_snap = core2.sched_on_cpu_snapshot();
+        assert_eq!(core2_sched_snap.count, 2);
+        assert_eq!(core2_sched_snap.sum, 3_000);
+        let core2_snap = core2.cpu_on_core_snapshot();
         assert_eq!(core2_snap.count, 2);
         assert_eq!(core2_snap.sum, 3_000);
 
         let core4 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 1,
-                client_type: 1,
-                cpu_id: 4,
-            })
+            .get(&CpuCoreDimension::new(1, 1, 4))
             .expect("core 4 exists");
-        let core4_snap = core4.snapshot();
+        let core4_sched_snap = core4.sched_on_cpu_snapshot();
+        assert_eq!(core4_sched_snap.count, 1);
+        assert_eq!(core4_sched_snap.sum, 500);
+        let core4_snap = core4.cpu_on_core_snapshot();
         assert_eq!(core4_snap.count, 1);
         assert_eq!(core4_snap.sum, 500);
     }
 
     #[test]
     fn test_add_sched_runqueue_skips_zero() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_sched_runqueue(dim, 0, 5_000);
-        assert!(buf.sched_runqueue.is_empty());
-        assert!(!buf.sched_off_cpu.is_empty());
+        let first = buf.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(first.runqueue_snapshot().count, 0);
+        assert_eq!(first.off_cpu_snapshot().count, 1);
 
-        let buf2 = test_buffer();
+        let mut buf2 = test_buffer();
         buf2.add_sched_runqueue(dim, 5_000, 0);
-        assert!(!buf2.sched_runqueue.is_empty());
-        assert!(buf2.sched_off_cpu.is_empty());
+        let second = buf2.sched_wait.get(&dim).expect("sched wait exists");
+        assert_eq!(second.runqueue_snapshot().count, 1);
+        assert_eq!(second.off_cpu_snapshot().count, 0);
     }
 
     #[test]
     fn test_add_page_fault() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_page_fault(dim, true);
         buf.add_page_fault(dim, false);
         buf.add_page_fault(dim, false);
 
-        let major = buf.page_fault_major.get(&dim).expect("major exists");
-        assert_eq!(major.snapshot().count, 1);
-        let minor = buf.page_fault_minor.get(&dim).expect("minor exists");
-        assert_eq!(minor.snapshot().count, 2);
+        let page_faults = buf.page_fault_metrics.get(&dim).expect("page faults exist");
+        assert_eq!(page_faults.page_fault_major_snapshot().count, 1);
+        assert_eq!(page_faults.page_fault_minor_snapshot().count, 2);
     }
 
     #[test]
     fn test_add_fd_open_close() {
-        let buf = test_buffer();
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
+        let mut buf = test_buffer();
+        let dim = BasicDimension::new(1, 1);
 
         buf.add_fd_open(dim);
         buf.add_fd_open(dim);
         buf.add_fd_close(dim);
 
-        let open = buf.fd_open.get(&dim).expect("open exists");
-        assert_eq!(open.snapshot().count, 2);
-        let close = buf.fd_close.get(&dim).expect("close exists");
-        assert_eq!(close.snapshot().count, 1);
+        let fd = buf.fd_metrics.get(&dim).expect("fd aggregate exists");
+        assert_eq!(fd.open_snapshot().count, 2);
+        assert_eq!(fd.close_snapshot().count, 1);
     }
 
     #[test]
-    fn test_concurrent_add_syscall() {
-        use std::sync::Arc;
-        use std::thread;
+    fn test_fast_map_preserves_entries() {
+        let mut map = fast_map_with_capacity::<u32, u32>(32);
 
-        let buf = Arc::new(test_buffer());
-        let dim = BasicDimension {
-            pid: 1,
-            client_type: 1,
-        };
-        let mut handles = Vec::new();
-
-        for _ in 0..4 {
-            let buf = Arc::clone(&buf);
-            handles.push(thread::spawn(move || {
-                for _ in 0..1000 {
-                    buf.add_syscall(EventType::SyscallRead, dim, 5_000);
-                }
-            }));
+        for key in 0..10 {
+            *get_or_default_mut(&mut map, key) += 1;
         }
 
-        for h in handles {
-            h.join().expect("thread panicked");
+        assert_eq!(map.len(), 10);
+        for key in 0..10 {
+            assert_eq!(map.get(&key), Some(&1));
         }
+    }
 
-        let entry = buf.syscall_read.get(&dim).expect("entry exists");
-        assert_eq!(entry.snapshot().count, 4000);
+    #[test]
+    fn test_fast_map_single_entry_reuses_hash_storage() {
+        let mut map = fast_map_with_capacity::<u32, u32>(4);
+
+        *get_or_default_mut(&mut map, 10) += 1;
+        *get_or_default_mut(&mut map, 10) += 1;
+
+        assert_eq!(map.get(&10), Some(&2));
+        assert_eq!(map.len(), 1);
+    }
+
+    #[test]
+    fn test_buffer_reset_clears_aggregates_and_updates_metadata() {
+        let start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let slot_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(12);
+        let mut buf = Buffer::new(start, 1, slot_start, false, false, false, 8);
+        let dim = BasicDimension::new(1, 1);
+
+        buf.add_syscall(EventType::SyscallRead, dim, 5_000);
+        buf.add_fd_open(dim);
+
+        let new_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(20);
+        let new_slot_start = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(24);
+        buf.reset(new_start, 2, new_slot_start, true, true, true, 16);
+
+        assert_eq!(buf.start_time, new_start);
+        assert_eq!(buf.wallclock_slot, 2);
+        assert_eq!(buf.wallclock_slot_start, new_slot_start);
+        assert!(buf.cl_syncing);
+        assert!(buf.el_optimistic);
+        assert!(buf.el_offline);
+        assert_eq!(buf.system_cores, 16);
+        assert!(buf.syscall_read.is_empty());
+        assert!(buf.syscall_write.is_empty());
+        assert!(buf.syscall_futex.is_empty());
+        assert!(buf.syscall_mmap.is_empty());
+        assert!(buf.syscall_fsync.is_empty());
+        assert!(buf.fd_metrics.is_empty());
+        assert!(buf.page_fault_metrics.is_empty());
+        assert!(buf.sched_wait.is_empty());
+        assert!(buf.basic_cold_metrics.is_empty());
+        assert!(buf.net_io_tx.is_empty());
+        assert!(buf.net_io_rx.is_empty());
+        assert!(buf.cpu_on_core.is_empty());
+
+        buf.add_syscall(EventType::SyscallRead, dim, 7_500);
+        let snap = buf
+            .syscall_read
+            .get(&dim)
+            .expect("entry exists after reset")
+            .snapshot();
+        assert_eq!(snap.count, 1);
+        assert_eq!(snap.sum, 7_500);
     }
 }

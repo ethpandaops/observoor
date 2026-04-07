@@ -64,14 +64,6 @@ struct {
     __type(value, struct syscall_val);
 } syscall_start SEC(".maps");
 
-// openat_names: Filename capture during openat.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 1024);
-    __type(key, struct syscall_key);
-    __type(value, struct openat_val);
-} openat_names SEC(".maps");
-
 // req_start: Block I/O request tracking.
 struct {
     __uint(type, BPF_MAP_TYPE_HASH);
@@ -109,16 +101,8 @@ struct {
     __uint(type, BPF_MAP_TYPE_HASH);
     __uint(max_entries, 4096);
     __type(key, struct syscall_key);
-    __type(value, struct net_send_val);
+    __type(value, struct net_recv_val);
 } net_send_udp_start SEC(".maps");
-
-// fault_start: Page fault entry timestamps.
-struct {
-    __uint(type, BPF_MAP_TYPE_HASH);
-    __uint(max_entries, 4096);
-    __type(key, struct syscall_key);
-    __type(value, struct fault_val);
-} fault_start SEC(".maps");
 
 // tracked_tids: TIDs to trace for on-CPU time, value is pid + client_type.
 struct tracked_tid_val {
@@ -270,17 +254,31 @@ static __always_inline struct tracked_tid_val *lookup_tracked_tid(
     return bpf_map_lookup_elem(&tracked_tids, &tid);
 }
 
-// Helper: Drop per-TID scheduler state on thread exit.
+// Helper: Remember socket ownership for later TCP retransmit/state probes.
 //
-// Linux can reuse TIDs quickly under thread-heavy runtimes. Removing this
-// state eagerly prevents a newly-created thread from inheriting old scheduler
-// timestamps or stale tracked-thread metadata.
-static __always_inline void cleanup_tid_scheduler_state(__u32 tid)
-{
-    bpf_map_delete_elem(&tracked_tids, &tid);
-    bpf_map_delete_elem(&wakeup_ts, &tid);
-    bpf_map_delete_elem(&sched_on_ts, &tid);
-    bpf_map_delete_elem(&offcpu_ts, &tid);
+// Long-lived sockets can hit tcp_sendmsg/tcp_recvmsg many times with the same
+// owner tuple. Skip the heavier LRU hash update when the cached mapping is
+// already correct.
+static __always_inline void remember_sock_owner(
+    __u64 sk_key,
+    __u32 pid,
+    __u32 tid,
+    __u8 client_type
+) {
+    struct sock_owner_val *existing =
+        bpf_map_lookup_elem(&sock_owner, &sk_key);
+    if (existing &&
+        existing->pid == pid &&
+        existing->tid == tid &&
+        existing->client_type == client_type)
+        return;
+
+    struct sock_owner_val owner = {
+        .pid = pid,
+        .tid = tid,
+        .client_type = client_type,
+    };
+    bpf_map_update_elem(&sock_owner, &sk_key, &owner, BPF_ANY);
 }
 
 // Helper: Fill common event header.

@@ -1,0 +1,10 @@
+{
+  "runs": 3,
+  "cpu_values": [9.55, 9.46, 9.51],
+  "median_cpu_seconds": 9.51,
+  "median_wall_seconds": 27.994,
+  "git_commit": "53f86ad",
+  "iterations": 50000,
+  "threads": 4,
+  "timestamp": "2026-03-30T07:57:35Z"
+}

@@ -1,0 +1,144 @@
+name: cpu-bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      iterations:
+        description: "Syscall iterations per thread"
+        default: "50000"
+  pull_request:
+    types: [labeled, synchronize]
+
+jobs:
+  cpu-overhead:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      contains(github.event.pull_request.labels.*.name, 'bench-cpu')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+
+      - name: Resolve base and head SHAs
+        id: shas
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          # Always compare against master (the PR base or origin/master for manual runs).
+          if [ -z "${BASE_SHA:-}" ]; then
+            BASE_SHA="$(git rev-parse origin/master)"
+          fi
+          echo "base=${BASE_SHA}" >> "$GITHUB_OUTPUT"
+          echo "head=${HEAD_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Base: ${BASE_SHA}"
+          echo "Head: ${HEAD_SHA}"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.88.0"
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install clang llvm libbpf-dev bc
+
+      - name: Setup BPF filesystem
+        run: |
+          sudo mount -t debugfs debugfs /sys/kernel/debug 2>/dev/null || true
+          sudo mount -t bpf bpf /sys/fs/bpf 2>/dev/null || true
+
+          if [ ! -d /sys/fs/bpf ]; then
+            echo "::error::BPF filesystem not available"
+            exit 1
+          fi
+          echo "BPF filesystem available"
+          uname -r
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cpu-bench-${{ hashFiles('**/Cargo.lock') }}
+
+      # Save bench scripts from HEAD (base may not have them).
+      - name: Preserve bench scripts
+        run: cp -r bench-cpu /tmp/bench-cpu-scripts
+
+      # --- Build BASE commit ---
+      - name: Build base
+        env:
+          BASE_SHA: ${{ steps.shas.outputs.base }}
+        run: |
+          git checkout --detach "$BASE_SHA"
+          cargo build --release --all-features
+          cp ./target/release/observoor /tmp/observoor-base
+
+      # --- Build HEAD commit ---
+      - name: Build head
+        env:
+          HEAD_SHA: ${{ steps.shas.outputs.head }}
+        run: |
+          git checkout --detach "$HEAD_SHA"
+          cargo build --release --all-features
+          cp ./target/release/observoor /tmp/observoor-head
+
+      - name: Benchmark base (3x)
+        env:
+          ITERATIONS: ${{ github.event.inputs.iterations || '50000' }}
+        run: |
+          mkdir -p /tmp/cpu-bench-results
+          for run in 1 2 3; do
+            echo "::group::Base run $run/3"
+            sudo bash /tmp/bench-cpu-scripts/run-bench.sh "$ITERATIONS" \
+              /tmp/observoor-base \
+              > "/tmp/cpu-bench-results/base-${run}.json"
+            cat "/tmp/cpu-bench-results/base-${run}.json"
+            echo "::endgroup::"
+          done
+
+      - name: Benchmark head (3x)
+        env:
+          ITERATIONS: ${{ github.event.inputs.iterations || '50000' }}
+        run: |
+          for run in 1 2 3; do
+            echo "::group::Head run $run/3"
+            sudo bash /tmp/bench-cpu-scripts/run-bench.sh "$ITERATIONS" \
+              /tmp/observoor-head \
+              > "/tmp/cpu-bench-results/head-${run}.json"
+            cat "/tmp/cpu-bench-results/head-${run}.json"
+            echo "::endgroup::"
+          done
+
+      - name: Compare results
+        run: |
+          echo "=== BASE ==="
+          python3 /tmp/bench-cpu-scripts/compare.py \
+            /tmp/cpu-bench-results/base-1.json \
+            /tmp/cpu-bench-results/base-2.json \
+            /tmp/cpu-bench-results/base-3.json \
+            --output /tmp/cpu-bench-results/base-report.json
+
+          echo ""
+          echo "=== HEAD ==="
+          python3 /tmp/bench-cpu-scripts/compare.py \
+            /tmp/cpu-bench-results/head-1.json \
+            /tmp/cpu-bench-results/head-2.json \
+            /tmp/cpu-bench-results/head-3.json \
+            --baseline /tmp/cpu-bench-results/base-report.json \
+            --output /tmp/cpu-bench-results/head-report.json
+
+      - name: Upload results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cpu-bench-results
+          path: /tmp/cpu-bench-results/

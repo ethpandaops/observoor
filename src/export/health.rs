@@ -8,8 +8,8 @@ use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::Router;
 use prometheus::{
-    Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec, Opts,
-    Registry, TextEncoder,
+    Counter, CounterVec, Encoder, Gauge, GaugeVec, Histogram, HistogramOpts, HistogramVec,
+    IntCounter, IntCounterVec, Opts, Registry, TextEncoder,
 };
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
@@ -29,7 +29,7 @@ pub struct HealthMetrics {
 
     // === Core Metrics ===
     /// Total events received from BPF ring buffer.
-    pub events_received: Counter,
+    pub events_received: IntCounter,
     /// Total events dropped due to processing errors.
     pub events_dropped: Counter,
     /// Total slot aggregation flushes.
@@ -79,9 +79,9 @@ pub struct HealthMetrics {
     /// Total ring buffer capacity in bytes.
     pub ringbuf_capacity_bytes: Gauge,
     /// Events by event type.
-    pub events_by_type: CounterVec,
+    pub events_by_type: IntCounterVec,
     /// Events by client type.
-    pub events_by_client: CounterVec,
+    pub events_by_client: IntCounterVec,
     /// Current sink event channel length.
     pub sink_event_channel_length: GaugeVec,
     /// Sink event channel capacity.
@@ -116,7 +116,7 @@ impl HealthMetrics {
         let registry = Registry::new();
 
         // === Core Metrics ===
-        let events_received = Counter::with_opts(
+        let events_received = IntCounter::with_opts(
             Opts::new(
                 "events_received_total",
                 "Total events received from BPF ring buffer.",
@@ -278,7 +278,7 @@ impl HealthMetrics {
             )
             .namespace("observoor"),
         )?;
-        let events_by_type = CounterVec::new(
+        let events_by_type = IntCounterVec::new(
             Opts::new(
                 "events_by_type_total",
                 "Total events received by event type.",
@@ -286,7 +286,7 @@ impl HealthMetrics {
             .namespace("observoor"),
             &["event_type"],
         )?;
-        let events_by_client = CounterVec::new(
+        let events_by_client = IntCounterVec::new(
             Opts::new(
                 "events_by_client_total",
                 "Total events received by client type.",

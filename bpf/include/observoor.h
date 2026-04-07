@@ -46,72 +46,124 @@ struct event_header {
     __u8  pad[6];
 } __attribute__((packed));
 
-// Syscall event (48 bytes total).
+// Compact syscall event (10-byte populated prefix).
+// The aggregated pipeline only needs pid + client + syscall type + latency,
+// so skip timestamp/tid on the hottest event family to cut ring-buffer copy
+// and userspace parse work.
 struct syscall_event {
-    struct event_header hdr;
+    __u32 pid;
+    __u32 latency_ns;
+    __u8  event_type;
+    __u8  client_type;
+} __attribute__((packed));
+
+// Compact generic network I/O event (15-byte populated prefix).
+// Aggregation only uses pid + client + transport + ports + bytes, so drop the
+// unused timestamp/tid fields from the hottest UDP/TCP RX/TX records.
+struct compact_net_io_event {
+    __u32 pid;
+    __u32 bytes;
+    __u16 sport;
+    __u16 dport;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  transport;
+} __attribute__((packed));
+
+// Compact disk I/O event (27-byte populated prefix).
+// Aggregation only uses pid + client + latency + device + queue depth on the
+// hot path, so disk completions can drop both timestamp and tid.
+struct compact_disk_io_event {
     __u64 latency_ns;
-    __s64 ret;
-    __u32 syscall_nr;
-    __s32 fd;
+    __u32 pid;
+    __u32 bytes;
+    __u32 queue_depth;
+    __u32 dev; // Block device ID (major:minor encoded)
+    __u8  rw;
+    __u8  event_type;
+    __u8  client_type;
 };
 
-// Disk I/O event (48 bytes total).
+// Disk I/O event (44 bytes total).
+// read/write is stored in hdr.pad[0] to avoid payload padding.
 struct disk_io_event {
     struct event_header hdr;
     __u64 latency_ns;
     __u32 bytes;
-    __u8  rw; // 0=read, 1=write
-    __u8  pad[3];
     __u32 queue_depth;
     __u32 dev; // Block device ID (major:minor encoded)
 };
 
-// Network I/O event (48 bytes total).
+// Common network I/O event (32 bytes total).
+// transport is stored in hdr.pad[0] to keep the payload small.
 struct net_io_event {
     struct event_header hdr;
     __u32 bytes;
     __u16 sport;
     __u16 dport;
-    __u8  direction;    // 0=TX, 1=RX
-    __u8  has_metrics;  // 1 if srtt_us/snd_cwnd are populated
-    __u8  transport;    // 0=TCP, 1=UDP
-    __u8  pad[1];
-    __u32 srtt_us;      // Smoothed RTT (0 when has_metrics==0)
-    __u32 snd_cwnd;     // Congestion window (0 when has_metrics==0)
 };
 
-// Scheduler event (40 bytes total).
+// Compact TCP TX event with inline metrics (22-byte populated prefix).
+// Transport is implicitly TCP, and aggregation does not read timestamp/tid.
+struct compact_net_io_metrics_event {
+    __u32 pid;
+    __u32 bytes;
+    __u16 sport;
+    __u16 dport;
+    __u32 srtt_us;      // Smoothed RTT
+    __u32 snd_cwnd;     // Congestion window
+    __u8  event_type;
+    __u8  client_type;
+} __attribute__((packed));
+
+// Scheduler event (32 bytes total).
+// voluntary is stored in hdr.pad[0], cpu_id in hdr.pad[1..4] (little-endian).
 struct sched_event {
     struct event_header hdr;
     __u64 on_cpu_ns;
-    __u8  voluntary;
-    __u8  pad[3];
-    __u32 cpu_id;
 };
 
-// Page fault event (40 bytes total).
+// Combined scheduler switch + switch-in event (56 bytes total).
+// Shares EVENT_SCHED_SWITCH; userspace detects the extended payload length.
+// voluntary is stored in hdr.pad[0], cpu_id in hdr.pad[1..4] (little-endian),
+// and next_client_type in hdr.pad[5].
+struct sched_switch_runqueue_event {
+    struct event_header hdr;
+    __u64 on_cpu_ns;
+    __u64 runqueue_ns;
+    __u64 off_cpu_ns;
+    __u32 next_pid;
+    __u32 next_tid;
+};
+
+// Page fault event (8 bytes total).
+// Aggregation only needs pid + client + event tag + major/minor, so keep this
+// hot event in a compact marker-style record instead of carrying the full
+// generic header.
 struct page_fault_event {
-    struct event_header hdr;
-    __u64 address;
+    __u32 pid;
+    __u8  event_type;
+    __u8  client_type;
     __u8  major;
-    __u8  pad[7];
+    __u8  pad;
 };
 
-// FD event (96 bytes total).
+// FD event (8 bytes total).
+// Userspace only counts open/close events, so keep just the fields needed to
+// reconstruct the BasicDimension and event tag.
 struct fd_event {
-    struct event_header hdr;
-    __s32 fd;
-    __u8  pad[4];
-    char  filename[64];
+    __u32 pid;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  pad[2];
 };
 
-// Scheduler runqueue event (48 bytes total).
+// Scheduler runqueue event (40 bytes total).
+// cpu_id is stored in hdr.pad[0..3] (little-endian).
 struct sched_runqueue_event {
     struct event_header hdr;
     __u64 runqueue_ns;
     __u64 off_cpu_ns;
-    __u32 cpu_id;
-    __u8  pad[4];
 };
 
 // Block merge event (32 bytes total).
@@ -131,14 +183,10 @@ struct tcp_retransmit_event {
     __u8  pad[8];
 };
 
-// TCP state change event (40 bytes total).
+// TCP state change event (24 bytes total).
+// The aggregated pipeline only counts transitions, so this stays header-only.
 struct tcp_state_event {
     struct event_header hdr;
-    __u16 sport;
-    __u16 dport;
-    __u8  new_state;
-    __u8  old_state;
-    __u8  pad[10];
 };
 
 // Memory reclaim/compaction event (32 bytes total).
@@ -153,18 +201,17 @@ struct swap_event {
     __u64 pages;
 };
 
-// OOM kill event (32 bytes total).
+// OOM kill event (24 bytes total).
+// The aggregated pipeline only counts OOM kills, so this stays header-only.
 struct oom_kill_event {
     struct event_header hdr;
-    __u32 target_pid;
-    __u8  pad[4];
 };
 
-// Process exit event (32 bytes total).
+// Process exit event (24 bytes total).
+// The aggregated pipeline only counts exits and uses the header TID for
+// scheduler cleanup, so no extra payload is required.
 struct process_exit_event {
     struct event_header hdr;
-    __u32 exit_code;
-    __u8  pad[4];
 };
 
 // Syscall entry tracking key.
@@ -175,14 +222,8 @@ struct syscall_key {
 // Syscall entry value.
 struct syscall_val {
     __u64 ts;
-    __s32 fd;
-    __u32 pad;
-};
-
-// Openat filename capture.
-struct openat_val {
-    __u64 ts;
-    char  filename[64];
+    __u8  client_type;
+    __u8  pad[7];
 };
 
 // Block I/O request tracking.
@@ -202,34 +243,26 @@ struct req_val {
     __u8  pad[3];
 };
 
-// Network recv tracking (24 bytes, 8-byte aligned).
+// Network socket metadata tracking (8 bytes).
+// kretprobe handlers run on the same task, so pid/tid and timestamps can be
+// recovered at return time instead of being copied through the map value.
 struct net_recv_val {
-    __u64 ts;
     __u16 sport;
     __u16 dport;
-    __u32 pid;
     __u8  client_type;
     __u8  transport;
-    __u8  pad[6];
+    __u8  pad[2];
 };
 
-// Network send tracking (32 bytes, 8-byte aligned).
+// TCP send tracking (16 bytes).
 struct net_send_val {
-    __u64 ts;
     __u16 sport;
     __u16 dport;
-    __u32 pid;
     __u8  client_type;
     __u8  transport;
     __u8  pad[2];
     __u32 srtt_us;
     __u32 snd_cwnd;
-};
-
-// Page fault tracking.
-struct fault_val {
-    __u64 ts;
-    __u64 address;
 };
 
 // Tracepoint context structs (non-CO-RE). Defined here (outside vmlinux.h)

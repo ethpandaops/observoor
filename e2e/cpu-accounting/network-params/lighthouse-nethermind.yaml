@@ -1,8 +1,0 @@
-participants:
-  - el_type: nethermind
-    cl_type: lighthouse
-
-network_params:
-  seconds_per_slot: 12
-
-additional_services: []
