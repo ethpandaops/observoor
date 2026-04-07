@@ -283,10 +283,10 @@ impl Tracer for BpfTracer {
         clear_hash_map::<u32, BpfTrackedTidVal>(ebpf, "tracked_tids")?;
         clear_hash_map::<u32, u64>(ebpf, "wakeup_ts")?;
 
-        // NOTE: sched_on_ts and offcpu_ts are LRU maps that record timestamps
-        // unconditionally for all threads. Clearing them on TID refresh would
-        // lose timestamps for currently-running threads, creating on_cpu_ns=0
-        // holes. LRU eviction handles staleness automatically.
+        // NOTE: sched_on_ts and offcpu_ts are LRU maps populated by live
+        // scheduler events. Clearing them on TID refresh would lose
+        // timestamps for currently-running tracked threads, creating
+        // on_cpu_ns=0 holes. LRU eviction handles staleness automatically.
 
         const TRACKED_TIDS_CAPACITY: usize = 65536;
         if tids.len() > TRACKED_TIDS_CAPACITY {

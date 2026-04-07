@@ -1049,16 +1049,17 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     __u8 ct = 0;
     __u32 cpu_id = bpf_get_smp_processor_id();
 
-    // Path A: Record sched-ON timestamp for incoming thread unconditionally.
-    // We cannot filter by TGID here because ctx->next_pid is a TID and
-    // bpf_get_current_pid_tgid() returns the *outgoing* task's TGID.
-    // The LRU map auto-evicts stale entries from irrelevant threads.
     __u32 next_tid = ctx->next_pid;
     __u64 runqueue_ns = 0;
     __u64 offcpu_ns = 0;
-    bpf_map_update_elem(&sched_on_ts, &next_tid, &now, BPF_ANY);
-
     struct tracked_tid_val *next_info = lookup_tracked_tid(next_tid);
+
+    // Only tracked incoming threads need sched-on timestamps for later
+    // on-CPU accounting. Skipping the global write for unrelated tasks avoids
+    // a hot LRU hash update on every system-wide context switch.
+    if (next_info)
+        bpf_map_update_elem(&sched_on_ts, &next_tid, &now, BPF_ANY);
+
     if (next_info) {
         __u64 *wake_ts = bpf_map_lookup_elem(&wakeup_ts, &next_tid);
         if (wake_ts && now > *wake_ts)
