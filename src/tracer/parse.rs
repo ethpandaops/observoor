@@ -198,23 +198,76 @@ pub enum ParseError {
 }
 
 #[cfg_attr(not(feature = "bpf"), allow(dead_code))]
-struct ParsedEventParts {
-    raw: Event,
-    typed: TypedEvent,
-    event_type_raw: u8,
-    client_type_raw: u8,
-    secondary_event_type_raw: u8,
-    secondary_client_type_raw: u8,
+trait ParsedEventSink {
+    type Output;
+
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        event_type_raw: u8,
+        client_type_raw: u8,
+        secondary_event_type_raw: u8,
+        secondary_client_type_raw: u8,
+    ) -> Self::Output;
+}
+
+struct ParsedEventOnlySink;
+
+impl ParsedEventSink for ParsedEventOnlySink {
+    type Output = ParsedEvent;
+
+    #[inline(always)]
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        _event_type_raw: u8,
+        _client_type_raw: u8,
+        _secondary_event_type_raw: u8,
+        _secondary_client_type_raw: u8,
+    ) -> Self::Output {
+        ParsedEvent { raw, typed }
+    }
+}
+
+struct ParsedEventBatchSink<'a> {
+    batch: &'a mut ParsedEventBatch,
+}
+
+impl ParsedEventSink for ParsedEventBatchSink<'_> {
+    type Output = ();
+
+    #[inline(always)]
+    fn emit(
+        &mut self,
+        raw: Event,
+        typed: TypedEvent,
+        event_type_raw: u8,
+        client_type_raw: u8,
+        secondary_event_type_raw: u8,
+        secondary_client_type_raw: u8,
+    ) -> Self::Output {
+        // Safety: the ring-buffer read loop dispatches or swaps batches before
+        // they reach capacity, so pooled tracer batches always have spare room
+        // here.
+        unsafe {
+            self.batch.push_counted_unchecked(
+                ParsedEvent { raw, typed },
+                event_type_raw,
+                client_type_raw,
+                secondary_event_type_raw,
+                secondary_client_type_raw,
+            );
+        }
+    }
 }
 
 /// Parse a raw ring buffer sample into a [`ParsedEvent`].
 #[inline(always)]
 pub fn parse_event(data: &[u8]) -> Result<ParsedEvent, ParseError> {
-    let parts = parse_event_parts(data)?;
-    Ok(ParsedEvent {
-        raw: parts.raw,
-        typed: parts.typed,
-    })
+    let mut sink = ParsedEventOnlySink;
+    parse_event_with_sink(data, &mut sink)
 }
 
 /// Parse a raw ring buffer sample and append it directly into a batch.
@@ -224,40 +277,29 @@ pub(crate) fn parse_event_into_batch(
     data: &[u8],
     batch: &mut ParsedEventBatch,
 ) -> Result<(), ParseError> {
-    let parts = parse_event_parts(data)?;
-    // Safety: the ring-buffer read loop dispatches or swaps batches before they
-    // reach capacity, so pooled tracer batches always have spare room here.
-    unsafe {
-        batch.push_counted_unchecked(
-            ParsedEvent {
-                raw: parts.raw,
-                typed: parts.typed,
-            },
-            parts.event_type_raw,
-            parts.client_type_raw,
-            parts.secondary_event_type_raw,
-            parts.secondary_client_type_raw,
-        );
-    }
-    Ok(())
+    let mut sink = ParsedEventBatchSink { batch };
+    parse_event_with_sink(data, &mut sink)
 }
 
 #[inline(always)]
-fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_event_with_sink<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     if data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE {
-        return parse_compact_basic_marker_event(data);
+        return parse_compact_basic_marker_event(data, sink);
     }
     if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
-        return parse_compact_syscall_event(data);
+        return parse_compact_syscall_event(data, sink);
     }
     if data.len() == COMPACT_NET_IO_EVENT_SIZE {
-        return parse_compact_net_io_event(data);
+        return parse_compact_net_io_event(data, sink);
     }
     if data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE {
-        return parse_compact_net_io_metrics_event(data);
+        return parse_compact_net_io_metrics_event(data, sink);
     }
     if data.len() == COMPACT_DISK_IO_EVENT_SIZE {
-        return parse_compact_disk_io_event(data);
+        return parse_compact_disk_io_event(data, sink);
     }
 
     if data.len() < HEADER_SIZE {
@@ -469,18 +511,21 @@ fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
     } else {
         Event::new_validated(timestamp_ns, pid, tid, event_type, client_type_raw)
     };
-    Ok(ParsedEventParts {
-        raw: event,
+    Ok(sink.emit(
+        event,
         typed,
         event_type_raw,
         client_type_raw,
         secondary_event_type_raw,
         secondary_client_type_raw,
-    })
+    ))
 }
 
 #[inline(always)]
-fn parse_compact_basic_marker_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_compact_basic_marker_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     debug_assert_eq!(data.len(), COMPACT_BASIC_MARKER_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactBasicMarkerEvent>(data) };
@@ -504,18 +549,21 @@ fn parse_compact_basic_marker_event(data: &[u8]) -> Result<ParsedEventParts, Par
         }
     };
 
-    Ok(ParsedEventParts {
-        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
         typed,
-        event_type_raw: raw.event_type,
+        raw.event_type,
         client_type_raw,
-        secondary_event_type_raw: 0,
-        secondary_client_type_raw: 0,
-    })
+        0,
+        0,
+    ))
 }
 
 #[inline(always)]
-fn parse_compact_syscall_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_compact_syscall_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     debug_assert_eq!(data.len(), COMPACT_SYSCALL_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_SYSCALL_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactSyscallEvent>(data) };
@@ -564,18 +612,21 @@ fn parse_compact_syscall_event(data: &[u8]) -> Result<ParsedEventParts, ParseErr
         }
     };
 
-    Ok(ParsedEventParts {
-        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
         typed,
-        event_type_raw: raw.event_type,
+        raw.event_type,
         client_type_raw,
-        secondary_event_type_raw: 0,
-        secondary_client_type_raw: 0,
-    })
+        0,
+        0,
+    ))
 }
 
 #[inline(always)]
-fn parse_compact_net_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_compact_net_io_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     debug_assert_eq!(data.len(), COMPACT_NET_IO_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactNetIOEvent>(data) };
@@ -617,18 +668,21 @@ fn parse_compact_net_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseErro
         }
     };
 
-    Ok(ParsedEventParts {
-        raw: Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
+    Ok(sink.emit(
+        Event::new_validated(0, u32::from_le(raw.pid), 0, event_type, client_type_raw),
         typed,
-        event_type_raw: raw.event_type,
+        raw.event_type,
         client_type_raw,
-        secondary_event_type_raw: 0,
-        secondary_client_type_raw: 0,
-    })
+        0,
+        0,
+    ))
 }
 
 #[inline(always)]
-fn parse_compact_net_io_metrics_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_compact_net_io_metrics_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     debug_assert_eq!(data.len(), COMPACT_NET_IO_METRICS_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactNetIOMetricsEvent>(data) };
@@ -642,30 +696,33 @@ fn parse_compact_net_io_metrics_event(data: &[u8]) -> Result<ParsedEventParts, P
         return Err(ParseError::Truncated { size: data.len() });
     }
 
-    Ok(ParsedEventParts {
-        raw: Event::new_validated(
+    Ok(sink.emit(
+        Event::new_validated(
             0,
             u32::from_le(raw.pid),
             0,
             EventType::NetTX,
             client_type_raw,
         ),
-        typed: TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+        TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
             bytes: u32::from_le(raw.bytes),
             local_port: u16::from_le(raw.src_port),
             remote_port: u16::from_le(raw.dst_port),
             srtt_us: u32::from_le(raw.srtt_us),
             cwnd: u32::from_le(raw.cwnd),
         }),
-        event_type_raw: raw.event_type,
+        raw.event_type,
         client_type_raw,
-        secondary_event_type_raw: 0,
-        secondary_client_type_raw: 0,
-    })
+        0,
+        0,
+    ))
 }
 
 #[inline(always)]
-fn parse_compact_disk_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+fn parse_compact_disk_io_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
     debug_assert_eq!(data.len(), COMPACT_DISK_IO_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_DISK_IO_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactDiskIOEvent>(data) };
@@ -679,26 +736,26 @@ fn parse_compact_disk_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseErr
         return Err(ParseError::Truncated { size: data.len() });
     }
 
-    Ok(ParsedEventParts {
-        raw: Event::new_validated(
+    Ok(sink.emit(
+        Event::new_validated(
             0,
             u32::from_le(raw.pid),
             0,
             EventType::DiskIO,
             client_type_raw,
         ),
-        typed: TypedEvent::DiskIO(DiskIOEvent {
+        TypedEvent::DiskIO(DiskIOEvent {
             latency_ns: u64::from_le(raw.latency_ns),
             bytes: u32::from_le(raw.bytes),
             rw: raw.rw,
             queue_depth: u32::from_le(raw.queue_depth),
             device_id: u32::from_le(raw.device_id),
         }),
-        event_type_raw: raw.event_type,
+        raw.event_type,
         client_type_raw,
-        secondary_event_type_raw: 0,
-        secondary_client_type_raw: 0,
-    })
+        0,
+        0,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -989,6 +1046,60 @@ mod tests {
         buf.push(EventType::NetTX as u8);
         buf.push(client_type);
         buf
+    }
+
+    #[test]
+    fn test_parse_event_into_batch_compact_syscall_records_counts() {
+        let data = compact_syscall(1337, EventType::SyscallFutex as u8, 1, 2_500);
+        let mut batch = ParsedEventBatch::with_capacity(4);
+
+        parse_event_into_batch(&data, &mut batch).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.event_totals()[EventType::SyscallFutex as usize], 1);
+        assert_eq!(batch.client_totals()[1], 1);
+
+        let parsed = &batch.events[0];
+        assert_eq!(parsed.raw.pid(), 1337);
+        let TypedEvent::SyscallFutex(event) = &parsed.typed else {
+            panic!("expected SyscallFutex");
+        };
+        assert_eq!(event.latency_ns, 2_500);
+    }
+
+    #[test]
+    fn test_parse_event_into_batch_sched_combined_records_secondary_counts() {
+        let mut data = header(6_500_000, 105, 205, 9, 6);
+        data.extend_from_slice(&200_000u64.to_le_bytes());
+        data.extend_from_slice(&50_000u64.to_le_bytes());
+        data.extend_from_slice(&70_000u64.to_le_bytes());
+        data.extend_from_slice(&303u32.to_le_bytes());
+        data.extend_from_slice(&404u32.to_le_bytes());
+        data[HEADER_PAD_OFFSET] = 1;
+        set_header_pad_u32(&mut data, 1, 15);
+        data[HEADER_PAD_OFFSET + 5] = 2;
+
+        let mut batch = ParsedEventBatch::with_capacity(4);
+        parse_event_into_batch(&data, &mut batch).unwrap();
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.event_totals()[EventType::SchedSwitch as usize], 1);
+        assert_eq!(batch.event_totals()[EventType::SchedRunqueue as usize], 1);
+        assert_eq!(batch.client_totals()[6], 1);
+        assert_eq!(batch.client_totals()[2], 1);
+
+        let parsed = &batch.events[0];
+        assert_eq!(parsed.raw.scheduler_cpu_id(), 15);
+        assert_eq!(
+            parsed.raw.secondary_event_type_raw(),
+            EventType::SchedRunqueue as u8
+        );
+        assert_eq!(parsed.raw.secondary_client_type_raw(), 2);
+        let TypedEvent::SchedCombined(event) = &parsed.typed else {
+            panic!("expected SchedCombined");
+        };
+        assert_eq!(event.next_pid, 303);
+        assert_eq!(event.next_tid, 404);
     }
 
     fn compact_disk_io(
