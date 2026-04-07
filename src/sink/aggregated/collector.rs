@@ -8,7 +8,9 @@ use crate::config::{EventSamplingMode, SamplingConfig};
 use crate::tracer::event::{ClientType, Direction, EventType, MAX_EVENT_TYPE};
 
 use super::aggregate::{CounterAggregate, CounterSnapshot, LatencyAggregate, LatencySnapshot};
-use super::buffer::{fast_map_with_capacity, get_or_default_mut, Buffer, FastMap};
+use super::buffer::{
+    fast_map_with_capacity, get_or_default_mut, Buffer, FastMap, HotBasicLatencyMap,
+};
 use super::dimension::{
     direction_string, port_label_string, rw_string, BasicDimension, DiskDeviceDimension,
     TCPMetricsDimension,
@@ -361,11 +363,11 @@ impl Collector {
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
-        map_len(&buf.syscall_read)
-            + map_len(&buf.syscall_write)
-            + map_len(&buf.syscall_futex)
-            + map_len(&buf.syscall_mmap)
-            + map_len(&buf.syscall_fsync)
+        buf.syscall_read.len()
+            + buf.syscall_write.len()
+            + buf.syscall_futex.len()
+            + buf.syscall_mmap.len()
+            + buf.syscall_fsync.len()
             + buf.cpu_on_core.len()
             + (map_len(&buf.sched_wait) * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
@@ -677,7 +679,7 @@ impl Collector {
     fn collect_basic_latency_map(
         &self,
         batch: &mut MetricBatch,
-        map: &FastMap<BasicDimension, LatencyAggregate>,
+        map: &HotBasicLatencyMap,
         window: WindowInfo,
         slot: SlotInfo,
         metric_name: &'static str,

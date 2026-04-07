@@ -238,6 +238,78 @@ pub(crate) fn fast_map_with_capacity<K, V>(capacity: usize) -> FastMap<K, V> {
     FastMap::with_capacity(capacity)
 }
 
+/// Keeps the hottest `BasicDimension -> LatencyAggregate` entry inline.
+///
+/// Stress-bench spends most of its syscall latency traffic on a single
+/// process/client key. Keeping that first key out of the hash map removes the
+/// remaining lookup/probe overhead on that path while preserving exact
+/// aggregation for additional dimensions via the existing spill map.
+pub struct HotBasicLatencyMap {
+    inline: Option<(BasicDimension, LatencyAggregate)>,
+    spill: FastMap<BasicDimension, LatencyAggregate>,
+}
+
+impl HotBasicLatencyMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&LatencyAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &LatencyAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record(&mut self, key: BasicDimension, latency_ns: u64) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record(latency_ns);
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record(latency_ns);
+            return;
+        }
+
+        let mut aggregate = LatencyAggregate::new();
+        aggregate.record(latency_ns);
+        self.inline = Some((key, aggregate));
+    }
+}
+
 #[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
@@ -443,11 +515,11 @@ pub struct Buffer {
     // --- Hot BasicDimension metrics ---
     // Each syscall family gets its own small aggregate so the hot path updates
     // one compact value instead of bouncing around a larger multi-syscall blob.
-    pub syscall_read: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_write: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_futex: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_mmap: FastMap<BasicDimension, LatencyAggregate>,
-    pub syscall_fsync: FastMap<BasicDimension, LatencyAggregate>,
+    pub syscall_read: HotBasicLatencyMap,
+    pub syscall_write: HotBasicLatencyMap,
+    pub syscall_futex: HotBasicLatencyMap,
+    pub syscall_mmap: HotBasicLatencyMap,
+    pub syscall_fsync: HotBasicLatencyMap,
 
     // --- BasicDimension counters ---
     // `fd_open`/`fd_close` dominate this counter path in stress-bench, so keep
@@ -501,11 +573,11 @@ impl Buffer {
             el_offline,
             system_cores,
             // Hot BasicDimension metrics.
-            syscall_read: fast_map_with_capacity(16),
-            syscall_write: fast_map_with_capacity(16),
-            syscall_futex: fast_map_with_capacity(16),
-            syscall_mmap: fast_map_with_capacity(16),
-            syscall_fsync: fast_map_with_capacity(16),
+            syscall_read: HotBasicLatencyMap::with_capacity(8),
+            syscall_write: HotBasicLatencyMap::with_capacity(8),
+            syscall_futex: HotBasicLatencyMap::with_capacity(8),
+            syscall_mmap: HotBasicLatencyMap::with_capacity(8),
+            syscall_fsync: HotBasicLatencyMap::with_capacity(8),
             // BasicDimension counters.
             fd_metrics: fast_map_with_capacity(16),
             page_fault_metrics: fast_map_with_capacity(16),
@@ -581,22 +653,22 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_read(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscall_read, dim).record(latency_ns);
+        self.syscall_read.record(dim, latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_write(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscall_write, dim).record(latency_ns);
+        self.syscall_write.record(dim, latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_futex(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscall_futex, dim).record(latency_ns);
+        self.syscall_futex.record(dim, latency_ns);
     }
 
     #[inline(always)]
     pub fn add_syscall_mmap(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscall_mmap, dim).record(latency_ns);
+        self.syscall_mmap.record(dim, latency_ns);
     }
 
     #[inline(always)]
@@ -606,7 +678,7 @@ impl Buffer {
 
     #[inline(always)]
     pub fn add_syscall_fsync(&mut self, dim: BasicDimension, latency_ns: u64) {
-        get_or_default_mut(&mut self.syscall_fsync, dim).record(latency_ns);
+        self.syscall_fsync.record(dim, latency_ns);
     }
 
     #[inline(always)]
@@ -866,6 +938,27 @@ mod tests {
         let snap = buf.syscall_read.get(&dim).expect("entry exists").snapshot();
         assert_eq!(snap.count, 2);
         assert_eq!(snap.sum, 15_000);
+    }
+
+    #[test]
+    fn test_hot_basic_latency_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicLatencyMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record(key1, 5_000);
+        map.record(key1, 7_000);
+        map.record(key2, 11_000);
+
+        assert_eq!(map.len(), 2);
+        assert_eq!(
+            map.get(&key1).expect("inline entry exists").snapshot().sum,
+            12_000
+        );
+        assert_eq!(
+            map.get(&key2).expect("spill entry exists").snapshot().sum,
+            11_000
+        );
     }
 
     #[test]
