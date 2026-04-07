@@ -48,7 +48,10 @@ const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
 /// Drain a full bounded queue per wake to amortize `mpsc`/`select!` overhead
 /// under sustained tracer load without letting the event loop run unbounded.
 const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
-const PORT_LABEL_CACHE_SIZE: usize = 16;
+// Network-heavy workloads often reuse a small set of socket tuples for long
+// stretches. A slightly larger direct-mapped cache cuts collision misses on
+// that hot path without changing aggregation semantics.
+const PORT_LABEL_CACHE_SIZE: usize = 64;
 const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
 const SCHED_TID_CACHE_SIZE: usize = 32;
 const SCHED_TID_CACHE_WAYS: usize = 2;
