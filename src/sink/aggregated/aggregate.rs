@@ -25,13 +25,21 @@ impl LatencyAggregate {
     /// Records a latency value in nanoseconds.
     #[inline(always)]
     pub fn record(&mut self, value_ns: u64) {
+        if self.count == 0 {
+            self.sum = value_ns;
+            self.count = 1;
+            self.min = value_ns;
+            self.max = value_ns;
+            self.histogram.record(value_ns);
+            return;
+        }
+
         self.sum += value_ns;
         self.count += 1;
         self.histogram.record(value_ns);
         if value_ns < self.min {
             self.min = value_ns;
-        }
-        if value_ns > self.max {
+        } else if value_ns > self.max {
             self.max = value_ns;
         }
     }
@@ -452,12 +460,19 @@ impl GaugeAggregate {
     /// Records a gauge value.
     #[inline(always)]
     pub fn record(&mut self, value: i64) {
+        if self.count == 0 {
+            self.sum = value;
+            self.count = 1;
+            self.min = value;
+            self.max = value;
+            return;
+        }
+
         self.sum += value;
         self.count += 1;
         if value < self.min {
             self.min = value;
-        }
-        if value > self.max {
+        } else if value > self.max {
             self.max = value;
         }
     }
