@@ -353,6 +353,7 @@ impl Collector {
         }
 
         self.collect_basic_latency(batch, buf, window, slot);
+        self.collect_basic_cold_metrics(batch, buf, window, slot);
         self.collect_disk_metrics(batch, buf, window, slot);
         self.collect_basic_counters(batch, buf, window, slot);
         self.collect_network_counters(batch, buf, window, slot);
@@ -439,7 +440,7 @@ impl Collector {
         }
     }
 
-    /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
+    /// Collects hot basic-dimension latency metrics (syscalls and scheduler).
     fn collect_basic_latency(
         &self,
         batch: &mut MetricBatch,
@@ -535,15 +536,34 @@ impl Collector {
                 });
             }
         }
+    }
 
+    /// Collects all `basic_cold_metrics` rows in one pass.
+    ///
+    /// These cold metrics share a single aggregate map, so walking it once per
+    /// flush avoids duplicate probing and key decoding work on the same entry.
+    fn collect_basic_cold_metrics(
+        &self,
+        batch: &mut MetricBatch,
+        buf: &Buffer,
+        window: WindowInfo,
+        slot: SlotInfo,
+    ) {
         let epoll_wait_sampling = self.sampling_for_event(EventType::SyscallEpollWait);
         let fdatasync_sampling = self.sampling_for_event(EventType::SyscallFdatasync);
         let pwrite_sampling = self.sampling_for_event(EventType::SyscallPwrite);
         let mem_reclaim_sampling = self.sampling_for_event(EventType::MemReclaim);
         let mem_compaction_sampling = self.sampling_for_event(EventType::MemCompaction);
+        let swap_in_sampling = self.sampling_for_event(EventType::SwapIn);
+        let swap_out_sampling = self.sampling_for_event(EventType::SwapOut);
+        let oom_sampling = self.sampling_for_event(EventType::OOMKill);
+        let process_exit_sampling = self.sampling_for_event(EventType::ProcessExit);
+        let tcp_state_sampling = self.sampling_for_event(EventType::TcpState);
+
         for (dim, aggregate) in buf.basic_cold_metrics.iter() {
             let pid = dim.pid();
             let client_type = client_type_from_u8(dim.client_type());
+
             self.push_latency_metric(
                 batch,
                 window,
@@ -603,6 +623,52 @@ impl Collector {
                 "mem_compaction",
                 mem_compaction_sampling,
                 aggregate.mem_compaction_snapshot(),
+            );
+
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "swap_in",
+                swap_in_sampling,
+                aggregate.swap_in_snapshot(),
+            );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "swap_out",
+                swap_out_sampling,
+                aggregate.swap_out_snapshot(),
+            );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "oom_kill",
+                oom_sampling,
+                aggregate.oom_kill_snapshot(),
+            );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "process_exit",
+                process_exit_sampling,
+                aggregate.process_exit_snapshot(),
+            );
+            self.push_basic_counter_metric(
+                batch,
+                window,
+                slot,
+                *dim,
+                "tcp_state_change",
+                tcp_state_sampling,
+                aggregate.tcp_state_change_snapshot(),
             );
         }
     }
@@ -823,59 +889,6 @@ impl Collector {
                 "fd_close",
                 close_sampling,
                 aggregate.close_snapshot(),
-            );
-        }
-
-        let swap_in_sampling = self.sampling_for_event(EventType::SwapIn);
-        let swap_out_sampling = self.sampling_for_event(EventType::SwapOut);
-        let oom_sampling = self.sampling_for_event(EventType::OOMKill);
-        let process_exit_sampling = self.sampling_for_event(EventType::ProcessExit);
-        let tcp_state_sampling = self.sampling_for_event(EventType::TcpState);
-        for (dim, aggregate) in buf.basic_cold_metrics.iter() {
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "swap_in",
-                swap_in_sampling,
-                aggregate.swap_in_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "swap_out",
-                swap_out_sampling,
-                aggregate.swap_out_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "oom_kill",
-                oom_sampling,
-                aggregate.oom_kill_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "process_exit",
-                process_exit_sampling,
-                aggregate.process_exit_snapshot(),
-            );
-            self.push_basic_counter_metric(
-                batch,
-                window,
-                slot,
-                *dim,
-                "tcp_state_change",
-                tcp_state_sampling,
-                aggregate.tcp_state_change_snapshot(),
             );
         }
     }
