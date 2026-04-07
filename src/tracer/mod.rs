@@ -128,6 +128,34 @@ impl ParsedEventBatch {
         self.events.push(event);
     }
 
+    /// Appends into a preallocated batch without re-checking Vec capacity.
+    ///
+    /// Safety: the caller must guarantee `self.events.len() < self.events.capacity()`.
+    #[inline(always)]
+    pub(crate) unsafe fn push_counted_unchecked(
+        &mut self,
+        event: ParsedEvent,
+        event_type: u8,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+    ) {
+        debug_assert!(self.events.len() < self.events.capacity());
+        self.record_event_counts(
+            event_type,
+            client_type,
+            secondary_event_type,
+            secondary_client_type,
+        );
+
+        let len = self.events.len();
+        // Safety: the caller guarantees spare capacity and `len` indexes the
+        // next uninitialized slot in the Vec allocation.
+        unsafe { std::ptr::write(self.events.as_mut_ptr().add(len), event) };
+        // Safety: the element at `len` was initialized by the write above.
+        unsafe { self.events.set_len(len + 1) };
+    }
+
     #[inline(always)]
     fn record_event_counts(
         &mut self,
@@ -269,6 +297,24 @@ mod tests {
         assert_eq!(recycled.events.capacity(), initial_capacity);
         assert!(recycled.event_totals().iter().all(|count| *count == 0));
         assert!(recycled.client_totals().iter().all(|count| *count == 0));
+    }
+
+    #[test]
+    fn parsed_event_batch_push_counted_unchecked_records_counts() {
+        let mut batch = ParsedEventBatch::with_capacity(1);
+        let event = ParsedEvent {
+            raw: Event::new(1, 100, 100, EventType::FDOpen, 1),
+            typed: TypedEvent::FDOpen,
+        };
+
+        // Safety: the batch was created with capacity for one event and is empty.
+        unsafe {
+            batch.push_counted_unchecked(event, EventType::FDOpen as u8, 1, 0, 0);
+        }
+
+        assert_eq!(batch.len(), 1);
+        assert_eq!(batch.event_totals()[EventType::FDOpen as usize], 1);
+        assert_eq!(batch.client_totals()[1], 1);
     }
 
     #[test]

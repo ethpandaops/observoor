@@ -211,16 +211,20 @@ pub(crate) fn parse_event_into_batch(
     batch: &mut ParsedEventBatch,
 ) -> Result<(), ParseError> {
     let parts = parse_event_parts(data)?;
-    batch.push_counted(
-        ParsedEvent {
-            raw: parts.raw,
-            typed: parts.typed,
-        },
-        parts.event_type_raw,
-        parts.client_type_raw,
-        parts.secondary_event_type_raw,
-        parts.secondary_client_type_raw,
-    );
+    // Safety: the ring-buffer read loop dispatches or swaps batches before they
+    // reach capacity, so pooled tracer batches always have spare room here.
+    unsafe {
+        batch.push_counted_unchecked(
+            ParsedEvent {
+                raw: parts.raw,
+                typed: parts.typed,
+            },
+            parts.event_type_raw,
+            parts.client_type_raw,
+            parts.secondary_event_type_raw,
+            parts.secondary_client_type_raw,
+        );
+    }
     Ok(())
 }
 
