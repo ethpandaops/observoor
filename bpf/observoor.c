@@ -19,6 +19,8 @@ char LICENSE[] SEC("license") = "GPL";
  * clang emits named BTF entries that bpf2go can reference with -type.
  */
 const struct syscall_event    *__unused_syscall_ev    __attribute__((unused));
+const struct compact_net_io_event *__unused_compact_net_io_ev __attribute__((unused));
+const struct compact_disk_io_event *__unused_compact_disk_io_ev __attribute__((unused));
 const struct disk_io_event    *__unused_disk_io_ev    __attribute__((unused));
 const struct net_io_event     *__unused_net_io_ev     __attribute__((unused));
 const struct net_io_metrics_event *__unused_net_io_metrics_ev __attribute__((unused));
@@ -73,6 +75,64 @@ static __always_inline void emit_syscall_event(__u8 event_type,
     e->event_type = event_type;
     e->client_type = client_type;
     __builtin_memset(e->pad, 0, sizeof(e->pad));
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline void emit_compact_net_io_event(__u8 event_type,
+                                                      __u8 client_type,
+                                                      __u8 transport,
+                                                      __u32 bytes,
+                                                      __u16 sport,
+                                                      __u16 dport)
+{
+    // Only the 23-byte populated prefix goes over the ring buffer; the C
+    // struct keeps its natural alignment and tail padding stays local.
+    const __u64 compact_net_io_event_size =
+        sizeof(__u64) + (2 * sizeof(__u32)) + (2 * sizeof(__u16)) + (3 * sizeof(__u8));
+    struct compact_net_io_event *e =
+        bpf_ringbuf_reserve(&events, compact_net_io_event_size, 0);
+    if (!e)
+        return;
+
+    e->timestamp_ns = bpf_ktime_get_ns();
+    e->pid = bpf_get_current_pid_tgid() >> 32;
+    e->bytes = bytes;
+    e->sport = sport;
+    e->dport = dport;
+    e->event_type = event_type;
+    e->client_type = client_type;
+    e->transport = transport;
+
+    bpf_ringbuf_submit(e, 0);
+}
+
+static __always_inline void emit_compact_disk_io_event(__u32 pid,
+                                                       __u8 client_type,
+                                                       __u8 rw,
+                                                       __u64 latency_ns,
+                                                       __u32 bytes,
+                                                       __u32 queue_depth,
+                                                       __u32 dev)
+{
+    // Only the 35-byte populated prefix goes over the ring buffer; the C
+    // struct keeps its natural alignment and tail padding stays local.
+    const __u64 compact_disk_io_event_size =
+        (2 * sizeof(__u64)) + (4 * sizeof(__u32)) + (3 * sizeof(__u8));
+    struct compact_disk_io_event *e =
+        bpf_ringbuf_reserve(&events, compact_disk_io_event_size, 0);
+    if (!e)
+        return;
+
+    e->timestamp_ns = bpf_ktime_get_ns();
+    e->latency_ns = latency_ns;
+    e->pid = pid;
+    e->bytes = bytes;
+    e->queue_depth = queue_depth;
+    e->dev = dev;
+    e->rw = rw;
+    e->event_type = EVENT_DISK_IO;
+    e->client_type = client_type;
 
     bpf_ringbuf_submit(e, 0);
 }
@@ -556,25 +616,14 @@ int trace_block_rq_complete(struct trace_event_raw_block_rq_local *ctx)
     if (!should_emit_event(EVENT_DISK_IO))
         goto cleanup;
 
-    // Only the 44-byte populated prefix goes over the ring buffer; reserving
-    // the full 48-byte C struct would pay for tail padding on every event.
-    const __u64 disk_io_event_size =
-        sizeof(struct event_header) + sizeof(__u64) + (3 * sizeof(__u32));
-    struct disk_io_event *e =
-        bpf_ringbuf_reserve(&events, disk_io_event_size, 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_DISK_IO, val->client_type);
-    e->hdr.pid = val->pid;
-    e->hdr.tid = val->tid;
-    e->hdr.pad[0] = rw;
-    e->latency_ns = bpf_ktime_get_ns() - val->ts;
-    e->bytes = bytes;
-    e->queue_depth = depth;
-    e->dev = dev;
-
-    bpf_ringbuf_submit(e, 0);
+    emit_compact_disk_io_event(
+        val->pid,
+        val->client_type,
+        rw,
+        bpf_ktime_get_ns() - val->ts,
+        bytes,
+        depth,
+        dev);
 
 cleanup:
     bpf_map_delete_elem(&req_start, keyp);
@@ -755,17 +804,13 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     if (!should_emit_event(EVENT_NET_RX))
         goto cleanup;
 
-    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
-    e->hdr.pad[0] = val->transport;
-    e->bytes = (__u32)ret;
-    e->sport = val->sport;
-    e->dport = val->dport;
-
-    bpf_ringbuf_submit(e, 0);
+    emit_compact_net_io_event(
+        EVENT_NET_RX,
+        val->client_type,
+        val->transport,
+        (__u32)ret,
+        val->sport,
+        val->dport);
 
 cleanup:
     bpf_map_delete_elem(&net_recv_start, &key);
@@ -812,17 +857,13 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
     if (!should_emit_event(EVENT_NET_TX))
         goto cleanup;
 
-    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_NET_TX, val->client_type);
-    e->hdr.pad[0] = val->transport;
-    e->bytes = (__u32)ret;
-    e->sport = val->sport;
-    e->dport = val->dport;
-
-    bpf_ringbuf_submit(e, 0);
+    emit_compact_net_io_event(
+        EVENT_NET_TX,
+        val->client_type,
+        val->transport,
+        (__u32)ret,
+        val->sport,
+        val->dport);
 
 cleanup:
     bpf_map_delete_elem(&net_send_udp_start, &key);
@@ -866,17 +907,13 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
     if (!should_emit_event(EVENT_NET_RX))
         goto cleanup;
 
-    struct net_io_event *e = bpf_ringbuf_reserve(&events, sizeof(*e), 0);
-    if (!e)
-        goto cleanup;
-
-    fill_header(&e->hdr, EVENT_NET_RX, val->client_type);
-    e->hdr.pad[0] = val->transport;
-    e->bytes = (__u32)ret;
-    e->sport = val->sport;
-    e->dport = val->dport;
-
-    bpf_ringbuf_submit(e, 0);
+    emit_compact_net_io_event(
+        EVENT_NET_RX,
+        val->client_type,
+        val->transport,
+        (__u32)ret,
+        val->sport,
+        val->dport);
 
 cleanup:
     bpf_map_delete_elem(&net_recv_udp_start, &key);

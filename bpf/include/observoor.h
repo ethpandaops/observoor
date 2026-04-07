@@ -58,6 +58,35 @@ struct syscall_event {
     __u8  pad[2];
 };
 
+// Compact generic network I/O event (23-byte populated prefix).
+// Aggregation uses timestamp + pid + client + transport + ports + bytes but
+// never reads tid, so keep the hot UDP/TCP RX paths smaller on the ring buffer.
+struct compact_net_io_event {
+    __u64 timestamp_ns;
+    __u32 pid;
+    __u32 bytes;
+    __u16 sport;
+    __u16 dport;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  transport;
+};
+
+// Compact disk I/O event (35-byte populated prefix).
+// Aggregation uses timestamp + pid + client + latency + device + queue depth
+// but never reads tid, so disk completions can drop it from the hot record.
+struct compact_disk_io_event {
+    __u64 timestamp_ns;
+    __u64 latency_ns;
+    __u32 pid;
+    __u32 bytes;
+    __u32 queue_depth;
+    __u32 dev; // Block device ID (major:minor encoded)
+    __u8  rw;
+    __u8  event_type;
+    __u8  client_type;
+};
+
 // Disk I/O event (44 bytes total).
 // read/write is stored in hdr.pad[0] to avoid payload padding.
 struct disk_io_event {

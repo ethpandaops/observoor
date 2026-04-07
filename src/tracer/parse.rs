@@ -48,6 +48,33 @@ struct RawCompactSyscallEvent {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
+struct RawCompactNetIOEvent {
+    timestamp_ns: u64,
+    pid: u32,
+    bytes: u32,
+    src_port: u16,
+    dst_port: u16,
+    event_type: u8,
+    client_type: u8,
+    transport: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawCompactDiskIOEvent {
+    timestamp_ns: u64,
+    latency_ns: u64,
+    pid: u32,
+    bytes: u32,
+    queue_depth: u32,
+    device_id: u32,
+    rw: u8,
+    event_type: u8,
+    client_type: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 struct RawDiskIOPayload {
     latency_ns: u64,
     bytes: u32,
@@ -129,10 +156,14 @@ struct RawSwapPayload {
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 const COMPACT_FD_EVENT_SIZE: usize = size_of::<RawCompactFdEvent>();
 const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
+const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
+const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_FD_EVENT_SIZE == 8);
 const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 12);
+const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 23);
+const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 35);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -196,13 +227,20 @@ pub(crate) fn parse_event_into_batch(
 
 #[inline(always)]
 fn parse_event_parts(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    if data.len() == COMPACT_FD_EVENT_SIZE {
+        return parse_compact_fd_event(data);
+    }
+    if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
+        return parse_compact_syscall_event(data);
+    }
+    if data.len() == COMPACT_NET_IO_EVENT_SIZE {
+        return parse_compact_net_io_event(data);
+    }
+    if data.len() == COMPACT_DISK_IO_EVENT_SIZE {
+        return parse_compact_disk_io_event(data);
+    }
+
     if data.len() < HEADER_SIZE {
-        if data.len() == COMPACT_FD_EVENT_SIZE {
-            return parse_compact_fd_event(data);
-        }
-        if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
-            return parse_compact_syscall_event(data);
-        }
         return Err(ParseError::Truncated { size: data.len() });
     }
 
@@ -510,6 +548,102 @@ fn parse_compact_syscall_event(data: &[u8]) -> Result<ParsedEventParts, ParseErr
     })
 }
 
+#[inline(always)]
+fn parse_compact_net_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_NET_IO_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_NET_IO_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactNetIOEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    let transport_raw = raw.transport;
+    if transport_raw > NetTransport::Udp as u8 {
+        return Err(invalid_net_transport("net IO event", transport_raw));
+    }
+
+    let bytes = u32::from_le(raw.bytes);
+    let src_port = u16::from_le(raw.src_port);
+    let dst_port = u16::from_le(raw.dst_port);
+    let (event_type, typed) = match raw.event_type {
+        7 => (
+            EventType::NetTX,
+            TypedEvent::NetIOTx(NetIOEvent {
+                bytes,
+                local_port: src_port,
+                remote_port: dst_port,
+                transport: transport_raw,
+            }),
+        ),
+        8 => (
+            EventType::NetRX,
+            TypedEvent::NetIORx(NetIOEvent {
+                bytes,
+                local_port: dst_port,
+                remote_port: src_port,
+                transport: transport_raw,
+            }),
+        ),
+        _ => {
+            return Err(ParseError::Truncated { size: data.len() });
+        }
+    };
+
+    Ok(ParsedEventParts {
+        raw: Event::new_validated(
+            u64::from_le(raw.timestamp_ns),
+            u32::from_le(raw.pid),
+            0,
+            event_type,
+            client_type_raw,
+        ),
+        typed,
+        event_type_raw: raw.event_type,
+        client_type_raw,
+        secondary_event_type_raw: 0,
+        secondary_client_type_raw: 0,
+    })
+}
+
+#[inline(always)]
+fn parse_compact_disk_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_DISK_IO_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_DISK_IO_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactDiskIOEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    if raw.event_type != EventType::DiskIO as u8 {
+        return Err(ParseError::Truncated { size: data.len() });
+    }
+
+    Ok(ParsedEventParts {
+        raw: Event::new_validated(
+            u64::from_le(raw.timestamp_ns),
+            u32::from_le(raw.pid),
+            0,
+            EventType::DiskIO,
+            client_type_raw,
+        ),
+        typed: TypedEvent::DiskIO(DiskIOEvent {
+            latency_ns: u64::from_le(raw.latency_ns),
+            bytes: u32::from_le(raw.bytes),
+            rw: raw.rw,
+            queue_depth: u32::from_le(raw.queue_depth),
+            device_id: u32::from_le(raw.device_id),
+        }),
+        event_type_raw: raw.event_type,
+        client_type_raw,
+        secondary_event_type_raw: 0,
+        secondary_client_type_raw: 0,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Safe fixed-record helpers (no indexing, no panics)
 // ---------------------------------------------------------------------------
@@ -760,6 +894,51 @@ mod tests {
         buf
     }
 
+    fn compact_net_io(
+        ts: u64,
+        pid: u32,
+        event_type: u8,
+        client_type: u8,
+        transport: u8,
+        bytes: u32,
+        src_port: u16,
+        dst_port: u16,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_NET_IO_EVENT_SIZE);
+        buf.extend_from_slice(&ts.to_le_bytes());
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&src_port.to_le_bytes());
+        buf.extend_from_slice(&dst_port.to_le_bytes());
+        buf.push(event_type);
+        buf.push(client_type);
+        buf.push(transport);
+        buf
+    }
+
+    fn compact_disk_io(
+        ts: u64,
+        pid: u32,
+        client_type: u8,
+        latency_ns: u64,
+        bytes: u32,
+        queue_depth: u32,
+        device_id: u32,
+        rw: u8,
+    ) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_DISK_IO_EVENT_SIZE);
+        buf.extend_from_slice(&ts.to_le_bytes());
+        buf.extend_from_slice(&latency_ns.to_le_bytes());
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.extend_from_slice(&queue_depth.to_le_bytes());
+        buf.extend_from_slice(&device_id.to_le_bytes());
+        buf.push(rw);
+        buf.push(EventType::DiskIO as u8);
+        buf.push(client_type);
+        buf
+    }
+
     fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
         assert_eq!(event.pid(), pid);
@@ -840,6 +1019,76 @@ mod tests {
         assert_eq!(parsed.raw.tid, 0);
         assert_eq!(parsed.raw.timestamp_ns, 0);
         assert_eq!(e.latency_ns, 1_234);
+    }
+
+    #[test]
+    fn test_compact_disk_io_event() {
+        let data = compact_disk_io(3_000_000, 102, 3, 1_000_000, 4096, 8, 66304, 1);
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 3_000_000);
+        assert_eq!(parsed.raw.pid(), 102);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::DiskIO(e) = &parsed.typed else {
+            panic!("expected DiskIO");
+        };
+        assert_eq!(e.latency_ns, 1_000_000);
+        assert_eq!(e.bytes, 4096);
+        assert_eq!(e.rw, 1);
+        assert_eq!(e.queue_depth, 8);
+        assert_eq!(e.device_id, 66304);
+    }
+
+    #[test]
+    fn test_compact_net_tx_no_metrics() {
+        let data = compact_net_io(
+            4_500_000,
+            103,
+            EventType::NetTX as u8,
+            1,
+            NetTransport::Udp as u8,
+            1536,
+            30303,
+            9000,
+        );
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 4_500_000);
+        assert_eq!(parsed.raw.pid(), 103);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIOTx(e) = &parsed.typed else {
+            panic!("expected NetIOTx");
+        };
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 1536);
+        assert_eq!(e.local_port, 30303);
+        assert_eq!(e.remote_port, 9000);
+    }
+
+    #[test]
+    fn test_compact_net_rx_no_metrics() {
+        let data = compact_net_io(
+            5_000_000,
+            104,
+            EventType::NetRX as u8,
+            7,
+            NetTransport::Udp as u8,
+            2048,
+            443,
+            12345,
+        );
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 5_000_000);
+        assert_eq!(parsed.raw.pid(), 104);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::NetIORx(e) = &parsed.typed else {
+            panic!("expected NetIORx");
+        };
+        assert_eq!(e.transport, NetTransport::Udp as u8);
+        assert_eq!(e.bytes, 2048);
+        assert_eq!(e.local_port, 12345);
+        assert_eq!(e.remote_port, 443);
     }
 
     #[test]
