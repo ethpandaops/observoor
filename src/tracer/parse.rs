@@ -74,7 +74,6 @@ struct RawCompactNetIOMetricsEvent {
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
 struct RawCompactDiskIOEvent {
-    timestamp_ns: u64,
     latency_ns: u64,
     pid: u32,
     bytes: u32,
@@ -177,7 +176,7 @@ const _: () = assert!(COMPACT_BASIC_MARKER_EVENT_SIZE == 8);
 const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
 const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
 const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
-const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 35);
+const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 27);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -682,7 +681,7 @@ fn parse_compact_disk_io_event(data: &[u8]) -> Result<ParsedEventParts, ParseErr
 
     Ok(ParsedEventParts {
         raw: Event::new_validated(
-            u64::from_le(raw.timestamp_ns),
+            0,
             u32::from_le(raw.pid),
             0,
             EventType::DiskIO,
@@ -993,7 +992,6 @@ mod tests {
     }
 
     fn compact_disk_io(
-        ts: u64,
         pid: u32,
         client_type: u8,
         latency_ns: u64,
@@ -1003,7 +1001,6 @@ mod tests {
         rw: u8,
     ) -> Vec<u8> {
         let mut buf = Vec::with_capacity(COMPACT_DISK_IO_EVENT_SIZE);
-        buf.extend_from_slice(&ts.to_le_bytes());
         buf.extend_from_slice(&latency_ns.to_le_bytes());
         buf.extend_from_slice(&pid.to_le_bytes());
         buf.extend_from_slice(&bytes.to_le_bytes());
@@ -1099,10 +1096,10 @@ mod tests {
 
     #[test]
     fn test_compact_disk_io_event() {
-        let data = compact_disk_io(3_000_000, 102, 3, 1_000_000, 4096, 8, 66304, 1);
+        let data = compact_disk_io(102, 3, 1_000_000, 4096, 8, 66304, 1);
 
         let parsed = parse_event(&data).unwrap();
-        assert_eq!(parsed.raw.timestamp_ns, 3_000_000);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
         assert_eq!(parsed.raw.pid(), 102);
         assert_eq!(parsed.raw.tid, 0);
         let TypedEvent::DiskIO(e) = &parsed.typed else {

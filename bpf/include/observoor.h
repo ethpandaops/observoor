@@ -70,11 +70,10 @@ struct compact_net_io_event {
     __u8  transport;
 } __attribute__((packed));
 
-// Compact disk I/O event (35-byte populated prefix).
-// Aggregation uses timestamp + pid + client + latency + device + queue depth
-// but never reads tid, so disk completions can drop it from the hot record.
+// Compact disk I/O event (27-byte populated prefix).
+// Aggregation only uses pid + client + latency + device + queue depth on the
+// hot path, so disk completions can drop both timestamp and tid.
 struct compact_disk_io_event {
-    __u64 timestamp_ns;
     __u64 latency_ns;
     __u32 pid;
     __u32 bytes;

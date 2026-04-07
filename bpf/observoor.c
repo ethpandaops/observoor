@@ -141,16 +141,15 @@ static __always_inline void emit_compact_disk_io_event(__u32 pid,
                                                        __u32 queue_depth,
                                                        __u32 dev)
 {
-    // Only the 35-byte populated prefix goes over the ring buffer; the C
+    // Only the 27-byte populated prefix goes over the ring buffer; the C
     // struct keeps its natural alignment and tail padding stays local.
     const __u64 compact_disk_io_event_size =
-        (2 * sizeof(__u64)) + (4 * sizeof(__u32)) + (3 * sizeof(__u8));
+        sizeof(__u64) + (4 * sizeof(__u32)) + (3 * sizeof(__u8));
     struct compact_disk_io_event *e =
         bpf_ringbuf_reserve(&events, compact_disk_io_event_size, 0);
     if (!e)
         return;
 
-    e->timestamp_ns = bpf_ktime_get_ns();
     e->latency_ns = latency_ns;
     e->pid = pid;
     e->bytes = bytes;
