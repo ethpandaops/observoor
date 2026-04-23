@@ -708,8 +708,10 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
     if (!e)
         return 0;
 
-    fill_header(&e->hdr, EVENT_BLOCK_MERGE, ct);
+    e->pid = pid;
     e->bytes = bytes;
+    e->event_type = EVENT_BLOCK_MERGE;
+    e->client_type = ct;
     e->rw = rw;
 
     bpf_ringbuf_submit(e, 0);

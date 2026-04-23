@@ -166,13 +166,15 @@ struct sched_runqueue_event {
     __u64 off_cpu_ns;
 };
 
-// Block merge event (32 bytes total).
+// Compact block merge event (11-byte populated prefix).
+// Aggregation only needs pid + client + bytes + rw, so skip timestamp/tid.
 struct block_merge_event {
-    struct event_header hdr;
+    __u32 pid;
     __u32 bytes;
+    __u8  event_type;
+    __u8  client_type;
     __u8  rw; // 0=read, 1=write
-    __u8  pad[3];
-};
+} __attribute__((packed));
 
 // TCP retransmit event (40 bytes total).
 struct tcp_retransmit_event {

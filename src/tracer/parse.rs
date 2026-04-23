@@ -86,6 +86,16 @@ struct RawCompactDiskIOEvent {
 
 #[repr(C, packed)]
 #[derive(Clone, Copy)]
+struct RawCompactBlockMergeEvent {
+    pid: u32,
+    bytes: u32,
+    event_type: u8,
+    client_type: u8,
+    rw: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
 struct RawDiskIOPayload {
     latency_ns: u64,
     bytes: u32,
@@ -170,6 +180,7 @@ const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
 const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
 const COMPACT_NET_IO_METRICS_EVENT_SIZE: usize = size_of::<RawCompactNetIOMetricsEvent>();
 const COMPACT_DISK_IO_EVENT_SIZE: usize = size_of::<RawCompactDiskIOEvent>();
+const COMPACT_BLOCK_MERGE_EVENT_SIZE: usize = size_of::<RawCompactBlockMergeEvent>();
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_BASIC_MARKER_EVENT_SIZE == 8);
@@ -177,6 +188,7 @@ const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
 const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
 const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
 const _: () = assert!(COMPACT_DISK_IO_EVENT_SIZE == 27);
+const _: () = assert!(COMPACT_BLOCK_MERGE_EVENT_SIZE == 11);
 
 /// Errors that can occur during event parsing.
 #[derive(Error, Debug)]
@@ -291,6 +303,9 @@ fn parse_event_with_sink<S: ParsedEventSink>(
     }
     if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
         return parse_compact_syscall_event(data, sink);
+    }
+    if data.len() == COMPACT_BLOCK_MERGE_EVENT_SIZE {
+        return parse_compact_block_merge_event(data, sink);
     }
     if data.len() == COMPACT_NET_IO_EVENT_SIZE {
         return parse_compact_net_io_event(data, sink);
@@ -623,6 +638,43 @@ fn parse_compact_syscall_event<S: ParsedEventSink>(
 }
 
 #[inline(always)]
+fn parse_compact_block_merge_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), COMPACT_BLOCK_MERGE_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == COMPACT_BLOCK_MERGE_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawCompactBlockMergeEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    if raw.event_type != EventType::BlockMerge as u8 {
+        return Err(ParseError::Truncated { size: data.len() });
+    }
+
+    Ok(sink.emit(
+        Event::new_validated(
+            0,
+            u32::from_le(raw.pid),
+            0,
+            EventType::BlockMerge,
+            client_type_raw,
+        ),
+        TypedEvent::BlockMerge(BlockMergeEvent {
+            bytes: u32::from_le(raw.bytes),
+            rw: raw.rw,
+        }),
+        raw.event_type,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
 fn parse_compact_net_io_event<S: ParsedEventSink>(
     data: &[u8],
     sink: &mut S,
@@ -935,7 +987,7 @@ fn parse_page_fault(header: &RawEventHeader) -> PageFaultEvent {
     }
 }
 
-/// Block merge event: type 17. Payload: 8 bytes.
+/// Legacy header block merge event: type 17. Payload: 8 bytes.
 fn parse_block_merge(data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
     let raw = read_payload::<RawBlockMergePayload>(data, "block merge event")?;
     Ok(BlockMergeEvent {
@@ -1123,6 +1175,16 @@ mod tests {
         buf
     }
 
+    fn compact_block_merge(pid: u32, client_type: u8, bytes: u32, rw: u8) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(COMPACT_BLOCK_MERGE_EVENT_SIZE);
+        buf.extend_from_slice(&pid.to_le_bytes());
+        buf.extend_from_slice(&bytes.to_le_bytes());
+        buf.push(EventType::BlockMerge as u8);
+        buf.push(client_type);
+        buf.push(rw);
+        buf
+    }
+
     fn assert_header(event: &Event, ts: u64, pid: u32, tid: u32, et: EventType, ct: u8) {
         assert_eq!(event.timestamp_ns, ts);
         assert_eq!(event.pid(), pid);
@@ -1221,6 +1283,21 @@ mod tests {
         assert_eq!(e.rw, 1);
         assert_eq!(e.queue_depth, 8);
         assert_eq!(e.device_id, 66304);
+    }
+
+    #[test]
+    fn test_compact_block_merge_event() {
+        let data = compact_block_merge(110, 1, 8192, 0);
+
+        let parsed = parse_event(&data).unwrap();
+        assert_eq!(parsed.raw.timestamp_ns, 0);
+        assert_eq!(parsed.raw.pid(), 110);
+        assert_eq!(parsed.raw.tid, 0);
+        let TypedEvent::BlockMerge(e) = &parsed.typed else {
+            panic!("expected BlockMerge");
+        };
+        assert_eq!(e.bytes, 8192);
+        assert_eq!(e.rw, 0);
     }
 
     #[test]
