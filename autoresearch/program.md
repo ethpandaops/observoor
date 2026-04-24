@@ -971,6 +971,17 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `435645f`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 88: Single-store compact marker tails in BPF (2026-04-25) — REVERTED
+- **Hypothesis**: BPF FD/TCP-state compact marker emitter writes
+  `event_type + client_type + pad[2]` as separate byte stores + memset.
+  A single endian-aware 32-bit store fills the tail in one write.
+- **Change**: `compact_marker_tail_word()` helper; 4-byte store replaces
+  byte stores + memset. (commits `26b382e`, `9dc18c5`)
+- **Result (new methodology)**: 14.71s vs 16.07s master, CV 0.3%/0.4% —
+  **-8.46% vs master** at master=16.07s. Slow HWM -9.03% → 0.57pp worse.
+- **Verdict**: REVERTED. Branch reset to `fe0de12`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
