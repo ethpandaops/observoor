@@ -60,7 +60,7 @@ pub const ALL_METRIC_NAMES: &[&str] = &[
 
 /// Performs single-pass collection from a Buffer into a MetricBatch.
 pub struct Collector {
-    interval_ms: u16,
+    configured_interval_ns: u64,
     sampling_by_event: [EventSamplingMetadata; MAX_EVENT_TYPE + 1],
     #[cfg(feature = "bpf")]
     collect_process_snapshots: bool,
@@ -166,7 +166,7 @@ impl Collector {
         }
 
         Self {
-            interval_ms: interval.as_millis() as u16,
+            configured_interval_ns: duration_to_ns(interval),
             sampling_by_event,
             #[cfg(feature = "bpf")]
             collect_process_snapshots,
@@ -192,7 +192,7 @@ impl Collector {
     }
 
     fn configured_interval_ns(&self) -> u64 {
-        u64::from(self.interval_ms) * 1_000_000
+        self.configured_interval_ns
     }
 
     fn resolved_interval_ns(&self, buf: &Buffer) -> u64 {
@@ -1299,6 +1299,10 @@ fn client_type_from_u8(v: u8) -> ClientType {
     ClientType::from_u8(v).unwrap_or(ClientType::Unknown)
 }
 
+fn duration_to_ns(duration: Duration) -> u64 {
+    u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX)
+}
+
 /// Ensures the vector can hold at least `required` items without reallocating.
 fn reserve_if_needed<T>(vec: &mut Vec<T>, required: usize) {
     if vec.capacity() < required {
@@ -1585,6 +1589,20 @@ mod tests {
 
         let batch = collector.collect(&buf, test_meta());
         assert_eq!(batch.counter[0].window.interval_ms, 500);
+    }
+
+    #[test]
+    fn test_collect_window_info_clamps_long_configured_interval() {
+        let collector = Collector::new(Duration::from_secs(70), &SamplingConfig::default());
+        let buf = test_buffer();
+        let dim = BasicDimension {
+            pid: 1,
+            client_type: 1,
+        };
+        buf.add_fd_open(dim);
+
+        let batch = collector.collect(&buf, test_meta());
+        assert_eq!(batch.counter[0].window.interval_ms, u16::MAX);
     }
 
     #[test]

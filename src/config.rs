@@ -791,6 +791,9 @@ impl Config {
         if self.beacon.endpoint.is_empty() {
             bail!("beacon.endpoint is required");
         }
+        if self.beacon.timeout.is_zero() {
+            bail!("beacon.timeout must be positive");
+        }
 
         if self.meta_client_name.is_empty() {
             bail!("meta_client_name is required");
@@ -802,6 +805,9 @@ impl Config {
 
         if self.ring_buffer_size == 0 {
             bail!("ring_buffer_size must be positive");
+        }
+        if self.sync_poll_interval.is_zero() {
+            bail!("sync_poll_interval must be positive");
         }
 
         if !self.sinks.aggregated.enabled {
@@ -943,6 +949,22 @@ impl Config {
             }
         }
 
+        // Validate ClickHouse export config if enabled.
+        if self.sinks.aggregated.clickhouse.enabled {
+            if self.sinks.aggregated.clickhouse.endpoint.is_empty() {
+                bail!("clickhouse endpoint is required when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.database.is_empty() {
+                bail!("clickhouse database is required when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.batch_size == 0 {
+                bail!("clickhouse batch_size must be positive when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.flush_interval.is_zero() {
+                bail!("clickhouse flush_interval must be positive when enabled");
+            }
+        }
+
         // Validate HTTP export config if enabled.
         if self.sinks.aggregated.http.enabled {
             if self.sinks.aggregated.http.address.is_empty() {
@@ -957,6 +979,12 @@ impl Config {
             }
             if self.sinks.aggregated.http.workers == 0 {
                 bail!("http workers must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.batch_timeout.is_zero() {
+                bail!("http batch_timeout must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.export_timeout.is_zero() {
+                bail!("http export_timeout must be positive when enabled");
             }
 
             let compression = &self.sinks.aggregated.http.compression;
@@ -1224,6 +1252,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validation_zero_runtime_intervals_rejected() {
+        let mut cfg = valid_config();
+        cfg.sync_poll_interval = Duration::ZERO;
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("sync_poll_interval"));
+
+        let mut cfg = valid_config();
+        cfg.beacon.timeout = Duration::ZERO;
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("beacon.timeout"));
+    }
+
+    #[test]
     fn test_validation_missing_meta_client_name() {
         let cfg = Config {
             beacon: BeaconConfig {
@@ -1328,6 +1369,61 @@ mod tests {
 
         let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("workers"));
+    }
+
+    #[test]
+    fn test_validation_http_timeouts_must_be_positive() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.http = HttpExportConfig {
+            enabled: true,
+            address: "http://localhost:8686".to_string(),
+            batch_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("batch_timeout"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.http = HttpExportConfig {
+            enabled: true,
+            address: "http://localhost:8686".to_string(),
+            export_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("export_timeout"));
+    }
+
+    #[test]
+    fn test_validation_clickhouse_enabled_requires_runtime_settings() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: String::new(),
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse endpoint"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: "localhost:9000".to_string(),
+            batch_size: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse batch_size"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: "localhost:9000".to_string(),
+            flush_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse flush_interval"));
     }
 
     #[test]

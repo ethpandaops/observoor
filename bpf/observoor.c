@@ -661,7 +661,8 @@ int trace_block_rq_issue(struct trace_event_raw_block_rq_local *ctx)
     val.pid = pid;
     val.tid = tid;
     val.client_type = ct;
-    bpf_map_update_elem(&req_start, keyp, &val, BPF_ANY);
+    if (bpf_map_update_elem(&req_start, keyp, &val, BPF_ANY) != 0)
+        return 0;
 
     // Track per-device in-flight depth.
     __u32 depth = 0;
@@ -738,13 +739,6 @@ cleanup:
 SEC("tracepoint/block/block_rq_merge")
 int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
 {
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u8 ct;
-
-    if (!is_tracked(pid, &ct))
-        return 0;
-
     __u32 dev = 0;
     __u64 sector = 0;
     __u32 nr_sector = 0;
@@ -772,13 +766,26 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
     struct req_key *keyp = &key;
     asm volatile("" : "+r"(keyp));
 
-    bpf_map_delete_elem(&req_start, keyp);
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    __u32 tid = (__u32)pid_tgid;
+    __u8 ct;
 
-    // Decrement in-flight depth since this request was absorbed.
-    __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &dev);
-    if (depthp && *depthp > 0) {
-        __u32 depth = *depthp - 1;
-        bpf_map_update_elem(&dev_inflight, &dev, &depth, BPF_ANY);
+    struct req_val *val = bpf_map_lookup_elem(&req_start, keyp);
+    if (val) {
+        pid = val->pid;
+        tid = val->tid;
+        ct = val->client_type;
+        bpf_map_delete_elem(&req_start, keyp);
+
+        // Decrement in-flight depth since this request was absorbed.
+        __u32 *depthp = bpf_map_lookup_elem(&dev_inflight, &dev);
+        if (depthp && *depthp > 0) {
+            __u32 depth = *depthp - 1;
+            bpf_map_update_elem(&dev_inflight, &dev, &depth, BPF_ANY);
+        }
+    } else if (!is_tracked(pid, &ct)) {
+        return 0;
     }
 
     if (!should_emit_event(EVENT_BLOCK_MERGE))
@@ -791,6 +798,8 @@ int trace_block_rq_merge(struct trace_event_raw_block_rq_local *ctx)
     }
 
     fill_header(&e->hdr, EVENT_BLOCK_MERGE, ct);
+    e->hdr.pid = pid;
+    e->hdr.tid = tid;
     e->bytes = bytes;
     e->dev = dev;
     e->rw = rw;
@@ -877,6 +886,7 @@ int BPF_KRETPROBE(kretprobe_tcp_sendmsg, int ret)
     e->pad[0] = 0;
     e->srtt_us = val->srtt_us;
     e->snd_cwnd = val->snd_cwnd;
+    __builtin_memset(e->tail_pad, 0, sizeof(e->tail_pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -950,6 +960,7 @@ int BPF_KRETPROBE(kretprobe_tcp_recvmsg, int ret)
     e->pad[0] = 0;
     e->srtt_us = 0;
     e->snd_cwnd = 0;
+    __builtin_memset(e->tail_pad, 0, sizeof(e->tail_pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -1017,6 +1028,7 @@ int BPF_KRETPROBE(kretprobe_udp_sendmsg, int ret)
     e->pad[0] = 0;
     e->srtt_us = 0;
     e->snd_cwnd = 0;
+    __builtin_memset(e->tail_pad, 0, sizeof(e->tail_pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -1081,6 +1093,7 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
     e->pad[0] = 0;
     e->srtt_us = 0;
     e->snd_cwnd = 0;
+    __builtin_memset(e->tail_pad, 0, sizeof(e->tail_pad));
 
     bpf_ringbuf_submit(e, 0);
 
@@ -1146,6 +1159,9 @@ int BPF_KPROBE(kprobe_tcp_set_state, struct sock *sk, int state)
         bpf_ringbuf_reserve(&events, sizeof(*e), 0);
     if (!e) {
         record_ringbuf_drop();
+        if (state == 7) { // TCP_CLOSE
+            bpf_map_delete_elem(&sock_owner, &sk_key);
+        }
         return 0;
     }
 

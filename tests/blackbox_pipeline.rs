@@ -112,6 +112,7 @@ fn net_payload(
     data.push(0);
     data.extend_from_slice(&srtt_us.to_le_bytes());
     data.extend_from_slice(&cwnd.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
     data
 }
 

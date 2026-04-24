@@ -78,6 +78,7 @@ struct net_io_event {
     __u8  pad[1];
     __u32 srtt_us;      // Smoothed RTT (0 when has_metrics==0)
     __u32 snd_cwnd;     // Congestion window (0 when has_metrics==0)
+    __u8  tail_pad[4];
 };
 
 // Scheduler event (40 bytes total).

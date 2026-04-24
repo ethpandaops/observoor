@@ -77,6 +77,7 @@ fn net_payload(pid: u32, tid: u32, direction: Direction, has_metrics: bool) -> V
     data.extend_from_slice(&[0u8; 2]);
     data.extend_from_slice(&95u32.to_le_bytes());
     data.extend_from_slice(&128_000u32.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
     data
 }
 

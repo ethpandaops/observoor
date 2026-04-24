@@ -191,9 +191,9 @@ fn parse_disk_io(event: Event, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     })
 }
 
-/// Net I/O event: types 7-8. Payload: 20 bytes minimum.
+/// Net I/O event: types 7-8. Payload: 24 bytes.
 fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
-    ensure_payload(data, 20, "net IO event")?;
+    ensure_payload(data, 24, "net IO event")?;
     let direction_raw = read_u8(data, 8);
     let direction = Direction::from_u8(direction_raw).ok_or(ParseError::InvalidDirection {
         event_name: "net IO event",
@@ -450,7 +450,7 @@ mod tests {
         data.extend_from_slice(&90u16.to_le_bytes()); // dport
         data.push(5); // invalid direction
         data.push(0);
-        data.extend_from_slice(&[0u8; 10]); // rest of payload
+        data.extend_from_slice(&[0u8; 14]); // rest of payload
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidDirection { raw: 5, .. }
@@ -466,7 +466,7 @@ mod tests {
         data.push(0); // TX
         data.push(0); // no metrics
         data.push(7); // invalid transport
-        data.extend_from_slice(&[0u8; 9]); // rest of payload
+        data.extend_from_slice(&[0u8; 13]); // rest of payload
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidNetTransport { raw: 7, .. }
@@ -565,6 +565,7 @@ mod tests {
         data.push(0); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
+        data.extend_from_slice(&[0u8; 4]); // tail pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
@@ -592,6 +593,7 @@ mod tests {
         data.push(0); // pad
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]); // tail pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
