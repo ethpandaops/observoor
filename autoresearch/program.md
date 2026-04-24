@@ -738,6 +738,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `724975a`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 71: Pack syscall start state in BPF (2026-04-24) — REVERTED
+- **Hypothesis**: `syscall_start` BPF map stores `{ts, client_type}` in a
+  struct with alignment padding. Packing both into a single u64 should cut
+  per-syscall map write/read cost.
+- **Change**: `syscall_val.packed = (ts << 8) | client_type` + unpack on exit.
+  (commits `1d7fd82`, `c153c3d`)
+- **Result (new methodology)**: 14.66s vs 16.00s master, CV 0.5%/0.6% —
+  **-8.38% vs master** on slow runner. Slow-runner HWM -9.03%, so 0.65pp
+  regression. Packing likely costs more in shifts than the alignment saves.
+- **Verdict**: REVERTED. Branch reset to `b926768`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
