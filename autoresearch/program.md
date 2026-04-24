@@ -726,6 +726,18 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: f29a9ba
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 70: Skip first-sample check on hot inline syscall-latency (2026-04-24) — REVERTED
+- **Hypothesis**: After the first syscall, the inline hot-entry
+  `LatencyAggregate` is guaranteed non-empty, so subsequent record calls
+  don't need the `count == 0` branch that handles the first-sample case.
+- **Change**: New `record_nonempty` steady-state path in `LatencyAggregate`;
+  inline path uses it after the first sample. (commits `a4b259e`, `dd72169`)
+- **Result (new methodology)**: 14.64s vs 16.12s master, CV 0.3%/0.4% —
+  **-9.18% vs master** (master=16.12s, same class as iter 69's 16.17s).
+  Slow-runner HWM (iter 69) -9.03%, so 0.15pp improvement — within noise.
+- **Verdict**: REVERTED. Branch reset to `724975a`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
