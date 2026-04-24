@@ -717,10 +717,14 @@ Key cost centers (from Criterion benchmarks):
   should shave ring-buffer bandwidth and remove the BPF pad write while keeping
   the legacy 8-byte marker parser as a fallback.
 - **Change**: Dedicated 7-byte compact page-fault record in BPF and parser.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 14.71s vs 16.17s master, CV 0.2%/0.6% —
+  **-9.03% vs master** on slow runner (master=16.17s). Every prior slow-runner
+  attempt after iter 46 landed in -6.35%..-7.63%; iter 69 at -9.03% is
+  1.2-2.7pp better than all of them. Clear of the noise floor in
+  same-runner-class terms.
+- **Verdict**: KEPT. New slow-runner HWM: -9.03%.
 - **Commit**: f29a9ba
-- **Author**: gpt-5 / medium reasoning
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -735,9 +739,9 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 (master ~13s). So cross-iteration comparisons need a runner-class disclaimer
 until we get multi-runner medians.
 
-**High-water mark: -11.13%** vs master (iter 57, commit `831accc`, 2026-04-24,
-fast runner — slow-runner HWM remains -7.82% from iter 46).
-**46 kept iterations.**
+**High-water mark: -11.13%** vs master (iter 57, commit `831accc`, fast runner).
+**Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
+**47 kept iterations.**
 
 ## Rules
 
