@@ -18,6 +18,7 @@ use self::event::{ClientType, ParsedEvent};
 pub struct RingbufStats {
     pub used_bytes: usize,
     pub size_bytes: usize,
+    pub dropped_events: u64,
 }
 
 /// Information about a tracked thread.

@@ -791,6 +791,9 @@ impl Config {
         if self.beacon.endpoint.is_empty() {
             bail!("beacon.endpoint is required");
         }
+        if self.beacon.timeout.is_zero() {
+            bail!("beacon.timeout must be positive");
+        }
 
         if self.meta_client_name.is_empty() {
             bail!("meta_client_name is required");
@@ -802,6 +805,9 @@ impl Config {
 
         if self.ring_buffer_size == 0 {
             bail!("ring_buffer_size must be positive");
+        }
+        if self.sync_poll_interval.is_zero() {
+            bail!("sync_poll_interval must be positive");
         }
 
         if !self.sinks.aggregated.enabled {
@@ -924,6 +930,11 @@ impl Config {
         {
             let tcp_tracking_disabled = disabled_probes.contains(&ProbeGroup::TcpSend)
                 && disabled_probes.contains(&ProbeGroup::TcpRecv);
+            if !disabled_probes.contains(&ProbeGroup::TcpRetransmit)
+                && disabled_probes.contains(&ProbeGroup::TcpState)
+            {
+                bail!("tcp_state cannot be disabled while tcp_retransmit is enabled");
+            }
             if tcp_tracking_disabled {
                 if !disabled_probes.contains(&ProbeGroup::TcpRetransmit) {
                     bail!(
@@ -935,6 +946,22 @@ impl Config {
                         "tcp_state cannot be enabled when both tcp_send and tcp_recv are disabled"
                     );
                 }
+            }
+        }
+
+        // Validate ClickHouse export config if enabled.
+        if self.sinks.aggregated.clickhouse.enabled {
+            if self.sinks.aggregated.clickhouse.endpoint.is_empty() {
+                bail!("clickhouse endpoint is required when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.database.is_empty() {
+                bail!("clickhouse database is required when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.batch_size == 0 {
+                bail!("clickhouse batch_size must be positive when enabled");
+            }
+            if self.sinks.aggregated.clickhouse.flush_interval.is_zero() {
+                bail!("clickhouse flush_interval must be positive when enabled");
             }
         }
 
@@ -952,6 +979,12 @@ impl Config {
             }
             if self.sinks.aggregated.http.workers == 0 {
                 bail!("http workers must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.batch_timeout.is_zero() {
+                bail!("http batch_timeout must be positive when enabled");
+            }
+            if self.sinks.aggregated.http.export_timeout.is_zero() {
+                bail!("http export_timeout must be positive when enabled");
             }
 
             let compression = &self.sinks.aggregated.http.compression;
@@ -1214,8 +1247,21 @@ mod tests {
             meta_network_name: "testnet".to_string(),
             ..Default::default()
         };
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("beacon.endpoint"));
+    }
+
+    #[test]
+    fn test_validation_zero_runtime_intervals_rejected() {
+        let mut cfg = valid_config();
+        cfg.sync_poll_interval = Duration::ZERO;
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("sync_poll_interval"));
+
+        let mut cfg = valid_config();
+        cfg.beacon.timeout = Duration::ZERO;
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("beacon.timeout"));
     }
 
     #[test]
@@ -1234,7 +1280,7 @@ mod tests {
             meta_network_name: "testnet".to_string(),
             ..Default::default()
         };
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("meta_client_name"));
     }
 
@@ -1262,7 +1308,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("max_queue_size"));
 
         cfg.sinks.aggregated.http.max_queue_size = 1;
@@ -1293,7 +1339,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("batch_size"));
     }
 
@@ -1321,8 +1367,63 @@ mod tests {
             ..Default::default()
         };
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("workers"));
+    }
+
+    #[test]
+    fn test_validation_http_timeouts_must_be_positive() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.http = HttpExportConfig {
+            enabled: true,
+            address: "http://localhost:8686".to_string(),
+            batch_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("batch_timeout"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.http = HttpExportConfig {
+            enabled: true,
+            address: "http://localhost:8686".to_string(),
+            export_timeout: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("export_timeout"));
+    }
+
+    #[test]
+    fn test_validation_clickhouse_enabled_requires_runtime_settings() {
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: String::new(),
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse endpoint"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: "localhost:9000".to_string(),
+            batch_size: 0,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse batch_size"));
+
+        let mut cfg = valid_config();
+        cfg.sinks.aggregated.clickhouse = ClickHouseConfig {
+            enabled: true,
+            endpoint: "localhost:9000".to_string(),
+            flush_interval: Duration::ZERO,
+            ..Default::default()
+        };
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains("clickhouse flush_interval"));
     }
 
     #[test]
@@ -1334,7 +1435,7 @@ mod tests {
             interval: Duration::from_millis(100),
         }];
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err
             .to_string()
             .contains("must be greater than base interval"));
@@ -1349,7 +1450,7 @@ mod tests {
             interval: Duration::from_millis(750),
         }];
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("exact multiple"));
     }
 
@@ -1362,7 +1463,7 @@ mod tests {
             interval: Duration::from_millis(500),
         }];
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("unknown metric"));
     }
 
@@ -1381,7 +1482,7 @@ mod tests {
             },
         ];
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("more than one override"));
     }
 
@@ -1459,7 +1560,7 @@ mod tests {
             },
         );
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err
             .to_string()
             .contains("invalid sampling rule for syscall_read"));
@@ -1476,7 +1577,7 @@ mod tests {
             },
         );
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("unknown event in sampling config"));
     }
 
@@ -1499,7 +1600,7 @@ mod tests {
             },
         );
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err
             .to_string()
             .contains("net_tx and net_rx sampling rules must match"));
@@ -1509,7 +1610,7 @@ mod tests {
     fn test_validation_host_specs_poll_interval_must_be_positive() {
         let mut cfg = valid_config();
         cfg.sinks.aggregated.resolution.host_specs_poll_interval = Duration::ZERO;
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("host_specs_poll_interval"));
     }
 
@@ -1585,7 +1686,7 @@ mod tests {
         entries.insert("not_a_probe".to_string(), ProbeConfig { enabled: false });
 
         let cfg = ProbesConfig { entries };
-        let err = cfg.disabled_set().unwrap_err();
+        let err = cfg.disabled_set().expect_err("expected error");
         assert!(err.to_string().contains("unknown probe group"));
     }
 
@@ -1596,7 +1697,7 @@ mod tests {
             .entries
             .insert("block_merge".to_string(), ProbeConfig { enabled: false });
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err
             .to_string()
             .contains("block_merge cannot be disabled while disk_io is enabled"));
@@ -1611,14 +1712,24 @@ mod tests {
         cfg.probes
             .entries
             .insert("tcp_recv".to_string(), ProbeConfig { enabled: false });
+
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err.to_string().contains(
+            "tcp_retransmit cannot be enabled when both tcp_send and tcp_recv are disabled"
+        ));
+    }
+
+    #[test]
+    fn test_validation_tcp_retransmit_requires_tcp_state_cleanup() {
+        let mut cfg = valid_config();
         cfg.probes
             .entries
             .insert("tcp_state".to_string(), ProbeConfig { enabled: false });
 
-        let err = cfg.validate().unwrap_err();
-        assert!(err.to_string().contains(
-            "tcp_retransmit cannot be enabled when both tcp_send and tcp_recv are disabled"
-        ));
+        let err = cfg.validate().expect_err("expected error");
+        assert!(err
+            .to_string()
+            .contains("tcp_state cannot be disabled while tcp_retransmit is enabled"));
     }
 
     #[test]
@@ -1634,7 +1745,7 @@ mod tests {
             .entries
             .insert("tcp_retransmit".to_string(), ProbeConfig { enabled: false });
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err
             .to_string()
             .contains("tcp_state cannot be enabled when both tcp_send and tcp_recv are disabled"));
@@ -1647,7 +1758,7 @@ mod tests {
             .entries
             .insert("bogus_probe".to_string(), ProbeConfig { enabled: false });
 
-        let err = cfg.validate().unwrap_err();
+        let err = cfg.validate().expect_err("expected error");
         assert!(err.to_string().contains("unknown probe group"));
     }
 

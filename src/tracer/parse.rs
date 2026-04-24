@@ -191,9 +191,9 @@ fn parse_disk_io(event: Event, data: &[u8]) -> Result<DiskIOEvent, ParseError> {
     })
 }
 
-/// Net I/O event: types 7-8. Payload: 20 bytes minimum.
+/// Net I/O event: types 7-8. Payload: 24 bytes.
 fn parse_net_io(event: Event, data: &[u8]) -> Result<NetIOEvent, ParseError> {
-    ensure_payload(data, 20, "net IO event")?;
+    ensure_payload(data, 24, "net IO event")?;
     let direction_raw = read_u8(data, 8);
     let direction = Direction::from_u8(direction_raw).ok_or(ParseError::InvalidDirection {
         event_name: "net IO event",
@@ -278,13 +278,14 @@ fn parse_fd(event: Event, data: &[u8]) -> Result<FDEvent, ParseError> {
     })
 }
 
-/// Block merge event: type 17. Payload: 8 bytes.
+/// Block merge event: type 17. Payload: 16 bytes.
 fn parse_block_merge(event: Event, data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
-    ensure_payload(data, 8, "block merge event")?;
+    ensure_payload(data, 16, "block merge event")?;
     Ok(BlockMergeEvent {
         event,
         bytes: read_u32_le(data, 0),
-        rw: read_u8(data, 4),
+        device_id: read_u32_le(data, 4),
+        rw: read_u8(data, 8),
     })
 }
 
@@ -352,7 +353,12 @@ fn parse_process_exit(event: Event, data: &[u8]) -> Result<ProcessExitEvent, Par
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::uninlined_format_args,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 
@@ -444,7 +450,7 @@ mod tests {
         data.extend_from_slice(&90u16.to_le_bytes()); // dport
         data.push(5); // invalid direction
         data.push(0);
-        data.extend_from_slice(&[0u8; 10]); // rest of payload
+        data.extend_from_slice(&[0u8; 14]); // rest of payload
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidDirection { raw: 5, .. }
@@ -460,7 +466,7 @@ mod tests {
         data.push(0); // TX
         data.push(0); // no metrics
         data.push(7); // invalid transport
-        data.extend_from_slice(&[0u8; 9]); // rest of payload
+        data.extend_from_slice(&[0u8; 13]); // rest of payload
         assert!(matches!(
             parse_event(&data).unwrap_err(),
             ParseError::InvalidNetTransport { raw: 7, .. }
@@ -559,6 +565,7 @@ mod tests {
         data.push(0); // pad
         data.extend_from_slice(&50_000u32.to_le_bytes()); // srtt_us
         data.extend_from_slice(&10u32.to_le_bytes()); // cwnd
+        data.extend_from_slice(&[0u8; 4]); // tail pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
@@ -586,6 +593,7 @@ mod tests {
         data.push(0); // pad
         data.extend_from_slice(&0u32.to_le_bytes());
         data.extend_from_slice(&0u32.to_le_bytes());
+        data.extend_from_slice(&[0u8; 4]); // tail pad
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::NetIO(e) = &parsed.typed else {
@@ -741,14 +749,16 @@ mod tests {
     fn test_block_merge_read() {
         let mut data = header(11_000_000, 110, 210, 17, 1); // BlockMerge, Geth
         data.extend_from_slice(&8192u32.to_le_bytes());
+        data.extend_from_slice(&66304u32.to_le_bytes());
         data.push(0); // rw = read
-        data.extend_from_slice(&[0u8; 3]);
+        data.extend_from_slice(&[0u8; 7]);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::BlockMerge(e) = &parsed.typed else {
             panic!("expected BlockMerge");
         };
         assert_eq!(e.bytes, 8192);
+        assert_eq!(e.device_id, 66304);
         assert_eq!(e.rw, 0);
     }
 

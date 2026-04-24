@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing)]
+
 use std::time::{Duration, SystemTime};
 
 use observoor::agent::ports::{PortLabel, PortLabelMap};
@@ -78,11 +80,12 @@ fn disk_payload(
     data
 }
 
-fn block_merge_payload(pid: u32, tid: u32, bytes: u32, rw: u8) -> Vec<u8> {
+fn block_merge_payload(pid: u32, tid: u32, bytes: u32, device_id: u32, rw: u8) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, EventType::BlockMerge as u8, 1);
     data.extend_from_slice(&bytes.to_le_bytes());
+    data.extend_from_slice(&device_id.to_le_bytes());
     data.push(rw);
-    data.extend_from_slice(&[0u8; 3]);
+    data.extend_from_slice(&[0u8; 7]);
     data
 }
 
@@ -109,6 +112,7 @@ fn net_payload(
     data.push(0);
     data.extend_from_slice(&srtt_us.to_le_bytes());
     data.extend_from_slice(&cwnd.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
     data
 }
 
@@ -250,7 +254,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             let disk = DiskDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                device_id: 0,
+                device_id: e.device_id,
                 rw: e.rw,
             };
             buf.add_block_merge(disk, e.bytes);
@@ -323,7 +327,7 @@ fn pipeline_blackbox_correctness_and_invariants() {
         sched_runqueue_payload(p1, p1, 1_000, 2_000, 3),
         disk_payload(p1, p1, 40_000, 4_096, 1, 4, 259),
         disk_payload(p1, p1, 20_000, 8_192, 1, 8, 259),
-        block_merge_payload(p1, p1, 4_096, 1),
+        block_merge_payload(p1, p1, 4_096, 66304, 1),
         net_payload(
             EventType::NetTX,
             p1,
@@ -452,6 +456,12 @@ fn pipeline_blackbox_correctness_and_invariants() {
     assert_eq!(counter_totals(&batch, "tcp_retransmit"), (1, 128));
     assert_eq!(counter_totals(&batch, "disk_bytes"), (2, 12_288));
     assert_eq!(counter_totals(&batch, "block_merge"), (1, 4_096));
+    let block_merge = batch
+        .counter
+        .iter()
+        .find(|m| m.metric_type == "block_merge")
+        .expect("block_merge metric should exist");
+    assert_eq!(block_merge.device_id, Some(66304));
     assert_eq!(counter_totals(&batch, "page_fault_major"), (1, 0));
     assert_eq!(counter_totals(&batch, "page_fault_minor"), (2, 0));
     assert_eq!(counter_totals(&batch, "fd_open"), (2, 0));

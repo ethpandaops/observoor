@@ -437,6 +437,7 @@ pub struct FDEvent {
 pub struct BlockMergeEvent {
     pub event: Event,
     pub bytes: u32,
+    pub device_id: u32,
     /// 0 = read, 1 = write.
     pub rw: u8,
 }

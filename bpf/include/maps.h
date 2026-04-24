@@ -19,6 +19,14 @@ struct {
     __uint(max_entries, 4 * 1024 * 1024); // 4MB default
 } events SEC(".maps");
 
+// ringbuf_drops: reserve failures that could not be emitted to userspace.
+struct {
+    __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, __u64);
+} ringbuf_drops SEC(".maps");
+
 enum sampling_mode {
     SAMPLING_MODE_NONE = 0,
     SAMPLING_MODE_PROBABILITY = 1,
@@ -249,6 +257,13 @@ static __always_inline int should_emit_event(__u8 event_type) {
     }
 
     return 1;
+}
+
+static __always_inline void record_ringbuf_drop(void) {
+    __u32 key = 0;
+    __u64 *drops = bpf_map_lookup_elem(&ringbuf_drops, &key);
+    if (drops)
+        (*drops)++;
 }
 
 // Helper: Check if TID is tracked and return client_type.

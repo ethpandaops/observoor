@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing)]
+
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
@@ -75,6 +77,7 @@ fn net_payload(pid: u32, tid: u32, direction: Direction, has_metrics: bool) -> V
     data.extend_from_slice(&[0u8; 2]);
     data.extend_from_slice(&95u32.to_le_bytes());
     data.extend_from_slice(&128_000u32.to_le_bytes());
+    data.extend_from_slice(&[0u8; 4]);
     data
 }
 
@@ -143,7 +146,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             let disk = DiskDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                device_id: 0,
+                device_id: e.device_id,
                 rw: e.rw,
             };
             buf.add_block_merge(disk, e.bytes);

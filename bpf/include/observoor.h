@@ -78,6 +78,7 @@ struct net_io_event {
     __u8  pad[1];
     __u32 srtt_us;      // Smoothed RTT (0 when has_metrics==0)
     __u32 snd_cwnd;     // Congestion window (0 when has_metrics==0)
+    __u8  tail_pad[4];
 };
 
 // Scheduler event (40 bytes total).
@@ -114,12 +115,13 @@ struct sched_runqueue_event {
     __u8  pad[4];
 };
 
-// Block merge event (32 bytes total).
+// Block merge event (40 bytes total).
 struct block_merge_event {
     struct event_header hdr;
     __u32 bytes;
+    __u32 dev;
     __u8  rw; // 0=read, 1=write
-    __u8  pad[3];
+    __u8  pad[7];
 };
 
 // TCP retransmit event (40 bytes total).
@@ -176,12 +178,15 @@ struct syscall_key {
 struct syscall_val {
     __u64 ts;
     __s32 fd;
-    __u32 pad;
+    __u8  client_type;
+    __u8  pad[3];
 };
 
 // Openat filename capture.
 struct openat_val {
     __u64 ts;
+    __u8  client_type;
+    __u8  pad[7];
     char  filename[64];
 };
 
@@ -230,6 +235,8 @@ struct net_send_val {
 struct fault_val {
     __u64 ts;
     __u64 address;
+    __u8  client_type;
+    __u8  pad[7];
 };
 
 // Tracepoint context structs (non-CO-RE). Defined here (outside vmlinux.h)
@@ -239,8 +246,9 @@ struct trace_event_raw_block_rq_local {
     __u32 dev;
     __u64 sector;
     __u32 nr_sector;
-    __u32 bytes;
-    char rwbs[8];
+    __u32 bytes_or_error;
+    __u16 ioprio;
+    char rwbs[10];
 };
 
 struct trace_event_raw_sched_wakeup_local {
@@ -252,12 +260,9 @@ struct trace_event_raw_sched_wakeup_local {
     int target_cpu;
 };
 
-struct trace_event_raw_oom_kill_local {
+struct trace_event_raw_oom_mark_victim_local {
     __u64 unused;
-    char comm[16];
     int pid;
-    int tgid;
-    unsigned long totalpages;
 };
 
 #endif /* __OBSERVOOR_H */
