@@ -571,6 +571,18 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: 831accc
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 58: Inline hot net_io_tx counter (2026-04-24) — REVERTED
+- **Hypothesis**: Same dominant-dimension-inline pattern that worked for
+  page_fault (iter 57), applied to `net_io_tx` counter map.
+- **Change**: New `HotBasicNetTxMap` wrapping a fast-map spill.
+  (commits `3405de4`, `4bf6b3a`)
+- **Result (new methodology)**: 15.14s vs 16.24s master, CV 0.4%/0.6% —
+  **-6.77% vs master** (slow runner). Slow-runner HWM -7.82%, so 1.05pp
+  regression. stress-bench is syscall/FD heavy; net events aren't a hot path
+  and the extra inline bookkeeping costs more than the saved lookups.
+- **Verdict**: REVERTED. Branch reset to `3dd986d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
