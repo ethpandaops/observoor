@@ -433,10 +433,12 @@ Key cost centers (from Criterion benchmarks):
   compact shape already used for net/disk events.
 - **Change**: New `COMPACT_BLOCK_MERGE` path in BPF + parser; legacy header
   variant retained as a fallback.
-- **Result**: 9.01s vs 10.14s baseline = **-11.14% improvement** (median of 3:
-  [9.02, 9.01, 8.95])
-- **Verdict**: KEPT
-- **Commit**: ea8e205
+- **Result (old methodology, noise-inflated)**: 9.01s vs 10.14s baseline =
+  -11.14% (median of 3: [9.02, 9.01, 8.95])
+- **Result (new methodology, 5×interleaved + warmup, 2026-04-24)**: 12.26s vs
+  13.30s master, CV 0.6% vs 0.3% — **-7.82% improvement**
+- **Verdict**: KEPT — this is the current high-water mark.
+- **Commit**: ea8e205 (measured in isolation on `4c9d784`)
 - **Author**: gpt-5.5 / xhigh reasoning (first iteration from this model)
 
 ### Iteration 47: Compact TCP retransmit events 40→14 bytes (2026-04-24) — REVERTED
@@ -460,6 +462,18 @@ Key cost centers (from Criterion benchmarks):
   halted to audit the benchmark plumbing.
 - **Verdict**: DISCARDED (code dropped on hard reset).
 
+### Iteration 50: Shrink compact FD events 8→6 bytes (2026-04-24) — REVERTED
+- **Hypothesis**: FD open/close compact records carried 2 pad bytes the sink
+  doesn't read; dropping them cuts ring-buffer bandwidth and per-event pad
+  zeroing in BPF.
+- **Change**: BPF emits 6-byte FD marker + parser variant; legacy 8-byte path
+  retained. (commits `bbf1552`, `fd80c7e`)
+- **Result (new methodology)**: 14.71s vs 15.82s master, CV 0.3%/0.3% —
+  **-7.02% vs master**. High-water mark is -7.82% (iter 46), so this is a
+  ~0.80pp regression despite being faster than master in absolute terms.
+- **Verdict**: REVERTED. Branch reset to `4c9d784`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
@@ -468,7 +482,8 @@ been seen at 10.14s and 15.98s across two back-to-back runs). The meaningful
 signal is HEAD-vs-base on the **same** runner. As of 2026-04-24 the bench runs
 5 interleaved base/head pairs plus a discarded warmup, and reports min/max/stdev.
 
-**High-water mark: -11.14%** vs master (iter 46, commit `ea8e205`, 2026-04-24)
+**High-water mark: -7.82%** vs master (iter 46, commit `ea8e205`,
+measured on new methodology at commit `4c9d784`, 2026-04-24)
 **44 kept iterations.**
 
 ## Rules
