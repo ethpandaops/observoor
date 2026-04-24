@@ -996,6 +996,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `27a90f5`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 90: Pack FD open/close into 5-byte compact records (2026-04-25) — REVERTED
+- **Hypothesis**: FD open/close markers are 8-byte records carrying an event
+  kind byte. Packing the open-vs-close bit into the high bit of the client
+  byte shrinks them to 5 bytes with the 8-byte shape retained as a legacy
+  fallback.
+- **Change**: BPF emits 5-byte record; parser dispatches by length.
+  (commits `abcec6e`, `1960cf2`)
+- **Result (new methodology)**: 12.42s vs 13.64s master, CV 0.5%/0.5% —
+  **-8.94% vs master** at master=13.64s (essentially same runner as medium
+  HWM's 13.67s). Medium HWM -9.73% → 0.79pp worse.
+- **Verdict**: REVERTED. Branch reset to `da57ce6`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
