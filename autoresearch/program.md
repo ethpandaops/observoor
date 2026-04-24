@@ -439,16 +439,36 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: ea8e205
 - **Author**: gpt-5.5 / xhigh reasoning (first iteration from this model)
 
+### Iteration 47: Compact TCP retransmit events 40→14 bytes (2026-04-24) — REVERTED
+- **Hypothesis**: Drop 24B header from TCP retransmit ring-buffer records.
+- **Change**: Compact 14B record + parser fallback. (commit `bce8cff`)
+- **Result**: -8.36% vs master — **worse cumulative than iter 46** (-11.14%).
+- **Verdict**: REVERTED retroactively (2026-04-24). Orchestrator misread the
+  keep/revert rule and approved three regressions in a row before the trend
+  was spotted. Branch reset to iter 46 tip (`9f330f3`).
+
+### Iteration 48: Prioritize compact syscall parsing (2026-04-24) — REVERTED
+- **Hypothesis**: Move compact-syscall size check ahead of compact-marker check.
+- **Change**: Reorder dispatch in `parse.rs`. (commit `e3b0bc8`)
+- **Result**: -7.20% vs master — another ~1pp regression on top of iter 47.
+- **Verdict**: REVERTED retroactively (same reset as iter 47).
+
+### Iteration 49: Match-dispatch compact parser lengths (2026-04-24) — DISCARDED
+- **Hypothesis**: Replace length-check chain with a single `match data.len()`.
+- **Change**: (commit `3cfcdff`, never pushed)
+- **Result**: never measured — discarded before push because the loop was
+  halted to audit the benchmark plumbing.
+- **Verdict**: DISCARDED (code dropped on hard reset).
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
-different CPU hardware, so the multiplicative cumulative is unreliable. The
-benchmark now always compares HEAD against master on the same runner.
+different CPU hardware. Absolute CPU times vary ~60% across runs (master has
+been seen at 10.14s and 15.98s across two back-to-back runs). The meaningful
+signal is HEAD-vs-base on the **same** runner. As of 2026-04-24 the bench runs
+5 interleaved base/head pairs plus a discarded warmup, and reports min/max/stdev.
 
-**Last measured total vs master (same runner): -11.14%** (iter 46, 2026-04-24)
-This is the real end-to-end number. Individual iterations showed real improvements
-but the absolute magnitude varies significantly by runner hardware.
-
+**High-water mark: -11.14%** vs master (iter 46, commit `ea8e205`, 2026-04-24)
 **44 kept iterations.**
 
 ## Rules
@@ -467,6 +487,11 @@ but the absolute magnitude varies significantly by runner hardware.
 5. Focus on the hot path: ring buffer read → parse → aggregate.
 6. Explain your hypothesis in the iteration entry before making the change.
 7. The orchestrator (not you) records Result/Verdict after CI benchmark completes.
+8. **Keep criterion (orchestrator-enforced)**: an iteration is KEPT only if the
+   cumulative delta vs master is *more negative than the current high-water
+   mark by more than the noise floor* (~1-2pp on this runner). A delta that
+   merely remains negative but worsens the high-water mark is a REGRESSION
+   and must be reverted. Review the `High-water mark:` line before comparing.
 
 ## In-Scope Code
 

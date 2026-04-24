@@ -91,26 +91,30 @@ jobs:
           cargo build --release --all-features
           cp ./target/release/observoor /tmp/observoor-head
 
-      - name: Benchmark base (3x)
+      - name: Benchmark (interleaved, 1 warmup + 5 base + 5 head)
         env:
           ITERATIONS: ${{ github.event.inputs.iterations || '50000' }}
         run: |
           mkdir -p /tmp/cpu-bench-results
-          for run in 1 2 3; do
-            echo "::group::Base run $run/3"
+
+          # Warmup run (discarded) to amortize cold caches/jit warming.
+          echo "::group::Warmup (discarded)"
+          sudo bash /tmp/bench-cpu-scripts/run-bench.sh "$ITERATIONS" \
+            /tmp/observoor-base \
+            > /tmp/cpu-bench-results/warmup.json || true
+          echo "::endgroup::"
+
+          # Interleave base/head to share time-correlated noise
+          # (noisy neighbors, thermal drift, scheduler jitter) equally.
+          for run in 1 2 3 4 5; do
+            echo "::group::Base run $run/5"
             sudo bash /tmp/bench-cpu-scripts/run-bench.sh "$ITERATIONS" \
               /tmp/observoor-base \
               > "/tmp/cpu-bench-results/base-${run}.json"
             cat "/tmp/cpu-bench-results/base-${run}.json"
             echo "::endgroup::"
-          done
 
-      - name: Benchmark head (3x)
-        env:
-          ITERATIONS: ${{ github.event.inputs.iterations || '50000' }}
-        run: |
-          for run in 1 2 3; do
-            echo "::group::Head run $run/3"
+            echo "::group::Head run $run/5"
             sudo bash /tmp/bench-cpu-scripts/run-bench.sh "$ITERATIONS" \
               /tmp/observoor-head \
               > "/tmp/cpu-bench-results/head-${run}.json"
@@ -125,6 +129,8 @@ jobs:
             /tmp/cpu-bench-results/base-1.json \
             /tmp/cpu-bench-results/base-2.json \
             /tmp/cpu-bench-results/base-3.json \
+            /tmp/cpu-bench-results/base-4.json \
+            /tmp/cpu-bench-results/base-5.json \
             --output /tmp/cpu-bench-results/base-report.json
 
           echo ""
@@ -133,6 +139,8 @@ jobs:
             /tmp/cpu-bench-results/head-1.json \
             /tmp/cpu-bench-results/head-2.json \
             /tmp/cpu-bench-results/head-3.json \
+            /tmp/cpu-bench-results/head-4.json \
+            /tmp/cpu-bench-results/head-5.json \
             --baseline /tmp/cpu-bench-results/base-report.json \
             --output /tmp/cpu-bench-results/head-report.json
 

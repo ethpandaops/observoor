@@ -12,7 +12,7 @@ Usage:
 import argparse
 import json
 import sys
-from statistics import median
+from statistics import median, pstdev
 
 
 def load_result(path: str) -> dict:
@@ -34,11 +34,19 @@ def main():
 
     median_cpu = median(cpu_values)
     median_wall = median(wall_values)
+    min_cpu = min(cpu_values)
+    max_cpu = max(cpu_values)
+    stdev_cpu = pstdev(cpu_values) if len(cpu_values) > 1 else 0.0
+    cv_cpu = (stdev_cpu / median_cpu) * 100 if median_cpu > 0 else 0.0
 
     report = {
         "runs": len(results),
         "cpu_values": cpu_values,
         "median_cpu_seconds": round(median_cpu, 6),
+        "min_cpu_seconds": round(min_cpu, 6),
+        "max_cpu_seconds": round(max_cpu, 6),
+        "stdev_cpu_seconds": round(stdev_cpu, 6),
+        "cv_cpu_percent": round(cv_cpu, 2),
         "median_wall_seconds": round(median_wall, 3),
         "git_commit": results[0].get("git_commit", "unknown"),
         "iterations": results[0].get("iterations", 0),
@@ -47,7 +55,7 @@ def main():
 
     print(f"Benchmark results ({len(results)} runs):")
     print(f"  CPU seconds:  {cpu_values}")
-    print(f"  Median CPU:   {median_cpu:.6f}s")
+    print(f"  Median CPU:   {median_cpu:.6f}s  (min {min_cpu:.3f}s, max {max_cpu:.3f}s, stdev {stdev_cpu:.3f}s, CV {cv_cpu:.1f}%)")
     print(f"  Median wall:  {median_wall:.3f}s")
     print(f"  Commit:       {report['git_commit']}")
 
