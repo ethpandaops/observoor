@@ -1033,6 +1033,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `8514da5`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 93: Drop unused client_type copy in sched_wakeup probes (2026-04-25) — REVERTED
+- **Hypothesis**: Scheduler wakeup probes call a tracked-TID helper that
+  copies `client_type` into an out-param, but wakeup events only need the
+  presence check. A presence-only helper skips the copy.
+- **Change**: New `is_tracked_tid_present()`; wakeup probes use it.
+  (commits `e1a29be`, `7794145`)
+- **Result (new methodology)**: 14.61s vs 16.09s master, CV 0.6%/0.3% —
+  **-9.20% vs master** at master=16.09s. Extrapolated slow neutral
+  ≈ -9.00%; iter 93 is 0.20pp better — within noise.
+- **Verdict**: REVERTED. Branch reset to `6369833`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
