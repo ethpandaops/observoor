@@ -623,6 +623,16 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `c42daeb`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 62: Indexed major/minor counters in PageFaultAggregate (2026-04-24) — REVERTED
+- **Hypothesis**: `PageFaultAggregate` branched on `major` to pick major_count
+  vs minor_count field. Indexed `[u32; 2]` removes branch via direct index.
+- **Change**: `[u32; 2] counts` + `#[inline(always)]` helper. (commits `1598e2c`,
+  `fbabc94`)
+- **Result (new methodology)**: 15.00s vs 16.13s master, CV 0.8%/0.3% —
+  **-7.01% vs master** (slow runner). HWM -7.82%, so 0.81pp regression.
+- **Verdict**: REVERTED. Branch reset to `3b18b2d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
