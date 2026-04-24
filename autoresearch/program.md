@@ -425,6 +425,20 @@ Key cost centers (from Criterion benchmarks):
 
 ---
 
+### Iteration 46: Compact block_merge events 32→11 bytes (2026-04-24)
+- **Hypothesis**: `EVENT_BLOCK_MERGE` still emitted a full 32-byte header event
+  (24B header + 8B payload) even though the sink only uses pid/bytes/rw. Dropping
+  the full header in favour of an 11-byte compact record (pid + bytes + type +
+  client + rw) reduces ring-buffer bandwidth and parser work, matching the
+  compact shape already used for net/disk events.
+- **Change**: New `COMPACT_BLOCK_MERGE` path in BPF + parser; legacy header
+  variant retained as a fallback.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: ea8e205
+
+---
+
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
 different CPU hardware, so the multiplicative cumulative is unreliable. The
 benchmark now always compares HEAD against master on the same runner.
@@ -439,12 +453,18 @@ but the absolute magnitude varies significantly by runner hardware.
 
 1. Propose exactly ONE change per iteration.
 2. The change must be a code modification (not config or benchmark tuning).
-3. Do NOT modify files under `bench-cpu/` or `autoresearch/`.
+3. Do NOT modify files under `bench-cpu/`. You MAY (and should) append your
+   iteration entry to `autoresearch/program.md` — include a new
+   `### Iteration N:` block under the existing list with:
+   - **Hypothesis**: what you expect to improve and why
+   - **Change**: one-line summary of the code change
+   - **Result**: `TBD (CI pending)` — the orchestrator fills this in
+   - **Verdict**: `TBD` — the orchestrator fills this in
+   - **Commit**: the short SHA of your commit
 4. `cargo test --no-default-features` must pass after your change.
 5. Focus on the hot path: ring buffer read → parse → aggregate.
-6. Explain your hypothesis before making the change.
-7. After seeing benchmark results, decide whether to keep or revert.
-   Record your reasoning.
+6. Explain your hypothesis in the iteration entry before making the change.
+7. The orchestrator (not you) records Result/Verdict after CI benchmark completes.
 
 ## In-Scope Code
 
