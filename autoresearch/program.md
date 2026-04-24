@@ -874,7 +874,7 @@ Key cost centers (from Criterion benchmarks):
   return immediately when `ret <= 0`, before reading `net_recv_udp_start`.
 - **Result**: TBD (CI pending)
 - **Verdict**: TBD
-- **Commit**: TBD
+- **Commit**: 8ea5db9
 - **Author**: codex
 
 ---
