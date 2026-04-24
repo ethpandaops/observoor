@@ -399,6 +399,77 @@ impl HotBasicFdMap {
     }
 }
 
+/// Keeps the hottest `BasicDimension -> PageFaultAggregate` entry inline.
+///
+/// mmap-heavy workloads tend to fault repeatedly under one process/client key.
+/// Mirroring the syscall/FD hot maps avoids hash-map lookup cost for that
+/// dominant page-fault path while spilling additional dimensions exactly.
+pub struct HotBasicPageFaultMap {
+    inline: Option<(BasicDimension, PageFaultAggregate)>,
+    spill: FastMap<BasicDimension, PageFaultAggregate>,
+}
+
+impl HotBasicPageFaultMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&PageFaultAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &PageFaultAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record_page_fault(&mut self, key: BasicDimension, major: bool) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record_page_fault(major);
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record_page_fault(major);
+            return;
+        }
+
+        let mut aggregate = PageFaultAggregate::new();
+        aggregate.record_page_fault(major);
+        self.inline = Some((key, aggregate));
+    }
+}
+
 #[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
@@ -614,7 +685,7 @@ pub struct Buffer {
     // `fd_open`/`fd_close` dominate this counter path in stress-bench, so keep
     // them in their own smaller map entry instead of carrying page-fault state.
     pub fd_metrics: HotBasicFdMap,
-    pub page_fault_metrics: FastMap<BasicDimension, PageFaultAggregate>,
+    pub page_fault_metrics: HotBasicPageFaultMap,
     pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
@@ -669,7 +740,7 @@ impl Buffer {
             syscall_fsync: HotBasicLatencyMap::with_capacity(8),
             // BasicDimension counters.
             fd_metrics: HotBasicFdMap::with_capacity(16),
-            page_fault_metrics: fast_map_with_capacity(16),
+            page_fault_metrics: HotBasicPageFaultMap::with_capacity(16),
             sched_wait: fast_map_with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
@@ -925,7 +996,7 @@ impl Buffer {
 
     /// Adds a page fault event.
     pub fn add_page_fault(&mut self, dim: BasicDimension, major: bool) {
-        get_or_default_mut(&mut self.page_fault_metrics, dim).record_page_fault(major);
+        self.page_fault_metrics.record_page_fault(dim, major);
     }
 
     /// Adds an FD open event.
@@ -1068,6 +1139,26 @@ mod tests {
         let spill = map.get(&key2).expect("spill entry exists");
         assert_eq!(spill.open_snapshot().count, 1);
         assert_eq!(spill.close_snapshot().count, 0);
+    }
+
+    #[test]
+    fn test_hot_basic_page_fault_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicPageFaultMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record_page_fault(key1, false);
+        map.record_page_fault(key1, true);
+        map.record_page_fault(key2, false);
+
+        assert_eq!(map.len(), 2);
+        let inline = map.get(&key1).expect("inline entry exists");
+        assert_eq!(inline.page_fault_minor_snapshot().count, 1);
+        assert_eq!(inline.page_fault_major_snapshot().count, 1);
+
+        let spill = map.get(&key2).expect("spill entry exists");
+        assert_eq!(spill.page_fault_minor_snapshot().count, 1);
+        assert_eq!(spill.page_fault_major_snapshot().count, 0);
     }
 
     #[test]
