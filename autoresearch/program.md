@@ -661,6 +661,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `ff26b23`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 65: Word-decode compact 8-byte basic markers (2026-04-24) — REVERTED
+- **Hypothesis**: Compact 8-byte FD/page-fault/TCP-state markers are
+  currently decoded byte-by-byte. Loading all 8 bytes as a single u64 and
+  extracting fields with shifts should be faster on x86.
+- **Change**: Single `u64::from_le_bytes` + bit-shift extraction in
+  `parse_compact_basic_marker_event`. (commits `abbf1c2`, `29d01fd`)
+- **Result (new methodology)**: 14.73s vs 15.85s master, CV 0.4%/0.3% —
+  **-7.07% vs master** (slow runner). Slow-runner HWM -7.82%, so 0.75pp
+  regression. Compiler probably already does this optimization under the hood.
+- **Verdict**: REVERTED. Branch reset to `43d1c66`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
