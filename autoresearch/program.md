@@ -779,6 +779,18 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: 32bce1f
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 74: Compact block-merge records 11→9 bytes (2026-04-25) — REVERTED
+- **Hypothesis**: Pack `rw` into the high bit of the client byte and drop
+  the event tag (record length identifies `EVENT_BLOCK_MERGE`). 11→9 bytes.
+- **Change**: BPF emitter + parser + legacy 11-byte fallback. (commits
+  `8cd84b5`, `5fe787f`)
+- **Result (new methodology, after one cancelled bench re-dispatch)**: 14.44s
+  vs 15.94s master, CV 0.2%/0.2% — **-9.41% vs master** on slow runner.
+  Interpolation of slow/medium HWMs predicts neutral ≈ -8.93% at master=15.94s;
+  iter 74 at -9.41% is 0.48pp better than neutral — within noise floor.
+- **Verdict**: REVERTED. Branch reset to `0abbea5`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
