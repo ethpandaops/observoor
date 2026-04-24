@@ -872,10 +872,13 @@ Key cost centers (from Criterion benchmarks):
   hot no-event path.
 - **Change**: In `kretprobe_udp_recvmsg`, delete the saved start entry and
   return immediately when `ret <= 0`, before reading `net_recv_udp_start`.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 12.34s vs 13.67s master, CV 0.7%/0.4% —
+  **-9.73% vs master** at master=13.67s (essentially same runner class as
+  iter 76's 13.70s). Medium HWM (iter 76) was -8.98% → iter 80 is 0.75pp
+  better on matching runner class with clean CVs.
+- **Verdict**: KEPT. New medium-runner HWM: -9.73%.
 - **Commit**: 8ea5db9
-- **Author**: codex
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -891,7 +894,7 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 until we get multi-runner medians.
 
 **High-water mark: -12.40%** vs master (iter 73, commit `32bce1f`, fast runner).
-**Medium-runner HWM: -8.98%** (iter 76, commit `d787318`, master=13.70s).
+**Medium-runner HWM: -9.73%** (iter 80, commit `8ea5db9`, master=13.67s).
 **Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
 **47 kept iterations.**
 
