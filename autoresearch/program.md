@@ -530,6 +530,19 @@ Key cost centers (from Criterion benchmarks):
   complexity isn't justified.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 55: Reuse known pid in BPF syscall exit handlers (2026-04-24) — REVERTED
+- **Hypothesis**: BPF syscall exit handlers call `bpf_get_current_pid_tgid()`
+  a second time when emitting the event, even though the first call's value
+  is still available. Passing the PID through avoids a redundant helper call.
+- **Change**: `emit_syscall_event` now takes `pid` as a parameter; each exit
+  handler passes the PID it already extracted. (commits `8ab5a20`, `58b4848`)
+- **Result (new methodology)**: 14.93s vs 16.08s master, CV 0.8%/0.6% —
+  **-7.15% vs master** (slow runner). Slow-runner HWM -7.82%, so 0.67pp
+  regression. Globally below HWM -9.93%.
+- **Verdict**: REVERTED. Branch reset to `30e82b2`. The saved helper call is
+  likely swamped by noise since syscall exits already do map lookup+delete.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
