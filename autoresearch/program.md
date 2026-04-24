@@ -834,6 +834,21 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `5bf5f85`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 78: Implicit-tag compact futex record (2026-04-25) — REVERTED
+- **Hypothesis**: Futex is the dominant syscall in stress-bench and currently
+  goes through the same 9-byte compact syscall shape with an explicit tag.
+  Dedicating an implicit 9-byte futex record removes the tag dispatch for
+  that specific event.
+- **Change**: BPF emits tagless 9-byte futex record; parser handles by
+  length dispatch. Other syscalls keep the existing path. (commits `8207eaf`,
+  `e3c6554`)
+- **Result (new methodology)**: 14.03s vs 15.35s master, CV 0.6%/0.3% —
+  **-8.60% vs master** at master=15.35s. Interpolated neutral between medium
+  HWM (-8.98% at 13.70s) and slow HWM (-9.03% at 16.17s) is ≈ -9.01%.
+  Iter 78 at -8.60% is 0.41pp WORSE than neutral — regression within noise.
+- **Verdict**: REVERTED. Branch reset to `2e5193a`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
