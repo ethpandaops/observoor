@@ -1009,6 +1009,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `da57ce6`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 91: Widen parsed-batch totals u16→u32 (2026-04-25) — REVERTED
+- **Hypothesis**: `ParsedEventBatch` stats counters are `u16` but batches can
+  hold up to 16k events. Besides overflow risk, u16 ops on x86 may force
+  width conversions; native-width u32 would be simpler codegen.
+- **Change**: `event_totals`/`client_totals` widened to `[u32; N]`.
+  (commits `48b12e4`, `ea1b5c9`)
+- **Result (new methodology)**: 15.41s vs 16.93s master, CV 0.9%/0.3% —
+  **-8.98% vs master** at master=16.93s. Extrapolated slow neutral
+  ≈ -9.35%; iter 91 is 0.37pp worse. u16 ops on x86 are free; no codegen win.
+- **Verdict**: REVERTED. Branch reset to `49cd3ee`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
