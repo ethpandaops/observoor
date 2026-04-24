@@ -932,6 +932,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `18d19f7`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 85: Drop event tag from compact disk_io records (2026-04-25) — REVERTED
+- **Hypothesis**: Compact `disk_io` carries an explicit event tag byte even
+  though its 26-byte length uniquely identifies `EVENT_DISK_IO` among compact
+  records. Length-based dispatch saves the byte.
+- **Change**: Remove tag byte; parser identifies by length.
+  (commits `a003a85`, `3b47223`)
+- **Result (new methodology)**: 14.92s vs 16.38s master, CV 0.4%/0.2% —
+  **-8.91% vs master** at master=16.38s. Extrapolated slow-runner neutral
+  at 16.38s ≈ -9.12%; iter 85 is 0.21pp worse. Disk I/O is rare in
+  stress-bench so any savings are tiny.
+- **Verdict**: REVERTED. Branch reset to `106a309`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
