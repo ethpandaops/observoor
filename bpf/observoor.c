@@ -918,12 +918,14 @@ int BPF_KRETPROBE(kretprobe_udp_recvmsg, int ret)
     __u64 pid_tgid = bpf_get_current_pid_tgid();
     struct syscall_key key = { .pid_tgid = pid_tgid };
 
+    if (ret <= 0) {
+        bpf_map_delete_elem(&net_recv_udp_start, &key);
+        return 0;
+    }
+
     struct net_recv_val *val = bpf_map_lookup_elem(&net_recv_udp_start, &key);
     if (!val)
         return 0;
-
-    if (ret <= 0)
-        goto cleanup;
 
     if (!should_emit_event(EVENT_NET_RX))
         goto cleanup;

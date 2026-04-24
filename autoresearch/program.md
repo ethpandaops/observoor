@@ -863,6 +863,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `68f1a6c`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 80: Skip UDP recv metadata lookup on failed returns (2026-04-25)
+- **Hypothesis**: `stress-bench` calls non-blocking UDP `recvfrom` once per
+  iteration and it normally returns `EAGAIN`. The `udp_recvmsg` kretprobe
+  currently looks up saved socket metadata before checking `ret <= 0`, then
+  deletes the entry without emitting. Moving the failed-return check before
+  the lookup keeps cleanup exact while removing one BPF map lookup from this
+  hot no-event path.
+- **Change**: In `kretprobe_udp_recvmsg`, delete the saved start entry and
+  return immediately when `ret <= 0`, before reading `net_recv_udp_start`.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: TBD
+- **Author**: codex
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
