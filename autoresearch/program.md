@@ -849,6 +849,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `2e5193a`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 79: Drop 8-byte page-fault marker fallback (2026-04-25) — REVERTED
+- **Hypothesis**: Now that iter 73 emits 6-byte page-fault records, the
+  compact basic-marker parser still carries a dead 8-byte page-fault arm
+  that runs for every FD/TCP-state marker parse.
+- **Change**: Remove the 8-byte page-fault marker arm from the compact
+  basic-marker parser; fixture updated to current shape. (commits `d05dff1`,
+  `68a49e0`)
+- **Result (new methodology)**: 14.84s vs 16.31s master, CV 0.2%/0.4% —
+  **-9.01% vs master** at master=16.31s. Extrapolating slow HWM (-9.03% at
+  16.17s) to master=16.31s predicts neutral ≈ -9.09%. Iter 79 at -9.01% is
+  0.08pp WORSE than neutral — essentially tied.
+- **Verdict**: REVERTED. Branch reset to `68f1a6c`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
