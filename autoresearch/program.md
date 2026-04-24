@@ -750,6 +750,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `b926768`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 72: Raw pid_tgid BPF map keys (2026-04-24) — REVERTED
+- **Hypothesis**: `syscall_start`/socket maps use `struct { pid_tgid }` keys.
+  Using raw `__u64 pid_tgid` directly as the key removes the wrapper.
+- **Change**: Maps now key on `__u64`; all lookups/inserts/deletes use
+  `pid_tgid` directly. (commits `e8f1634`, `35a9b85`)
+- **Result (new methodology)**: 13.93s vs 15.21s master, CV 0.9%/1.2% —
+  **-8.42% vs master** at master=15.21s. Interpolation of slow/medium HWMs
+  (-7.82% at 13.30s, -9.03% at 16.17s) predicts neutral ≈ -8.63% at 15.21s.
+  Actual is 0.21pp worse than neutral — within noise.
+- **Verdict**: REVERTED. Branch reset to `cdaeed0`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
