@@ -648,6 +648,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `5d289dd`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 64: Recycle dropped sink event batches (2026-04-24) — REVERTED
+- **Hypothesis**: When the aggregated sink channel is full, the 16k-event
+  batch Vec is dropped instead of returning to the batch pool. Recycling
+  avoids reallocation churn when backpressure happens.
+- **Change**: Call `events.recycle()` on the dropped batch in the try_send
+  Err path. (commits `91d9514`, `3bba2d4`)
+- **Result (new methodology)**: 15.38s vs 16.65s master, CV 1.0%/0.9% —
+  **-7.63% vs master** (slow runner). Slow-runner HWM -7.82%, so 0.19pp
+  regression within noise. In stress-bench the sink keeps up so the
+  try_send Err path is rarely hit — change is effectively a no-op.
+- **Verdict**: REVERTED. Branch reset to `ff26b23`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
