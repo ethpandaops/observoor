@@ -609,6 +609,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `36e0d0b`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 61: Gate inactive BPF sampling lookup (2026-04-24) — REVERTED
+- **Hypothesis**: `event_sampling` map lookup runs on every event even when
+  no per-event-type sampling is configured. Short-circuiting via a
+  `sampling_enabled` global (set at startup) skips the map lookup on the
+  common case.
+- **Change**: Add `sampling_enabled` global + gate in BPF; set via
+  `EbpfLoader::set_global` based on resolved sampling config.
+  (commits `b3fd8e5`, `0d02fe5`)
+- **Result (new methodology)**: 12.71s vs 13.71s master, CV 0.6%/0.5% —
+  **-7.29% vs master** on medium runner (master ~13.7s). Medium-runner HWM
+  is -7.82% (iter 46 sanity, master 13.30s), so 0.53pp regression.
+- **Verdict**: REVERTED. Branch reset to `c42daeb`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
