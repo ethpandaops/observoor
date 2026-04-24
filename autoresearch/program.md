@@ -770,10 +770,14 @@ Key cost centers (from Criterion benchmarks):
   semantics.
 - **Change**: Emit 6-byte page-fault records (`pid + client_type + major`) and
   parse the previous 7-byte shape as a legacy fallback.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 9.11s vs 10.40s master, CV 3.5%/0.5% (head had
+  one outlier at 9.88s among [9.04, 9.05, 9.11, 9.13, 9.88]) — **-12.40% vs
+  master** on fast runner. Fast-runner HWM -11.13% → 1.27pp better (just above
+  noise floor). head/master ratio 0.876 vs HWM's 0.889 is a consistent
+  improvement across fast runners.
+- **Verdict**: KEPT. New fast-runner HWM: -12.40%.
 - **Commit**: 32bce1f
-- **Author**: gpt-5 / medium reasoning
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -788,7 +792,7 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 (master ~13s). So cross-iteration comparisons need a runner-class disclaimer
 until we get multi-runner medians.
 
-**High-water mark: -11.13%** vs master (iter 57, commit `831accc`, fast runner).
+**High-water mark: -12.40%** vs master (iter 73, commit `32bce1f`, fast runner).
 **Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
 **47 kept iterations.**
 
