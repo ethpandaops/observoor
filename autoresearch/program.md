@@ -583,6 +583,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `3dd986d`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 59: Primary-only parsed events fast path in batch stats (2026-04-24) — REVERTED
+- **Hypothesis**: Only scheduler events emit a secondary accounting event;
+  every non-scheduler parser call still pays for the combined/primary+secondary
+  shape. Primary-only path skips the secondary bookkeeping.
+- **Change**: Parser signals primary-only variant; tracer batch stats fast-
+  paths it. (commits `9b44d25`, `a98f65d`)
+- **Result (new methodology)**: 14.90s vs 15.91s master, CV 0.4%/0.4% —
+  **-6.35% vs master** (slow runner). Slow-runner HWM -7.82%, so 1.47pp
+  regression.
+- **Verdict**: REVERTED. Branch reset to `47ef5a1`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
