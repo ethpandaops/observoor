@@ -685,6 +685,16 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `8821a76`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 67: Inline hot scheduler-wait aggregate (2026-04-24) — REVERTED
+- **Hypothesis**: Same dominant-dimension-inline pattern as iter 57 (page_fault),
+  applied to `sched_wait` aggregation.
+- **Change**: `HotBasicSchedWaitMap` + wiring. (commits `2272a6c`, `eff6637`)
+- **Result (new methodology)**: 15.22s vs 16.31s master, CV 0.8%/0.3% —
+  **-6.68% vs master** (slow runner). HWM -7.82%, so 1.14pp regression.
+- **Verdict**: REVERTED. Branch reset to `ca27702`. Scheduler events are not
+  the hot path in stress-bench (syscalls dominate).
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
