@@ -821,6 +821,19 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: d787318
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 77: Cold-branch legacy header parsing (2026-04-25) — REVERTED
+- **Hypothesis**: Legacy-header-path parse lives inline in the hot dispatch.
+  Marking it `#[cold] #[inline(never)]` keeps compact-event dispatch tight in
+  the I-cache and lets the compiler pack the hot path better.
+- **Change**: `parse_legacy_header_event_with_sink` helper split out with
+  `#[cold] #[inline(never)]`. (commits `400c4a5`, `8b3a937`)
+- **Result (new methodology)**: 15.25s vs 16.90s master, CV 0.4%/0.9% —
+  **-9.76% vs master** on slow runner (master=16.90s). Extrapolating slow
+  HWM slope (iter 69 -9.03% at 16.17s), expected neutral ≈ -9.34%. Iter 77
+  at -9.76% is 0.42pp better than extrapolated neutral — within noise.
+- **Verdict**: REVERTED. Branch reset to `5bf5f85`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
