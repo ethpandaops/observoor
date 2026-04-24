@@ -1045,6 +1045,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `6369833`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 94: Drop voluntary/preempted flag + pack CPU id in hdr.pad (2026-04-25) — REVERTED
+- **Hypothesis**: Scheduler events carry an unused voluntary/preempted flag.
+  Removing it + packing CPU id in `hdr.pad[0..4]` instead of separate field
+  frees bytes on the hot scheduler path.
+- **Change**: BPF no longer writes the flag; parser reads CPU id from
+  `hdr.pad[0..4]`. (commits `37e2463`, `6e4ffba`)
+- **Result (new methodology)**: 15.02s vs 16.43s master, CV 0.4%/0.8% —
+  **-8.58% vs master** at master=16.43s. Extrapolated slow neutral
+  ≈ -9.14%; iter 94 is 0.56pp worse.
+- **Verdict**: REVERTED. Branch reset to `04ae620`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
