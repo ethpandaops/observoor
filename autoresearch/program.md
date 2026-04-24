@@ -710,6 +710,18 @@ Key cost centers (from Criterion benchmarks):
   a tiny real win but not detectable above this noise.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 69: Shrink page-fault markers 8→7 bytes (2026-04-24)
+- **Hypothesis**: `EVENT_PAGE_FAULT` is hot in stress-bench's mmap loop and
+  currently shares the generic 8-byte compact marker shape, including one pad
+  byte the parser never reads. Emitting a dedicated 7-byte page-fault record
+  should shave ring-buffer bandwidth and remove the BPF pad write while keeping
+  the legacy 8-byte marker parser as a fallback.
+- **Change**: Dedicated 7-byte compact page-fault record in BPF and parser.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: f29a9ba
+- **Author**: gpt-5 / medium reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
