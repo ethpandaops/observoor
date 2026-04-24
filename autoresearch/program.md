@@ -516,6 +516,20 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: 8ef28eb
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 54: Split tcp_state off cold map into own inline-hot map (2026-04-24) — REVERTED
+- **Hypothesis**: `tcp_state_change` writes into the larger `basic_cold_metrics`
+  map; moving it to a dedicated count-only map avoids disturbing the cold
+  aggregate's layout on every TCP state event.
+- **Change**: New `tcp_state_metrics` DashMap + collector wiring in
+  buffer/aggregate/collector. (commits `a0b0ce3`, `e04990d`)
+- **Result (new methodology)**: 14.94s vs 16.16s master, CV 0.6%/0.5% —
+  **-7.55% vs master** (slow runner). Slow-runner iter 46 HWM is -7.82%, so
+  0.27pp regression in same class; globally below HWM -9.93%.
+- **Verdict**: REVERTED. Branch reset to `ed90e5c`. tcp_state events are not
+  hot in stress-bench, so the change is effectively neutral and the code
+  complexity isn't justified.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
