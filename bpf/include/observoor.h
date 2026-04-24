@@ -136,13 +136,11 @@ struct sched_switch_runqueue_event {
     __u32 next_tid;
 };
 
-// Page fault event (7-byte populated prefix).
-// Aggregation only needs pid + client + event tag + major/minor, so keep this
-// hot event in a compact marker-style record instead of carrying the full
-// generic header.
+// Page fault event (6-byte populated prefix).
+// Aggregation only needs pid + client + major/minor. The compact record length
+// identifies the event type, so this hot path does not carry a redundant tag.
 struct page_fault_event {
     __u32 pid;
-    __u8  event_type;
     __u8  client_type;
     __u8  major;
 } __attribute__((packed));

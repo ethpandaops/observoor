@@ -41,6 +41,14 @@ struct RawCompactBasicMarkerEvent {
 #[derive(Clone, Copy)]
 struct RawCompactPageFaultEvent {
     pid: u32,
+    client_type: u8,
+    major: u8,
+}
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+struct RawLegacyCompactPageFaultEvent {
+    pid: u32,
     event_type: u8,
     client_type: u8,
     major: u8,
@@ -186,6 +194,7 @@ struct RawSwapPayload {
 const HEADER_SIZE: usize = size_of::<RawEventHeader>();
 const COMPACT_BASIC_MARKER_EVENT_SIZE: usize = size_of::<RawCompactBasicMarkerEvent>();
 const COMPACT_PAGE_FAULT_EVENT_SIZE: usize = size_of::<RawCompactPageFaultEvent>();
+const LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE: usize = size_of::<RawLegacyCompactPageFaultEvent>();
 const COMPACT_SYSCALL_EVENT_SIZE: usize = size_of::<RawCompactSyscallEvent>();
 const COMPACT_NET_IO_EVENT_SIZE: usize = size_of::<RawCompactNetIOEvent>();
 const COMPACT_NET_IO_METRICS_EVENT_SIZE: usize = size_of::<RawCompactNetIOMetricsEvent>();
@@ -194,7 +203,8 @@ const COMPACT_BLOCK_MERGE_EVENT_SIZE: usize = size_of::<RawCompactBlockMergeEven
 const SCHED_COMBINED_PAYLOAD_SIZE: usize = 32;
 const _: () = assert!(size_of::<RawSchedCombinedPayload>() == SCHED_COMBINED_PAYLOAD_SIZE);
 const _: () = assert!(COMPACT_BASIC_MARKER_EVENT_SIZE == 8);
-const _: () = assert!(COMPACT_PAGE_FAULT_EVENT_SIZE == 7);
+const _: () = assert!(COMPACT_PAGE_FAULT_EVENT_SIZE == 6);
+const _: () = assert!(LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE == 7);
 const _: () = assert!(COMPACT_SYSCALL_EVENT_SIZE == 10);
 const _: () = assert!(COMPACT_NET_IO_EVENT_SIZE == 15);
 const _: () = assert!(COMPACT_NET_IO_METRICS_EVENT_SIZE == 22);
@@ -311,6 +321,9 @@ fn parse_event_with_sink<S: ParsedEventSink>(
 ) -> Result<S::Output, ParseError> {
     if data.len() == COMPACT_PAGE_FAULT_EVENT_SIZE {
         return parse_compact_page_fault_event(data, sink);
+    }
+    if data.len() == LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE {
+        return parse_legacy_compact_page_fault_event(data, sink);
     }
     if data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE {
         return parse_compact_basic_marker_event(data, sink);
@@ -597,6 +610,38 @@ fn parse_compact_page_fault_event<S: ParsedEventSink>(
     debug_assert_eq!(data.len(), COMPACT_PAGE_FAULT_EVENT_SIZE);
     // Safety: caller only enters this path when `data.len() == COMPACT_PAGE_FAULT_EVENT_SIZE`.
     let raw = unsafe { read_unaligned_struct::<RawCompactPageFaultEvent>(data) };
+    let client_type_raw = raw.client_type;
+
+    if client_type_raw > MAX_CLIENT_TYPE as u8 {
+        return Err(unknown_client_type(client_type_raw));
+    }
+
+    Ok(sink.emit(
+        Event::new_validated(
+            0,
+            u32::from_le(raw.pid),
+            0,
+            EventType::PageFault,
+            client_type_raw,
+        ),
+        TypedEvent::PageFault(PageFaultEvent {
+            major: raw.major != 0,
+        }),
+        EventType::PageFault as u8,
+        client_type_raw,
+        0,
+        0,
+    ))
+}
+
+#[inline(always)]
+fn parse_legacy_compact_page_fault_event<S: ParsedEventSink>(
+    data: &[u8],
+    sink: &mut S,
+) -> Result<S::Output, ParseError> {
+    debug_assert_eq!(data.len(), LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE);
+    // Safety: caller only enters this path when `data.len() == LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE`.
+    let raw = unsafe { read_unaligned_struct::<RawLegacyCompactPageFaultEvent>(data) };
     let client_type_raw = raw.client_type;
 
     if client_type_raw > MAX_CLIENT_TYPE as u8 {
@@ -1648,7 +1693,6 @@ mod tests {
     fn test_page_fault_major() {
         let mut data = Vec::with_capacity(COMPACT_PAGE_FAULT_EVENT_SIZE);
         data.extend_from_slice(&107u32.to_le_bytes());
-        data.push(10); // PageFault
         data.push(2); // Reth
         data.push(1); // major
 
@@ -1665,7 +1709,6 @@ mod tests {
     fn test_page_fault_minor() {
         let mut data = Vec::with_capacity(COMPACT_PAGE_FAULT_EVENT_SIZE);
         data.extend_from_slice(&107u32.to_le_bytes());
-        data.push(10); // PageFault
         data.push(2); // Reth
         data.push(0); // minor
 
@@ -1674,6 +1717,23 @@ mod tests {
             panic!("expected PageFault");
         };
         assert!(!e.major);
+    }
+
+    #[test]
+    fn test_page_fault_previous_compact_shape_still_parses() {
+        let mut data = Vec::with_capacity(LEGACY_COMPACT_PAGE_FAULT_EVENT_SIZE);
+        data.extend_from_slice(&107u32.to_le_bytes());
+        data.push(10); // PageFault
+        data.push(2); // Reth
+        data.push(1); // major
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::PageFault(e) = &parsed.typed else {
+            panic!("expected PageFault");
+        };
+        assert!(e.major);
+        assert_eq!(parsed.raw.pid(), 107);
+        assert_eq!(parsed.raw.tid, 0);
     }
 
     #[test]

@@ -1193,7 +1193,6 @@ int BPF_KRETPROBE(kretprobe_handle_mm_fault, unsigned long ret)
         return 0;
 
     e->pid = pid;
-    e->event_type = EVENT_PAGE_FAULT;
     e->client_type = ct;
     e->major = (ret & 0x04) ? 1 : 0;
 
