@@ -982,6 +982,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `fe0de12`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 89: Reuse pid in BPF compact network emitters (2026-04-25) — REVERTED
+- **Hypothesis**: `emit_compact_net_io_event` calls `bpf_get_current_pid_tgid()`
+  to get the pid even though kretprobes already computed `pid_tgid`. Threading
+  the pid through avoids a second helper call on net events.
+- **Change**: `emit_compact_net_io_event(pid, ...)` signature; callers pass
+  known pid. (commits `d07d3fd`, `6c3632b`)
+- **Result (abnormal runner, wall 135-164s, CV 1.6%/0.9%)**: 11.19s vs 12.75s
+  master → -12.24% at master=12.75s. Interpolated neutral ≈ -10.48%.
+  Apparent +1.76pp above neutral, BUT same abnormal-runner pattern as iter 81
+  (wall ~5x normal, inflated deltas that didn't replicate). Reverting out of
+  caution — need a clean runner measurement to trust the magnitude.
+- **Verdict**: REVERTED. Branch reset to `27a90f5`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
