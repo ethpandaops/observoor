@@ -633,6 +633,21 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `3b18b2d`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 63: Direct-load compact syscall parser (2026-04-24) — REVERTED
+- **Hypothesis**: Compact syscall parser currently copies the packed
+  `RawCompactSyscallEvent` via unaligned read, then re-extracts fields.
+  Direct-loading the three fields from the byte slice avoids the copy.
+- **Change**: Inline u32/u8 decodes from `data[..]` in parse.rs. (commits
+  `cba2ce0`, `b42d117`)
+- **Result (new methodology)**: 10.95s vs 12.02s master, CV 0.6%/1.3% —
+  **-8.90% vs master** on master=12.02s runner (unusual wall time 98s vs
+  normal ~35s, base CV 1.3% higher than usual → less trustworthy). Linear
+  interpolation of known HWMs predicts neutral ≈ -9.09% at this master time,
+  so -8.90% is 0.19pp WORSE than expected neutral — tiny regression within
+  noise, does not beat HWM.
+- **Verdict**: REVERTED. Branch reset to `5d289dd`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
