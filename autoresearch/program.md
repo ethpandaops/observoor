@@ -474,6 +474,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `4c9d784`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 51: Portless net I/O when no port labels (2026-04-24) — REVERTED
+- **Hypothesis**: When startup finds no active port-label map, BPF still emits
+  15-byte net I/O records carrying ports/transport that the sink will never
+  resolve. Emitting a 10-byte byte-only variant cuts ring-buffer bandwidth.
+- **Change**: New 10-byte `NetIOTxBytes`/`NetIORxBytes` compact variants +
+  BPF/parser plumbing; legacy 15-byte path retained. (commits `a171f15`,
+  `3738c81`)
+- **Result (new methodology)**: 14.94s vs 16.13s master, CV 0.3%/0.4% —
+  **-7.38% vs master**. High-water mark is -7.82%, so this is a ~0.44pp
+  regression. Within plausible between-runner noise, but doesn't beat HWM.
+- **Verdict**: REVERTED. Branch reset to `df8f14c`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
