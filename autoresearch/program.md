@@ -543,6 +543,19 @@ Key cost centers (from Criterion benchmarks):
   likely swamped by noise since syscall exits already do map lookup+delete.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 56: Trust BPF client types in batch parser (2026-04-24) — REVERTED
+- **Hypothesis**: `parse_event_into_batch` re-validates every event's
+  `client_type` byte even though BPF only emits values we already control.
+  Specializing a trusted-BPF variant compiles those bounds checks out of the
+  hot path while keeping the public `parse_event` fully validated.
+- **Change**: Const-generic `TRUSTED_BPF_CLIENT_TYPES` branch + batch-parser
+  wiring. (commits `7a4c926`, `680de37`)
+- **Result (new methodology)**: 15.29s vs 16.44s master, CV 0.6%/0.2% —
+  **-7.00% vs master** (slow runner). Slow-runner HWM -7.82%, so 0.82pp
+  regression. Globally below HWM -9.93%.
+- **Verdict**: REVERTED. Branch reset to `040c2b4`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
