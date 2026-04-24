@@ -813,10 +813,13 @@ Key cost centers (from Criterion benchmarks):
   parse. Removing it should shave a predictable parser branch from the dominant
   non-page-fault event stream.
 - **Change**: Remove the obsolete 7-byte compact page-fault parser fallback.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 12.47s vs 13.70s master, CV 0.5%/0.5% —
+  **-8.98% vs master** on medium runner (master ~13.7s). Medium-runner iter 46
+  HWM was -7.82% at master=13.30s; iter 76 is 1.16pp better. Also 1.69pp
+  better than iter 61's -7.29% at master=13.71s. Above noise floor.
+- **Verdict**: KEPT. New medium-runner HWM: -8.98%.
 - **Commit**: d787318
-- **Author**: Codex / gpt-5
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -832,6 +835,7 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 until we get multi-runner medians.
 
 **High-water mark: -12.40%** vs master (iter 73, commit `32bce1f`, fast runner).
+**Medium-runner HWM: -8.98%** (iter 76, commit `d787318`, master=13.70s).
 **Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
 **47 kept iterations.**
 
