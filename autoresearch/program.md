@@ -595,6 +595,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `47ef5a1`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 60: Split page-fault Major/Minor typed variants (2026-04-24) — REVERTED
+- **Hypothesis**: Page-fault events carry a `major` bool and the aggregate
+  branches on it inside the hot path. Splitting into `PageFaultMajor` and
+  `PageFaultMinor` typed variants lets the sink dispatch directly into the
+  specific counter without the per-event branch.
+- **Change**: Parser emits split variants; sink wires `add_page_fault_major`
+  /`add_page_fault_minor`. (commits `095cc18`, `dce32fa`)
+- **Result (new methodology)**: 12.29s vs 13.32s master, CV 0.6%/0.7% —
+  **-7.73% vs master** on master=13.32s runner. iter 46 sanity check on
+  master=13.30s was -7.82%, so this is essentially tied (-0.09pp, well within
+  noise). Strict rule: does not beat HWM.
+- **Verdict**: REVERTED. Branch reset to `36e0d0b`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
