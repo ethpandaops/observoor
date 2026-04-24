@@ -556,6 +556,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `040c2b4`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 57: Inline first page-fault aggregate (2026-04-24)
+- **Hypothesis**: Stress-bench's mmap path emits page-fault events repeatedly
+  for the same pid/client. `page_fault_metrics` still pays a hash/probe for
+  each event, unlike the hot syscall and FD maps. Keeping the first
+  `BasicDimension -> PageFaultAggregate` entry inline should remove that
+  overhead for the dominant single-process workload while preserving exact
+  aggregation via a spill map for additional dimensions.
+- **Change**: Add `HotBasicPageFaultMap` and use it for page-fault counters.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 831accc
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
