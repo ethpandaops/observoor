@@ -919,6 +919,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `b37c51f`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 84: Compact UDP start-map value 8→5 bytes (2026-04-25) — REVERTED
+- **Hypothesis**: UDP start-map value has 3 bytes of padding the BPF return
+  probe never uses. A dedicated `udp_io_val` struct + emitting
+  `NET_TRANSPORT_UDP` directly in the return probe shrinks the stored record.
+- **Change**: New `udp_io_val`, UDP probes emit transport directly. (commits
+  `2d5a6a5`, `6ed8a3a`)
+- **Result (new methodology)**: 8.88s vs 10.13s master, CV 0.3%/0.1% —
+  **-12.34% vs master** on fast runner. Fast HWM (iter 73) -12.40% at
+  master=10.40s; head/master ratios 0.877 (iter 84) vs 0.876 (HWM) are
+  essentially identical. Tied with HWM.
+- **Verdict**: REVERTED. Branch reset to `18d19f7`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
