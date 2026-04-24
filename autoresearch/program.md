@@ -500,6 +500,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `003f6e1`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 53: Compact tcp_state events 24→8 bytes (2026-04-24)
+- **Hypothesis**: `EVENT_TCP_STATE` only increments a per-pid/client counter in
+  the aggregated sink, so timestamp and tid from the generic 24-byte header are
+  unused. Reusing the existing compact BasicDimension marker shape should cut
+  ring-buffer bandwidth and parser work for TCP state transitions without
+  changing aggregation semantics.
+- **Change**: Emit `tcp_state` as an 8-byte compact marker and parse it through
+  the existing compact basic-marker path.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 8ef28eb
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
