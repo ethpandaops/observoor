@@ -791,6 +791,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `0abbea5`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 75: Pack major into client byte in page-fault records (2026-04-25) — REVERTED
+- **Hypothesis**: 6-byte compact page-fault record still uses a dedicated
+  byte for `major`. Packing it into the high bit of the client byte shrinks
+  records 6→5 bytes, cutting ring-buffer bandwidth further on mmap-heavy
+  workloads.
+- **Change**: BPF emitter packs `major << 7 | client_type`; parser unpacks.
+  6-byte and 7-byte legacy paths retained. (commits `547eccc`, `13c218a`)
+- **Result (new methodology)**: 15.11s vs 16.67s master, CV 0.5%/0.6% —
+  **-9.36% vs master** on slow runner. Extrapolating slow HWM (-9.03% at
+  16.17s) to master=16.67s predicts neutral ≈ -9.24%; iter 75 at -9.36%
+  is only 0.12pp better — well within noise.
+- **Verdict**: REVERTED. Branch reset to `fb8a259`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
