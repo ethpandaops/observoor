@@ -185,10 +185,14 @@ struct tcp_retransmit_event {
     __u8  pad[8];
 };
 
-// TCP state change event (24 bytes total).
-// The aggregated pipeline only counts transitions, so this stays header-only.
+// TCP state change event (8 bytes total).
+// The aggregated pipeline only counts transitions by pid/client, so this uses
+// the same compact marker shape as FD events.
 struct tcp_state_event {
-    struct event_header hdr;
+    __u32 pid;
+    __u8  event_type;
+    __u8  client_type;
+    __u8  pad[2];
 };
 
 // Memory reclaim/compaction event (32 bytes total).

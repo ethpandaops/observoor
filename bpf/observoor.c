@@ -996,12 +996,10 @@ int BPF_KPROBE(kprobe_tcp_set_state, struct sock *sk, int state)
     if (!e)
         return 0;
 
-    e->hdr.timestamp_ns = bpf_ktime_get_ns();
-    e->hdr.pid = sval->pid;
-    e->hdr.tid = sval->tid;
-    e->hdr.event_type = EVENT_TCP_STATE;
-    e->hdr.client_type = sval->client_type;
-    __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
+    e->pid = sval->pid;
+    e->event_type = EVENT_TCP_STATE;
+    e->client_type = sval->client_type;
+    __builtin_memset(e->pad, 0, sizeof(e->pad));
 
     bpf_ringbuf_submit(e, 0);
 

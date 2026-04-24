@@ -559,6 +559,7 @@ fn parse_compact_basic_marker_event<S: ParsedEventSink>(
         ),
         11 => (EventType::FDOpen, TypedEvent::FDOpen),
         12 => (EventType::FDClose, TypedEvent::FDClose),
+        19 => (EventType::TcpState, TypedEvent::TcpState),
         _ => {
             return Err(ParseError::Truncated { size: data.len() });
         }
@@ -1721,6 +1722,23 @@ mod tests {
         let TypedEvent::TcpState = &parsed.typed else {
             panic!("expected TcpState");
         };
+    }
+
+    #[test]
+    fn test_compact_tcp_state() {
+        let mut data = Vec::with_capacity(COMPACT_BASIC_MARKER_EVENT_SIZE);
+        data.extend_from_slice(&112u32.to_le_bytes());
+        data.push(19); // TcpState
+        data.push(7); // Lighthouse
+        data.extend_from_slice(&[0u8; 2]);
+
+        let parsed = parse_event(&data).unwrap();
+        let TypedEvent::TcpState = &parsed.typed else {
+            panic!("expected TcpState");
+        };
+        assert_eq!(parsed.raw.pid(), 112);
+        assert_eq!(parsed.raw.tid, 0);
+        assert_eq!(parsed.raw.timestamp_ns, 0);
     }
 
     // -- Memory latency --
