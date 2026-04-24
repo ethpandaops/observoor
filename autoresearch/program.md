@@ -1057,6 +1057,17 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `04ae620`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 95: Inline hot disk I/O aggregate (2026-04-25) — REVERTED
+- **Hypothesis**: Same dominant-dimension-inline pattern (iter 57/80) applied
+  to `disk_io_read`/`disk_io_write` maps.
+- **Change**: New `HotDiskAggregateMap`, wire through collector + tests.
+  (commits `ec2ed3c`, `41f59a1`)
+- **Result (new methodology)**: 12.29s vs 13.58s master, CV 0.2%/0.3% —
+  **-9.50% vs master** at master=13.58s. Medium HWM -9.73% → 0.23pp worse.
+  Disk I/O is rare in stress-bench so the inline path rarely helps.
+- **Verdict**: REVERTED. Branch reset to `5045bf9`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
