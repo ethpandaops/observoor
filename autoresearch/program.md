@@ -805,6 +805,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `fb8a259`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 76: Drop 7-byte page-fault parser fallback (2026-04-25)
+- **Hypothesis**: Current BPF emits 6-byte page-fault records, while the older
+  8-byte compact marker path still handles marker-style compatibility. The
+  intermediate 7-byte fallback from iter 73 is dead on the benchmark hot path,
+  but its length check still runs before every syscall/FD/network/disk compact
+  parse. Removing it should shave a predictable parser branch from the dominant
+  non-page-fault event stream.
+- **Change**: Remove the obsolete 7-byte compact page-fault parser fallback.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: d787318
+- **Author**: Codex / gpt-5
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
