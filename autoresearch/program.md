@@ -487,6 +487,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `df8f14c`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 52: Fold hot BasicDimension events in parsed batches (2026-04-24) — REVERTED
+- **Hypothesis**: Parser can pre-fold repeated syscall/FD/page-fault events for
+  a dominant pid/client inside `ParsedEventBatch`; the sink merges the single
+  fold into buffer maps instead of doing per-event `entry().or_default()`.
+- **Change**: New `basic_fold` on `ParsedEventBatch`, parser writes to it for
+  matching events, sink consumes. (commits `4203c6e`, `1dbcd1a`)
+- **Result (new methodology)**: 15.10s vs 16.06s master, CV 0.8%/0.6% —
+  **-5.98% vs master**, 1.84pp worse than HWM -7.82%. Clear regression — the
+  extra per-event fold work plus dominant-pid bookkeeping cost more than the
+  saved map lookups for this workload.
+- **Verdict**: REVERTED. Branch reset to `003f6e1`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
