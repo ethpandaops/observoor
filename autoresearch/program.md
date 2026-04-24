@@ -695,6 +695,21 @@ Key cost centers (from Criterion benchmarks):
   the hot path in stress-bench (syscalls dominate).
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 68: Pack compact syscall tags 10→9 bytes (2026-04-24) — REVERTED
+- **Hypothesis**: Compact syscall records carry event kind and client type
+  as separate bytes. Packing both into a single byte (4 bits each) shrinks
+  the record 10→9 bytes.
+- **Change**: Packed tag byte in BPF emitter + parser decode. (commits
+  `f7a5367`, `cfec023`)
+- **Result (new methodology, workflow_dispatch as synchronize didn't
+  trigger after force-push sequence)**: 15.31s vs 16.68s master, CV
+  0.7%/3.2% (base had a 17.92s outlier) — **-8.21% vs master** on slow
+  runner. HWM -7.82%, so 0.39pp improvement, within 1-2pp noise floor
+  given the elevated base CV.
+- **Verdict**: REVERTED. Branch reset to `83f3c55`. Change is probably
+  a tiny real win but not detectable above this noise.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
