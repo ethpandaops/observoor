@@ -906,6 +906,19 @@ Key cost centers (from Criterion benchmarks):
   and iter 82).
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 83: Compact 14-byte UDP net I/O records (2026-04-25) — REVERTED
+- **Hypothesis**: UDP sendto successes emit the same 15-byte compact net I/O
+  record as TCP, carrying a 1-byte transport tag. Dedicated 14-byte record
+  with implicit UDP transport shrinks ring-buffer bandwidth.
+- **Change**: New `COMPACT_NET_IO_UDP_EVENT_SIZE` path in BPF + parser;
+  legacy/TCP 15-byte path retained. (commit `8bc9dc6`)
+- **Result (new methodology)**: 14.76s vs 16.19s master, CV 0.1%/0.7% —
+  **-8.83% vs master** at master=16.19s (nearly same runner class as slow
+  HWM's 16.17s). Slow HWM -9.03% → 0.20pp worse. Stress-bench only does
+  ~2 UDP sends per iter, so the savings per batch are tiny.
+- **Verdict**: REVERTED. Branch reset to `b37c51f`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
