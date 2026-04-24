@@ -433,9 +433,11 @@ Key cost centers (from Criterion benchmarks):
   compact shape already used for net/disk events.
 - **Change**: New `COMPACT_BLOCK_MERGE` path in BPF + parser; legacy header
   variant retained as a fallback.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result**: 9.01s vs 10.14s baseline = **-11.14% improvement** (median of 3:
+  [9.02, 9.01, 8.95])
+- **Verdict**: KEPT
 - **Commit**: ea8e205
+- **Author**: gpt-5.5 / xhigh reasoning (first iteration from this model)
 
 ---
 
@@ -443,11 +445,11 @@ Key cost centers (from Criterion benchmarks):
 different CPU hardware, so the multiplicative cumulative is unreliable. The
 benchmark now always compares HEAD against master on the same runner.
 
-**Last measured total vs master (same runner): -4.09%**
+**Last measured total vs master (same runner): -11.14%** (iter 46, 2026-04-24)
 This is the real end-to-end number. Individual iterations showed real improvements
 but the absolute magnitude varies significantly by runner hardware.
 
-**43 kept iterations.**
+**44 kept iterations.**
 
 ## Rules
 
