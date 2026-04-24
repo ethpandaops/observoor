@@ -52,7 +52,6 @@ prost = { version = "0.12", optional = true }
 
 # Utilities
 futures = "0.3"
-dashmap = "6"
 hashbrown = "0.15"
 parking_lot = "0.12"
 arc-swap = "1"
@@ -60,6 +59,7 @@ chrono = { version = "0.4", features = ["serde"] }
 tokio-util = "0.7"
 libc = "0.2"
 sha2 = "0.10"
+smallvec = "1"
 
 [features]
 default = ["bpf", "profiling"]

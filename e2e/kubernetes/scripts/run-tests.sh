@@ -7,44 +7,11 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOCAL_PORT="${LOCAL_PORT:-8123}"
-METRICS_PORT="${METRICS_PORT:-19090}"
 MAX_RETRIES="${MAX_RETRIES:-12}"
 RETRY_DELAY="${RETRY_DELAY:-10}"
 
 query() {
     curl -sf "http://localhost:${LOCAL_PORT}" --data-binary "$1"
-}
-
-metrics() {
-    curl -sf "http://localhost:${METRICS_PORT}/metrics"
-}
-
-metric_value() {
-    local name="$1"
-    printf '%s\n' "$METRICS_RESPONSE" | awk -v name="$name" '$1 == name { print $2; exit }'
-}
-
-metric_value_gt_zero() {
-    local value="$1"
-    awk -v value="$value" 'BEGIN { exit !((value + 0) > 0) }'
-}
-
-retry_metric_positive() {
-    local name="$1"
-    local value=""
-
-    for i in $(seq 1 $MAX_RETRIES); do
-        METRICS_RESPONSE="$(metrics 2>/dev/null || true)"
-        value="$(metric_value "$name")"
-        if metric_value_gt_zero "$value"; then
-            printf '%s\n' "$value"
-            return 0
-        fi
-        echo "  Retry $i/$MAX_RETRIES: waiting for metric $name (got: ${value:-missing})"
-        sleep $RETRY_DELAY
-    done
-
-    return 1
 }
 
 retry_query() {
@@ -87,30 +54,19 @@ if [[ "$READY" != "True" ]]; then
 fi
 echo "   PASS: Observoor pod is healthy"
 
-# Set up port-forwarding for ClickHouse and observoor metrics.
+# Set up port-forwarding for ClickHouse.
 echo "3. Setting up ClickHouse connection..."
-OBSERVOOR_POD=$(kubectl -n observoor-test get pods -l app.kubernetes.io/name=observoor \
-    -o jsonpath='{.items[0].metadata.name}')
 kubectl -n observoor-test port-forward svc/clickhouse "$LOCAL_PORT:8123" &
-CLICKHOUSE_PORT_FORWARD_PID=$!
-kubectl -n observoor-test port-forward "pod/${OBSERVOOR_POD}" "$METRICS_PORT:9090" &
-METRICS_PORT_FORWARD_PID=$!
+PORT_FORWARD_PID=$!
 cleanup() {
-    kill "$CLICKHOUSE_PORT_FORWARD_PID" "$METRICS_PORT_FORWARD_PID" 2>/dev/null || true
-    wait "$CLICKHOUSE_PORT_FORWARD_PID" "$METRICS_PORT_FORWARD_PID" 2>/dev/null || true
+    kill "$PORT_FORWARD_PID" 2>/dev/null || true
+    wait "$PORT_FORWARD_PID" 2>/dev/null || true
 }
 trap cleanup EXIT
 
 # Wait for port-forward.
 for i in $(seq 1 30); do
     if curl -sf "http://localhost:${LOCAL_PORT}/ping" > /dev/null 2>&1; then
-        break
-    fi
-    sleep 1
-done
-
-for i in $(seq 1 30); do
-    if curl -sf "http://localhost:${METRICS_PORT}/metrics" > /dev/null 2>&1; then
         break
     fi
     sleep 1
@@ -126,21 +82,27 @@ if [[ "$TABLE_COUNT" -lt 10 ]]; then
 fi
 echo "   PASS: Migrations completed ($TABLE_COUNT tables created)"
 
-# Check that PID discovery populated tracked processes.
+# Check that PID discovery is working by looking at logs.
 echo "5. Checking PID discovery..."
-if ! PIDS_TRACKED=$(retry_metric_positive "observoor_pids_tracked"); then
-    echo "FAIL: observoor_pids_tracked not positive"
+PID_DISCOVERED=$(kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=500 2>/dev/null | \
+    grep -c "Discovered PIDs" || echo "0")
+if [[ "$PID_DISCOVERED" -lt 1 ]]; then
+    echo "FAIL: No PID discovery logs found"
+    kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=50
     exit 1
 fi
-echo "   PASS: PID discovery working (${PIDS_TRACKED} tracked PIDs)"
+echo "   PASS: PID discovery working ($PID_DISCOVERED discovery cycles)"
 
-# Check that thread discovery is active.
-echo "6. Checking TID discovery..."
-if ! TID_DISCOVERY=$(retry_metric_positive "observoor_tid_discovery_count"); then
-    echo "FAIL: observoor_tid_discovery_count not positive"
+# Check that BPF map is being updated.
+echo "6. Checking BPF map updates..."
+BPF_UPDATES=$(kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=500 2>/dev/null | \
+    grep -c "Added PID to BPF map" || echo "0")
+if [[ "$BPF_UPDATES" -lt 1 ]]; then
+    echo "FAIL: Expected BPF map updates, got $BPF_UPDATES"
+    kubectl -n observoor-test logs -l app.kubernetes.io/name=observoor --tail=50
     exit 1
 fi
-echo "   PASS: TID discovery working (${TID_DISCOVERY} tracked TIDs)"
+echo "   PASS: BPF map being updated ($BPF_UPDATES updates)"
 
 # Verify actual eBPF data capture (K3s supports this, unlike KIND).
 echo ""
@@ -191,14 +153,13 @@ else
     exit 1
 fi
 
-# Check that intervals stay centered around the configured 100ms cadence.
-echo -n "11. Interval sanity... "
-MEDIAN_INTERVAL=$(query "SELECT toUInt16(round(quantileExact(0.5)(interval_ms))) FROM sched_on_cpu")
-MAX_INTERVAL=$(query "SELECT toUInt16(max(interval_ms)) FROM sched_on_cpu")
-if [[ -n "$MEDIAN_INTERVAL" && -n "$MAX_INTERVAL" && "$MEDIAN_INTERVAL" -ge 80 && "$MEDIAN_INTERVAL" -le 200 && "$MAX_INTERVAL" -gt 0 ]]; then
-    echo "PASS (median=${MEDIAN_INTERVAL}ms max=${MAX_INTERVAL}ms)"
+# Check that 100ms interval is being used.
+echo -n "11. 100ms interval... "
+INTERVALS=$(query "SELECT DISTINCT interval_ms FROM sched_on_cpu")
+if [[ "$INTERVALS" == "100" ]]; then
+    echo "PASS"
 else
-    echo "FAIL (median=${MEDIAN_INTERVAL} max=${MAX_INTERVAL})"
+    echo "FAIL (got: $INTERVALS)"
     exit 1
 fi
 

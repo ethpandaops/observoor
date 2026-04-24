@@ -1,4 +1,5 @@
 use std::fmt;
+use std::mem::size_of;
 
 /// EventType identifies the kind of eBPF event.
 /// Values must match `bpf/include/observoor.h`.
@@ -346,28 +347,199 @@ impl fmt::Display for NetTransport {
 #[allow(dead_code)]
 pub struct Event {
     pub timestamp_ns: u64,
-    pub pid: u32,
+    basic_dimension: u64,
     pub tid: u32,
+    scheduler_cpu_id_high: u8,
     pub event_type: EventType,
-    pub client_type: ClientType,
+    secondary_event_type: u8,
+    secondary_client_type: u8,
+}
+
+const _: () = assert!(size_of::<Event>() == 24);
+
+const BASIC_DIMENSION_MASK: u64 = (1u64 << 40) - 1;
+
+impl Event {
+    #[inline(always)]
+    pub fn new(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        Self::new_sanitized(
+            timestamp_ns,
+            pid,
+            tid,
+            event_type,
+            sanitize_client_type(client_type),
+        )
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
+            tid,
+            scheduler_cpu_id_high: 0,
+            event_type,
+            secondary_event_type: 0,
+            secondary_client_type: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated_with_secondary(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+    ) -> Self {
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+        debug_assert!(secondary_event_type <= MAX_EVENT_TYPE as u8);
+        debug_assert!(secondary_client_type <= MAX_CLIENT_TYPE as u8);
+
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
+            tid,
+            scheduler_cpu_id_high: 0,
+            event_type,
+            secondary_event_type,
+            secondary_client_type,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn new_validated_with_secondary_and_cpu(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+        secondary_event_type: u8,
+        secondary_client_type: u8,
+        scheduler_cpu_id: u32,
+    ) -> Self {
+        debug_assert!(client_type <= MAX_CLIENT_TYPE as u8);
+        debug_assert!(secondary_event_type <= MAX_EVENT_TYPE as u8);
+        debug_assert!(secondary_client_type <= MAX_CLIENT_TYPE as u8);
+
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid)
+                | (u64::from(client_type) << 32)
+                | (u64::from(scheduler_cpu_id & 0x00FF_FFFF) << 40),
+            tid,
+            scheduler_cpu_id_high: (scheduler_cpu_id >> 24) as u8,
+            event_type,
+            secondary_event_type,
+            secondary_client_type,
+        }
+    }
+
+    #[inline(always)]
+    fn new_sanitized(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        client_type: u8,
+    ) -> Self {
+        Self {
+            timestamp_ns,
+            basic_dimension: u64::from(pid) | (u64::from(client_type) << 32),
+            tid,
+            scheduler_cpu_id_high: 0,
+            event_type,
+            secondary_event_type: 0,
+            secondary_client_type: 0,
+        }
+    }
+
+    #[inline(always)]
+    pub fn with_secondary_logical_event(mut self, event_type: EventType, client_type: u8) -> Self {
+        self.secondary_event_type = event_type as u8;
+        self.secondary_client_type = sanitize_client_type(client_type);
+        self
+    }
+
+    #[inline(always)]
+    pub fn with_scheduler_cpu_id(mut self, cpu_id: u32) -> Self {
+        self.basic_dimension =
+            (self.basic_dimension & BASIC_DIMENSION_MASK) | (u64::from(cpu_id & 0x00FF_FFFF) << 40);
+        self.scheduler_cpu_id_high = (cpu_id >> 24) as u8;
+        self
+    }
+
+    #[inline(always)]
+    pub fn pid(self) -> u32 {
+        self.basic_dimension as u32
+    }
+
+    /// Validated raw `ClientType` discriminant from the ring buffer.
+    #[inline(always)]
+    pub fn client_type(self) -> u8 {
+        ((self.basic_dimension >> 32) & 0xFF) as u8
+    }
+
+    #[inline(always)]
+    pub fn basic_dimension_key(self) -> u64 {
+        self.basic_dimension & BASIC_DIMENSION_MASK
+    }
+
+    #[inline(always)]
+    pub fn scheduler_cpu_id(self) -> u32 {
+        (u32::from(self.scheduler_cpu_id_high) << 24) | ((self.basic_dimension >> 40) as u32)
+    }
+
+    #[inline(always)]
+    pub fn secondary_event_type_raw(self) -> u8 {
+        self.secondary_event_type
+    }
+
+    #[inline(always)]
+    pub fn secondary_client_type_raw(self) -> u8 {
+        self.secondary_client_type
+    }
+}
+
+#[inline(always)]
+fn sanitize_client_type(client_type: u8) -> u8 {
+    if client_type <= MAX_CLIENT_TYPE as u8 {
+        client_type
+    } else {
+        ClientType::Unknown as u8
+    }
 }
 
 /// Syscall event with latency measurement.
+///
+/// The aggregated sink only needs latency on the hot path, so the parser
+/// drops return value and argument fields to avoid extra decoding and copying.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SyscallEvent {
-    pub event: Event,
     pub latency_ns: u64,
-    pub ret: i64,
-    pub syscall_nr: u32,
-    pub fd: i32,
 }
 
 /// Block I/O operation event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct DiskIOEvent {
-    pub event: Event,
     pub latency_ns: u64,
     pub bytes: u32,
     /// 0 = read, 1 = write.
@@ -377,18 +549,28 @@ pub struct DiskIOEvent {
     pub device_id: u32,
 }
 
-/// Network send/receive event.
-/// When `has_metrics` is true, `srtt_us` and `cwnd` contain inline TCP metrics.
+/// Network send/receive event without inline TCP metrics.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct NetIOEvent {
-    pub event: Event,
     pub bytes: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub direction: Direction,
-    pub transport: NetTransport,
-    pub has_metrics: bool,
+    /// Local socket port after direction normalization.
+    pub local_port: u16,
+    /// Peer socket port after direction normalization.
+    pub remote_port: u16,
+    /// Validated raw `NetTransport` discriminant from the ring buffer.
+    pub transport: u8,
+}
+
+/// TCP transmit event carrying inline RTT and CWND metrics.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct NetIOTcpTxMetricsEvent {
+    pub bytes: u32,
+    /// Local socket port for this transmit event.
+    pub local_port: u16,
+    /// Peer socket port for this transmit event.
+    pub remote_port: u16,
     pub srtt_us: u32,
     pub cwnd: u32,
 }
@@ -397,45 +579,43 @@ pub struct NetIOEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SchedEvent {
-    pub event: Event,
     pub on_cpu_ns: u64,
-    pub voluntary: bool,
-    pub cpu_id: u32,
+}
+
+/// Combined scheduler switch-out + switch-in event.
+///
+/// The header identifies the outgoing thread. The payload also carries the
+/// incoming tracked thread so the tracer can collapse the usual
+/// sched_switch + sched_runqueue pair into one ring-buffer record.
+#[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
+pub struct SchedCombinedEvent {
+    pub on_cpu_ns: u64,
+    pub runqueue_ns: u64,
+    pub off_cpu_ns: u64,
+    pub next_pid: u32,
+    pub next_tid: u32,
 }
 
 /// Runqueue/off-CPU latency event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SchedRunqueueEvent {
-    pub event: Event,
     pub runqueue_ns: u64,
     pub off_cpu_ns: u64,
-    pub cpu_id: u32,
 }
 
 /// Page fault event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct PageFaultEvent {
-    pub event: Event,
-    pub address: u64,
     pub major: bool,
-}
-
-/// File descriptor open/close event.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct FDEvent {
-    pub event: Event,
-    pub fd: i32,
-    pub filename: String,
 }
 
 /// Merged block I/O request event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct BlockMergeEvent {
-    pub event: Event,
     pub bytes: u32,
     /// 0 = read, 1 = write.
     pub rw: u8,
@@ -445,28 +625,17 @@ pub struct BlockMergeEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct TcpRetransmitEvent {
-    pub event: Event,
     pub bytes: u32,
-    pub src_port: u16,
-    pub dst_port: u16,
-}
-
-/// TCP state transition event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct TcpStateEvent {
-    pub event: Event,
-    pub src_port: u16,
-    pub dst_port: u16,
-    pub new_state: u8,
-    pub old_state: u8,
+    /// Local socket port for this retransmit.
+    pub local_port: u16,
+    /// Peer socket port for this retransmit.
+    pub remote_port: u16,
 }
 
 /// Memory reclaim/compaction latency event.
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct MemLatencyEvent {
-    pub event: Event,
     pub duration_ns: u64,
 }
 
@@ -474,24 +643,7 @@ pub struct MemLatencyEvent {
 #[derive(Debug, Clone, Copy)]
 #[allow(dead_code)]
 pub struct SwapEvent {
-    pub event: Event,
     pub pages: u64,
-}
-
-/// OOM kill event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct OOMKillEvent {
-    pub event: Event,
-    pub target_pid: u32,
-}
-
-/// Process exit event.
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub struct ProcessExitEvent {
-    pub event: Event,
-    pub exit_code: u32,
 }
 
 /// A parsed event wrapping the common header and a typed payload.
@@ -499,7 +651,8 @@ pub struct ProcessExitEvent {
 pub struct ParsedEvent {
     /// Common event header.
     pub raw: Event,
-    /// Typed event payload.
+    /// Typed event payload. The shared header lives only in `raw` to keep
+    /// hot-path parse and channel copies small.
     pub typed: TypedEvent,
 }
 
@@ -507,20 +660,37 @@ pub struct ParsedEvent {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub enum TypedEvent {
-    Syscall(SyscallEvent),
+    // Subtype-specific variants avoid a second hot-path match on raw.event_type.
+    SyscallRead(SyscallEvent),
+    SyscallWrite(SyscallEvent),
+    SyscallFutex(SyscallEvent),
+    SyscallMmap(SyscallEvent),
+    SyscallEpollWait(SyscallEvent),
+    SyscallFsync(SyscallEvent),
+    SyscallFdatasync(SyscallEvent),
+    SyscallPwrite(SyscallEvent),
     DiskIO(DiskIOEvent),
-    NetIO(NetIOEvent),
+    NetIOTx(NetIOEvent),
+    NetIORx(NetIOEvent),
+    NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent),
     Sched(SchedEvent),
+    SchedCombined(SchedCombinedEvent),
     SchedRunqueue(SchedRunqueueEvent),
     PageFault(PageFaultEvent),
-    FD(FDEvent),
+    FDOpen,
+    FDClose,
     BlockMerge(BlockMergeEvent),
     TcpRetransmit(TcpRetransmitEvent),
-    TcpState(TcpStateEvent),
-    MemLatency(MemLatencyEvent),
-    Swap(SwapEvent),
-    OOMKill(OOMKillEvent),
-    ProcessExit(ProcessExitEvent),
+    // The aggregated sink only counts TCP state transitions, so the parser
+    // keeps these as payload-free markers.
+    TcpState,
+    MemReclaim(MemLatencyEvent),
+    MemCompaction(MemLatencyEvent),
+    SwapIn(SwapEvent),
+    SwapOut(SwapEvent),
+    // The aggregated sink only counts OOM kills and process exits.
+    OOMKill,
+    ProcessExit,
 }
 
 #[cfg(test)]
@@ -544,6 +714,36 @@ mod tests {
             assert_eq!(ct as u8, i);
         }
         assert!(ClientType::from_u8(13).is_none());
+    }
+
+    #[test]
+    fn test_event_new_normalizes_unknown_client_type() {
+        let event = Event::new(1, 10, 11, EventType::FDOpen, u8::MAX);
+        assert_eq!(event.client_type(), ClientType::Unknown as u8);
+        assert_eq!(
+            event.basic_dimension_key() >> 32,
+            u64::from(ClientType::Unknown as u8)
+        );
+    }
+
+    #[test]
+    fn test_event_scheduler_cpu_id_preserves_basic_dimension() {
+        let event = Event::new(
+            1,
+            10,
+            11,
+            EventType::SchedSwitch,
+            ClientType::Lighthouse as u8,
+        )
+        .with_scheduler_cpu_id(0xDEADBEEF);
+
+        assert_eq!(event.pid(), 10);
+        assert_eq!(event.client_type(), ClientType::Lighthouse as u8);
+        assert_eq!(
+            event.basic_dimension_key(),
+            (u64::from(ClientType::Lighthouse as u8) << 32) | 10
+        );
+        assert_eq!(event.scheduler_cpu_id(), 0xDEADBEEF);
     }
 
     #[test]

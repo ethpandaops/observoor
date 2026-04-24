@@ -1,10 +1,65 @@
 use std::collections::HashMap;
 use std::fmt;
+use std::hash::{BuildHasherDefault, Hasher};
 
 use anyhow::Result;
+use hashbrown::HashMap as FastHashMap;
 use tracing::debug;
 
-use crate::tracer::event::ClientType;
+use crate::tracer::event::{ClientType, CLIENT_TYPE_CARDINALITY};
+
+#[derive(Default)]
+struct PortKeyHasher {
+    hash: u64,
+}
+
+#[inline(always)]
+fn mix_port_key(value: u64) -> u64 {
+    value ^ value.rotate_left(25)
+}
+
+impl Hasher for PortKeyHasher {
+    #[inline(always)]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+
+    #[inline(always)]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut folded = 0u64;
+        for (idx, byte) in bytes.iter().take(8).enumerate() {
+            folded |= u64::from(*byte) << (idx * 8);
+        }
+        self.hash = mix_port_key(folded);
+    }
+
+    #[inline(always)]
+    fn write_u16(&mut self, value: u16) {
+        self.hash = mix_port_key(u64::from(value));
+    }
+
+    #[inline(always)]
+    fn write_u32(&mut self, value: u32) {
+        self.hash = mix_port_key(u64::from(value));
+    }
+
+    #[inline(always)]
+    fn write_u64(&mut self, value: u64) {
+        self.hash = mix_port_key(value);
+    }
+
+    #[inline(always)]
+    fn write_usize(&mut self, value: usize) {
+        self.hash = mix_port_key(value as u64);
+    }
+}
+
+type PortHashBuilder = BuildHasherDefault<PortKeyHasher>;
+type PortMap<V> = FastHashMap<u16, V, PortHashBuilder>;
+
+fn new_port_map<V>() -> PortMap<V> {
+    FastHashMap::with_hasher(PortHashBuilder::default())
+}
 
 /// Transport for a labeled service port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -170,23 +225,33 @@ fn upsert_port_label(port_labels: &mut Vec<(u16, PortLabel)>, port: u16, label: 
 }
 
 /// Client-aware runtime map for semantic port labels.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PortLabelMap {
-    by_client: HashMap<ClientType, HashMap<u16, PortTransportLabels>>,
-    global: HashMap<u16, PortTransportLabels>,
+    by_client: [PortMap<PortTransportLabels>; CLIENT_TYPE_CARDINALITY],
+    global: PortMap<PortTransportLabels>,
+}
+
+impl Default for PortLabelMap {
+    fn default() -> Self {
+        Self {
+            by_client: std::array::from_fn(|_| new_port_map()),
+            global: new_port_map(),
+        }
+    }
 }
 
 impl PortLabelMap {
     pub fn is_empty(&self) -> bool {
-        self.by_client.is_empty()
+        self.global.is_empty()
     }
 
     /// Inserts a label for `(client_type, port, transport)`.
     pub fn insert(&mut self, client_type: ClientType, port: u16, label: PortLabel) {
         let transport = label.transport();
 
-        let client_map = self.by_client.entry(client_type).or_default();
-        client_map.entry(port).or_default().set(transport, label);
+        if let Some(client_map) = self.by_client.get_mut(client_type_index(client_type)) {
+            client_map.entry(port).or_default().set(transport, label);
+        }
 
         self.global.entry(port).or_default().set(transport, label);
     }
@@ -198,8 +263,8 @@ impl PortLabelMap {
         primary_port: u16,
         secondary_port: u16,
     ) -> PortLabel {
-        self.resolve(
-            client_type,
+        self.resolve_by_index(
+            client_type_index(client_type),
             PortTransport::Tcp,
             primary_port,
             secondary_port,
@@ -213,8 +278,38 @@ impl PortLabelMap {
         primary_port: u16,
         secondary_port: u16,
     ) -> PortLabel {
-        self.resolve(
-            client_type,
+        self.resolve_by_index(
+            client_type_index(client_type),
+            PortTransport::Udp,
+            primary_port,
+            secondary_port,
+        )
+    }
+
+    /// Resolve a TCP label from the raw `ClientType` discriminant emitted in events.
+    pub(crate) fn resolve_tcp_raw(
+        &self,
+        client_type_raw: u8,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> PortLabel {
+        self.resolve_by_index(
+            client_type_index_raw(client_type_raw),
+            PortTransport::Tcp,
+            primary_port,
+            secondary_port,
+        )
+    }
+
+    /// Resolve a UDP label from the raw `ClientType` discriminant emitted in events.
+    pub(crate) fn resolve_udp_raw(
+        &self,
+        client_type_raw: u8,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> PortLabel {
+        self.resolve_by_index(
+            client_type_index_raw(client_type_raw),
             PortTransport::Udp,
             primary_port,
             secondary_port,
@@ -225,7 +320,13 @@ impl PortLabelMap {
     pub fn mappings(&self) -> Vec<(ClientType, u16, PortTransport, PortLabel)> {
         let mut out = Vec::with_capacity(64);
 
-        for (&client_type, ports) in &self.by_client {
+        for (client_idx, ports) in self.by_client.iter().enumerate() {
+            if ports.is_empty() {
+                continue;
+            }
+            let Some(client_type) = ClientType::from_u8(client_idx as u8) else {
+                continue;
+            };
             for (&port, labels) in ports {
                 if let Some(label) = labels.tcp {
                     out.push((client_type, port, PortTransport::Tcp, label));
@@ -250,28 +351,28 @@ impl PortLabelMap {
         out
     }
 
-    fn resolve(
+    fn resolve_by_index(
         &self,
-        client_type: ClientType,
+        client_idx: usize,
         transport: PortTransport,
         primary_port: u16,
         secondary_port: u16,
     ) -> PortLabel {
         let candidates = [primary_port, secondary_port];
+        let unknown_idx = client_type_index(ClientType::Unknown);
 
-        if let Some(label) = self.resolve_from_client(client_type, transport, &candidates) {
+        if let Some(label) = self.resolve_from_client_index(client_idx, transport, &candidates) {
             return label;
         }
 
-        if client_type != ClientType::Unknown {
-            if let Some(label) =
-                self.resolve_from_client(ClientType::Unknown, transport, &candidates)
+        if client_idx != unknown_idx {
+            if let Some(label) = self.resolve_from_client_index(unknown_idx, transport, &candidates)
             {
                 return label;
             }
         }
 
-        if client_type == ClientType::Unknown {
+        if client_idx == unknown_idx {
             for port in candidates {
                 if let Some(label) = self
                     .global
@@ -286,13 +387,16 @@ impl PortLabelMap {
         PortLabel::Unknown
     }
 
-    fn resolve_from_client(
+    fn resolve_from_client_index(
         &self,
-        client_type: ClientType,
+        client_idx: usize,
         transport: PortTransport,
         candidates: &[u16; 2],
     ) -> Option<PortLabel> {
-        let client_map = self.by_client.get(&client_type)?;
+        let client_map = self.by_client.get(client_idx)?;
+        if client_map.is_empty() {
+            return None;
+        }
 
         for port in candidates {
             if let Some(label) = client_map
@@ -304,6 +408,21 @@ impl PortLabelMap {
         }
 
         None
+    }
+}
+
+#[inline(always)]
+fn client_type_index(client_type: ClientType) -> usize {
+    client_type as usize
+}
+
+#[inline(always)]
+fn client_type_index_raw(client_type_raw: u8) -> usize {
+    let idx = usize::from(client_type_raw);
+    if idx < CLIENT_TYPE_CARDINALITY {
+        idx
+    } else {
+        client_type_index(ClientType::Unknown)
     }
 }
 

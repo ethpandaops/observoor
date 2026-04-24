@@ -280,13 +280,9 @@ pub struct PidConfig {
     #[serde(default)]
     pub process_names: Vec<String>,
 
-    /// Legacy single cgroup v2 path containing target processes.
+    /// Cgroup v2 path containing target processes.
     #[serde(default)]
     pub cgroup_path: String,
-
-    /// Additional cgroup v2 paths containing target processes.
-    #[serde(default)]
-    pub cgroup_paths: Vec<String>,
 }
 
 /// Data export sink configuration.
@@ -303,11 +299,6 @@ pub struct AggregatedSinkConfig {
     /// Enable the aggregated metrics sink.
     #[serde(default)]
     pub enabled: bool,
-
-    /// Whether to collect per-process /proc snapshot tables on each flush.
-    /// Default: true.
-    #[serde(default = "default_true")]
-    pub collect_process_snapshots: bool,
 
     /// Aggregation time window configuration.
     #[serde(default)]
@@ -1065,7 +1056,9 @@ impl NetworkDimensionsConfig {
 
     /// Set the runtime port-to-label map.
     pub fn set_port_label_map(&mut self, map: crate::agent::ports::PortLabelMap) {
-        self.port_label_map = Some(map);
+        // Normalize empty discoveries to `None` so packet hot paths only pay a
+        // cheap option check instead of an extra `is_empty()` branch.
+        self.port_label_map = (!map.is_empty()).then_some(map);
     }
 }
 
@@ -1199,6 +1192,16 @@ mod tests {
             cfg.resolve_port_label(8545),
             crate::agent::ports::PortLabel::Unknown as u8
         );
+    }
+
+    #[test]
+    fn test_set_port_label_map_drops_empty_map() {
+        use crate::agent::ports::PortLabelMap;
+
+        let mut cfg = NetworkDimensionsConfig::default();
+        cfg.set_port_label_map(PortLabelMap::default());
+
+        assert!(cfg.port_label_map.is_none());
     }
 
     #[test]

@@ -12,30 +12,49 @@ pub mod metric;
 pub mod clickhouse;
 pub mod http;
 
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use smallvec::SmallVec;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use crate::beacon::SyncStatus;
 use crate::config::{AggregatedSinkConfig, DimensionsConfig};
 use crate::sink::Sink;
-use crate::tracer::event::{
-    ClientType, Direction, EventType, NetIOEvent, NetTransport, ParsedEvent, TypedEvent,
-};
+use crate::tracer::event::{Direction, NetIOEvent, NetTransport, ParsedEvent, TypedEvent};
+use crate::tracer::{ParsedEventBatch, PARSED_EVENT_BATCH_SIZE};
 
 use self::buffer::Buffer;
 use self::clickhouse::{HostSpecsRow, SyncStateRow};
 use self::collector::Collector;
-use self::dimension::{BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension};
+use self::dimension::{
+    BasicDimension, DiskDeviceDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
+};
 use self::exporter::Exporter;
 use self::flush::TieredFlushController;
 use self::host_specs::collect_host_specs;
 use self::metric::{BatchMetadata, MetricBatch};
+
+type EventBatch = ParsedEventBatch;
+
+/// Parsed events are queued in fixed-size batches to amortize channel overhead
+/// across the tracer -> sink handoff.
+const EVENT_BATCH_SIZE: usize = PARSED_EVENT_BATCH_SIZE;
+/// Keep roughly a 65,536-event queue depth, but in batch units.
+const EVENT_BATCH_CHANNEL_CAPACITY: usize = 4;
+/// Drain a full bounded queue per wake to amortize `mpsc`/`select!` overhead
+/// under sustained tracer load without letting the event loop run unbounded.
+const EVENT_BATCHES_PER_WAKE: usize = EVENT_BATCH_CHANNEL_CAPACITY;
+// Network-heavy workloads often reuse a small set of socket tuples for long
+// stretches. A slightly larger direct-mapped cache cuts collision misses on
+// that hot path without changing aggregation semantics.
+const PORT_LABEL_CACHE_SIZE: usize = 64;
+const RUNNING_CPU_INLINE_CAPACITY: usize = 16;
+const SCHED_TID_CACHE_SIZE: usize = 32;
+const SCHED_TID_CACHE_WAYS: usize = 2;
 
 /// Shared atomic state that can be safely sent to a spawned task.
 struct SharedState {
@@ -77,225 +96,560 @@ struct SlotRotation {
 
 #[derive(Clone, Copy, Debug)]
 struct RunningThread {
-    pid: u32,
-    client_type: u8,
-    cpu_id: u32,
+    // Scheduler events close and flush the same running slice repeatedly, so
+    // keep the resolved process dimension alongside the owning CPU id.
+    basic_dim: BasicDimension,
     running_since_ns: u64,
+    tid: u32,
+    cpu_id: u32,
 }
 
 #[derive(Default)]
+struct RunningThreadStore {
+    // Active running state is naturally bounded by CPU count. Store one slot
+    // per observed CPU so sched_switch can resolve state by cpu_id directly.
+    entries: SmallVec<[Option<RunningThread>; RUNNING_CPU_INLINE_CAPACITY]>,
+}
+
+impl RunningThreadStore {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            entries: SmallVec::with_capacity(capacity.min(RUNNING_CPU_INLINE_CAPACITY)),
+        }
+    }
+
+    #[inline(always)]
+    fn ensure_cpu_slot(&mut self, cpu_id: u32) {
+        let slot = cpu_id as usize;
+        while self.entries.len() <= slot {
+            self.entries.push(None);
+        }
+    }
+
+    #[inline(always)]
+    fn cpu_slot_mut(&mut self, cpu_id: u32) -> &mut Option<RunningThread> {
+        self.ensure_cpu_slot(cpu_id);
+        // Safety: `ensure_cpu_slot` grows `entries` until `cpu_id` is in range.
+        unsafe { self.entries.get_unchecked_mut(cpu_id as usize) }
+    }
+
+    #[inline(always)]
+    fn take_cpu(&mut self, cpu_id: u32) -> Option<RunningThread> {
+        if let Some(slot) = self.entries.get_mut(cpu_id as usize) {
+            slot.take()
+        } else {
+            None
+        }
+    }
+
+    #[inline(always)]
+    fn find_cpu_for_tid(&self, tid: u32) -> Option<u32> {
+        let len = self.entries.len();
+        let mut cpu_id = 0usize;
+        while cpu_id < len {
+            // Safety: `cpu_id` stays strictly below `len`.
+            if unsafe { self.entries.get_unchecked(cpu_id) }
+                .is_some_and(|running| running.tid == tid)
+            {
+                return Some(cpu_id as u32);
+            }
+            cpu_id += 1;
+        }
+
+        None
+    }
+
+    #[cfg_attr(not(any(test, debug_assertions)), allow(dead_code))]
+    #[inline(always)]
+    fn cpu_matches_tid(&self, cpu_id: u32, tid: u32) -> bool {
+        if let Some(Some(running)) = self.entries.get(cpu_id as usize) {
+            running.tid == tid
+        } else {
+            false
+        }
+    }
+
+    #[inline(always)]
+    fn iter_mut(&mut self) -> impl Iterator<Item = &mut RunningThread> {
+        self.entries.iter_mut().filter_map(Option::as_mut)
+    }
+
+    #[cfg(test)]
+    #[inline(always)]
+    fn is_empty(&self) -> bool {
+        self.entries.iter().all(Option::is_none)
+    }
+
+    #[cfg(test)]
+    #[inline(always)]
+    fn contains_tid(&self, tid: u32) -> bool {
+        self.find_cpu_for_tid(tid).is_some()
+    }
+}
+
+#[derive(Clone, Copy)]
+struct SchedTidCacheEntry {
+    tid: u32,
+    cpu_id: u32,
+}
+
+type SchedTidCacheSet = [Option<SchedTidCacheEntry>; SCHED_TID_CACHE_WAYS];
+const _: () = assert!(SCHED_TID_CACHE_WAYS == 2);
+
+#[inline(always)]
+fn sched_tid_cache_slot(tid: u32) -> usize {
+    ((tid ^ tid.rotate_left(11)) as usize) & (SCHED_TID_CACHE_SIZE - 1)
+}
+
 struct SchedulerWindowState {
-    running_by_tid: HashMap<u32, RunningThread>,
-    running_tid_by_core: HashMap<u32, u32>,
-    recovered_switch_out_by_tid: HashMap<u32, u64>,
+    running_by_cpu: RunningThreadStore,
+    // The live set is bounded by active CPUs, so keep the no-hash direct cache
+    // but allow two colliding tids per bucket before falling back to a scan.
+    tid_to_cpu_cache: [SchedTidCacheSet; SCHED_TID_CACHE_SIZE],
+}
+
+impl Default for SchedulerWindowState {
+    fn default() -> Self {
+        Self {
+            running_by_cpu: RunningThreadStore::with_capacity(64),
+            tid_to_cpu_cache: [[None; SCHED_TID_CACHE_WAYS]; SCHED_TID_CACHE_SIZE],
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct PortLabelCacheEntry {
+    key: u64,
+    label: u8,
+}
+
+struct PortLabelResolveCache {
+    entries: [Option<PortLabelCacheEntry>; PORT_LABEL_CACHE_SIZE],
+}
+
+impl Default for PortLabelResolveCache {
+    fn default() -> Self {
+        Self {
+            entries: [None; PORT_LABEL_CACHE_SIZE],
+        }
+    }
+}
+
+impl PortLabelResolveCache {
+    #[inline(always)]
+    fn resolve(
+        &mut self,
+        port_label_map: &crate::agent::ports::PortLabelMap,
+        client_type: u8,
+        transport: u8,
+        primary_port: u16,
+        secondary_port: u16,
+    ) -> u8 {
+        let key = pack_port_label_cache_key(client_type, transport, primary_port, secondary_port);
+        let slot = port_label_cache_slot(key);
+
+        if let Some(entry) = self.entries[slot] {
+            if entry.key == key {
+                return entry.label;
+            }
+        }
+
+        let label = match transport {
+            transport if transport == NetTransport::Tcp as u8 => {
+                port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
+            }
+            _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+        };
+
+        self.entries[slot] = Some(PortLabelCacheEntry { key, label });
+        label
+    }
+}
+
+#[inline(always)]
+fn pack_port_label_cache_key(
+    client_type: u8,
+    transport: u8,
+    primary_port: u16,
+    secondary_port: u16,
+) -> u64 {
+    u64::from(primary_port)
+        | (u64::from(secondary_port) << 16)
+        | (u64::from(client_type) << 32)
+        | (u64::from(transport) << 40)
+}
+
+#[inline(always)]
+fn port_label_cache_slot(key: u64) -> usize {
+    ((key ^ key.rotate_left(25)) as usize) & (PORT_LABEL_CACHE_SIZE - 1)
+}
+
+// Resolve immutable dimension toggles once so ingest only branches on event data.
+#[derive(Clone, Copy)]
+struct ResolvedDimensions<'a> {
+    network_direction_mask: u8,
+    network_port_label_map: Option<&'a crate::agent::ports::PortLabelMap>,
+    disk_device_mask: u32,
+    disk_rw_mask: u8,
+}
+
+impl<'a> ResolvedDimensions<'a> {
+    #[inline(always)]
+    fn from_config(dims: &'a DimensionsConfig) -> Self {
+        Self {
+            network_direction_mask: if dims.network.include_direction {
+                u8::MAX
+            } else {
+                0
+            },
+            network_port_label_map: if dims.network.include_port {
+                dims.network.port_label_map.as_ref()
+            } else {
+                None
+            },
+            disk_device_mask: if dims.disk.include_device {
+                u32::MAX
+            } else {
+                0
+            },
+            disk_rw_mask: if dims.disk.include_rw { u8::MAX } else { 0 },
+        }
+    }
 }
 
 impl SchedulerWindowState {
-    fn remove_running_tid(&mut self, tid: u32) -> Option<RunningThread> {
-        let running = self.running_by_tid.remove(&tid)?;
-        if self.running_tid_by_core.get(&running.cpu_id) == Some(&tid) {
-            self.running_tid_by_core.remove(&running.cpu_id);
-        }
-        Some(running)
-    }
+    #[inline(always)]
+    fn find_cpu_for_tid(&mut self, tid: u32) -> Option<u32> {
+        let cache_set = &self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
 
-    fn set_running_tid(&mut self, tid: u32, running: RunningThread) {
-        self.recovered_switch_out_by_tid.remove(&tid);
-        if let Some(prev) = self.running_by_tid.insert(tid, running) {
-            if self.running_tid_by_core.get(&prev.cpu_id) == Some(&tid) {
-                self.running_tid_by_core.remove(&prev.cpu_id);
+        if let Some(entry) = cache_set[0] {
+            if entry.tid == tid {
+                debug_assert!(self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid));
+                return Some(entry.cpu_id);
             }
         }
-        self.running_tid_by_core.insert(running.cpu_id, tid);
+
+        if let Some(entry) = cache_set[1] {
+            if entry.tid == tid {
+                debug_assert!(self.running_by_cpu.cpu_matches_tid(entry.cpu_id, tid));
+                return Some(entry.cpu_id);
+            }
+        }
+
+        let Some(cpu_id) = self.running_by_cpu.find_cpu_for_tid(tid) else {
+            self.clear_cached_tid_cpu(tid);
+            return None;
+        };
+
+        self.remember_tid_cpu(tid, cpu_id);
+        Some(cpu_id)
     }
 
-    fn flush_running_to_boundary(&mut self, buf: &Buffer, boundary_ns: u64) {
-        for running in self.running_by_tid.values_mut() {
+    #[inline(always)]
+    fn remember_tid_cpu(&mut self, tid: u32, cpu_id: u32) {
+        let entry = Some(SchedTidCacheEntry { tid, cpu_id });
+        let cache_set = &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
+
+        if cache_set[0].is_some_and(|cached| cached.tid == tid) {
+            cache_set[0] = entry;
+            return;
+        }
+
+        if cache_set[1].is_some_and(|cached| cached.tid == tid) {
+            cache_set[1] = entry;
+            return;
+        }
+
+        if cache_set[0].is_none() {
+            cache_set[0] = entry;
+            return;
+        }
+
+        if cache_set[1].is_none() {
+            cache_set[1] = entry;
+            return;
+        }
+
+        cache_set[0] = entry;
+    }
+
+    #[inline(always)]
+    fn clear_cached_tid_cpu(&mut self, tid: u32) {
+        let cache_set = &mut self.tid_to_cpu_cache[sched_tid_cache_slot(tid)];
+
+        if cache_set[0].is_some_and(|entry| entry.tid == tid) {
+            cache_set[0] = None;
+        }
+
+        if cache_set[1].is_some_and(|entry| entry.tid == tid) {
+            cache_set[1] = None;
+        }
+    }
+
+    #[inline(always)]
+    fn forget_tid_cpu(&mut self, tid: u32) {
+        self.clear_cached_tid_cpu(tid);
+    }
+
+    #[inline(always)]
+    fn take_running_on_cpu(&mut self, cpu_id: u32) -> Option<RunningThread> {
+        let running = self.running_by_cpu.take_cpu(cpu_id);
+        if let Some(running) = running {
+            self.forget_tid_cpu(running.tid);
+        }
+        running
+    }
+
+    #[inline(always)]
+    fn restore_running(&mut self, running: RunningThread) {
+        *self.running_by_cpu.cpu_slot_mut(running.cpu_id) = Some(running);
+        self.remember_tid_cpu(running.tid, running.cpu_id);
+    }
+
+    #[inline(always)]
+    fn flush_running_to_boundary(&mut self, buf: &mut Buffer, boundary_ns: u64) {
+        for running in self.running_by_cpu.iter_mut() {
             if boundary_ns <= running.running_since_ns {
                 continue;
             }
             let delta_ns = boundary_ns - running.running_since_ns;
-            buf.add_cpu_on_core(
-                BasicDimension {
-                    pid: running.pid,
-                    client_type: running.client_type,
-                },
-                running.cpu_id,
-                delta_ns,
-            );
+            buf.add_cpu_on_core(running.basic_dim, running.cpu_id, delta_ns);
             running.running_since_ns = boundary_ns;
         }
     }
 
-    fn handle_sched_switch(&mut self, buf: &Buffer, event: &ParsedEvent) {
-        let TypedEvent::Sched(sched) = &event.typed else {
-            return;
-        };
+    #[inline(always)]
+    fn handle_sched_switch(
+        &mut self,
+        buf: &mut Buffer,
+        tid: u32,
+        timestamp_ns: u64,
+        dim: BasicDimension,
+        on_cpu_ns: u64,
+        cpu_id: u32,
+    ) {
+        let mut resolved_on_cpu_ns = Some(on_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
-        if !buf.contains_monotonic_timestamp(timestamp_ns) {
-            return;
+        if let Some(running) = self.take_running_on_cpu(cpu_id) {
+            if running.tid == tid {
+                if timestamp_ns > running.running_since_ns {
+                    resolved_on_cpu_ns = Some(timestamp_ns - running.running_since_ns);
+                } else if timestamp_ns == running.running_since_ns {
+                    resolved_on_cpu_ns = None;
+                }
+            } else {
+                self.restore_running(running);
+            }
         }
 
-        let dim = BasicDimension {
-            pid: event.raw.pid,
-            client_type: event.raw.client_type as u8,
-        };
-        buf.add_sched_on_cpu(dim, sched.on_cpu_ns);
-
-        let tid = event.raw.tid;
-        if let Some(running) = self.running_by_tid.get(&tid).copied() {
-            if timestamp_ns > running.running_since_ns {
-                self.remove_running_tid(tid);
-                let accounted_ns = (timestamp_ns - running.running_since_ns).min(sched.on_cpu_ns);
-                buf.add_cpu_on_core(
-                    BasicDimension {
-                        pid: running.pid,
-                        client_type: running.client_type,
-                    },
-                    running.cpu_id,
-                    accounted_ns,
-                );
-                return;
-            }
-
+        if let Some(resolved_on_cpu_ns) = resolved_on_cpu_ns {
+            // Fallback for missing switch-in state (startup, drops, or stale events):
+            // use the kernel-reported slice.
+            buf.add_sched_slice(dim, cpu_id, on_cpu_ns, resolved_on_cpu_ns);
+        } else {
             // Zero-length runtime for this slice; consume the running state.
-            if timestamp_ns == running.running_since_ns {
-                self.remove_running_tid(tid);
-                return;
-            }
-
-            // Out-of-order switch-out for an older slice. Keep the newer
-            // running state and drop this on-CPU contribution: the later
-            // sched_runqueue event already recovered the old slice via
-            // off_cpu_ns, so falling back to the raw payload here would count
-            // it twice.
-            return;
+            buf.add_sched_on_cpu(dim, cpu_id, on_cpu_ns);
         }
-
-        if let Some(recovered_ts) = self.recovered_switch_out_by_tid.remove(&tid) {
-            if timestamp_ns <= recovered_ts {
-                return;
-            }
-        }
-
-        // Fallback for missing switch-in state (startup, drops): use the
-        // kernel-reported slice, but do not let it spill across this window's
-        // start boundary.
-        buf.add_cpu_on_core(
-            dim,
-            sched.cpu_id,
-            buf.cap_on_cpu_ns_to_window(timestamp_ns, sched.on_cpu_ns),
-        );
     }
 
-    fn handle_sched_runqueue(&mut self, buf: &Buffer, event: &ParsedEvent) {
-        let TypedEvent::SchedRunqueue(rq) = &event.typed else {
-            return;
-        };
+    #[inline(always)]
+    fn handle_sched_runqueue(
+        &mut self,
+        buf: &mut Buffer,
+        tid: u32,
+        timestamp_ns: u64,
+        dim: BasicDimension,
+        runqueue_ns: u64,
+        off_cpu_ns: u64,
+        cpu_id: u32,
+    ) {
+        buf.add_sched_runqueue(dim, runqueue_ns, off_cpu_ns);
 
-        let timestamp_ns = event.raw.timestamp_ns;
-        if !buf.contains_monotonic_timestamp(timestamp_ns) {
-            return;
-        }
-
-        let dim = BasicDimension {
-            pid: event.raw.pid,
-            client_type: event.raw.client_type as u8,
-        };
-        buf.add_sched_runqueue(dim, rq.runqueue_ns, rq.off_cpu_ns);
-
-        let tid = event.raw.tid;
-
-        // A core can only have one running thread at a time. If another TID is
-        // still marked on this CPU, we missed its switch-out and must evict it
-        // before tracking the new occupant.
-        if let Some(other_tid) = self.running_tid_by_core.get(&rq.cpu_id).copied() {
-            if other_tid != tid {
-                if let Some(other) = self.running_by_tid.get(&other_tid).copied() {
-                    if timestamp_ns < other.running_since_ns {
-                        return;
-                    }
-                }
-
-                if let Some(other) = self.remove_running_tid(other_tid) {
-                    self.recovered_switch_out_by_tid
-                        .insert(other_tid, timestamp_ns);
-                    if timestamp_ns > other.running_since_ns {
-                        buf.add_cpu_on_core(
-                            BasicDimension {
-                                pid: other.pid,
-                                client_type: other.client_type,
-                            },
-                            other.cpu_id,
-                            timestamp_ns - other.running_since_ns,
-                        );
-                    }
-                }
-            }
-        }
-
-        if let Some(prev) = self.running_by_tid.get(&tid).copied() {
-            if timestamp_ns > prev.running_since_ns {
-                let accounted_ns =
-                    (timestamp_ns - prev.running_since_ns).saturating_sub(rq.off_cpu_ns);
-                buf.add_cpu_on_core(
-                    BasicDimension {
-                        pid: prev.pid,
-                        client_type: prev.client_type,
-                    },
-                    prev.cpu_id,
-                    accounted_ns,
-                );
-            }
-
-            // Only move state forward (or replace at the same instant).
-            if timestamp_ns >= prev.running_since_ns {
-                self.set_running_tid(
-                    tid,
-                    RunningThread {
-                        pid: event.raw.pid,
-                        client_type: event.raw.client_type as u8,
-                        cpu_id: rq.cpu_id,
-                        running_since_ns: timestamp_ns,
-                    },
-                );
-            }
-            return;
-        }
-
-        self.set_running_tid(
+        let next_running = RunningThread {
             tid,
-            RunningThread {
-                pid: event.raw.pid,
-                client_type: event.raw.client_type as u8,
-                cpu_id: rq.cpu_id,
-                running_since_ns: timestamp_ns,
-            },
-        );
-    }
+            basic_dim: dim,
+            cpu_id,
+            running_since_ns: timestamp_ns,
+        };
 
-    fn handle_process_exit(&mut self, buf: &Buffer, event: &ParsedEvent) {
-        let timestamp_ns = event.raw.timestamp_ns;
-        if !buf.contains_monotonic_timestamp(timestamp_ns) {
-            return;
+        let cpu_index = cpu_id as usize;
+        let mut reused_target_slot = false;
+
+        if let Some(prev_cpu) = self.find_cpu_for_tid(tid) {
+            let prev = self
+                .take_running_on_cpu(prev_cpu)
+                .expect("find_cpu_for_tid must point to an occupied slot");
+            if timestamp_ns > prev.running_since_ns {
+                buf.add_cpu_on_core(
+                    prev.basic_dim,
+                    prev.cpu_id,
+                    timestamp_ns - prev.running_since_ns,
+                );
+            } else if timestamp_ns < prev.running_since_ns {
+                self.restore_running(prev);
+                return;
+            }
+
+            reused_target_slot = prev_cpu as usize == cpu_index;
         }
 
-        let tid = event.raw.tid;
-        self.recovered_switch_out_by_tid.remove(&tid);
-        if let Some(running) = self.running_by_tid.get(&tid).copied() {
-            if timestamp_ns > running.running_since_ns {
-                self.remove_running_tid(tid);
+        if !reused_target_slot {
+            if let Some(prev) = self.take_running_on_cpu(cpu_id) {
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
+                } else if timestamp_ns < prev.running_since_ns {
+                    self.restore_running(prev);
+                    return;
+                }
+            }
+        }
+
+        self.restore_running(next_running);
+    }
+
+    #[inline(always)]
+    fn handle_sched_combined(
+        &mut self,
+        buf: &mut Buffer,
+        prev_tid: u32,
+        next_tid: u32,
+        timestamp_ns: u64,
+        prev_dim: BasicDimension,
+        next_dim: BasicDimension,
+        on_cpu_ns: u64,
+        runqueue_ns: u64,
+        off_cpu_ns: u64,
+        cpu_id: u32,
+    ) {
+        buf.add_sched_runqueue(next_dim, runqueue_ns, off_cpu_ns);
+        let mut resolved_prev_on_cpu_ns = Some(on_cpu_ns);
+
+        let next_running = RunningThread {
+            tid: next_tid,
+            basic_dim: next_dim,
+            cpu_id,
+            running_since_ns: timestamp_ns,
+        };
+
+        let mut current_cpu_running = self.take_running_on_cpu(cpu_id);
+
+        match current_cpu_running {
+            Some(running) if running.tid == prev_tid => {
+                if timestamp_ns > running.running_since_ns {
+                    resolved_prev_on_cpu_ns = Some(timestamp_ns - running.running_since_ns);
+                } else if timestamp_ns == running.running_since_ns {
+                    resolved_prev_on_cpu_ns = None;
+                } else if timestamp_ns < running.running_since_ns {
+                    // Match `handle_sched_switch` fallback behavior for stale
+                    // carried state on the outgoing thread.
+                    resolved_prev_on_cpu_ns = Some(on_cpu_ns);
+                }
+                current_cpu_running = None;
+            }
+            Some(running) => {
+                resolved_prev_on_cpu_ns = Some(on_cpu_ns);
+                current_cpu_running = Some(running);
+            }
+            None => {
+                resolved_prev_on_cpu_ns = Some(on_cpu_ns);
+            }
+        }
+
+        if let Some(resolved_prev_on_cpu_ns) = resolved_prev_on_cpu_ns {
+            buf.add_sched_slice(prev_dim, cpu_id, on_cpu_ns, resolved_prev_on_cpu_ns);
+        } else {
+            buf.add_sched_on_cpu(prev_dim, cpu_id, on_cpu_ns);
+        }
+
+        if let Some(running) = current_cpu_running.take() {
+            if running.tid == next_tid {
+                if timestamp_ns > running.running_since_ns {
+                    buf.add_cpu_on_core(
+                        running.basic_dim,
+                        running.cpu_id,
+                        timestamp_ns - running.running_since_ns,
+                    );
+                } else if timestamp_ns < running.running_since_ns {
+                    self.restore_running(running);
+                    return;
+                }
+            } else {
+                current_cpu_running = Some(running);
+            }
+        }
+
+        if current_cpu_running.is_some_and(|running| running.tid != next_tid) {
+            if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
+                let prev = self
+                    .take_running_on_cpu(prev_cpu)
+                    .expect("find_cpu_for_tid must point to an occupied slot");
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
+                } else if timestamp_ns < prev.running_since_ns {
+                    self.restore_running(prev);
+                    if let Some(running) = current_cpu_running {
+                        self.restore_running(running);
+                    }
+                    return;
+                }
+            }
+        } else if current_cpu_running.is_none() {
+            if let Some(prev_cpu) = self.find_cpu_for_tid(next_tid) {
+                let prev = self
+                    .take_running_on_cpu(prev_cpu)
+                    .expect("find_cpu_for_tid must point to an occupied slot");
+                if timestamp_ns > prev.running_since_ns {
+                    buf.add_cpu_on_core(
+                        prev.basic_dim,
+                        prev.cpu_id,
+                        timestamp_ns - prev.running_since_ns,
+                    );
+                } else if timestamp_ns < prev.running_since_ns {
+                    self.restore_running(prev);
+                    return;
+                }
+            }
+        }
+
+        if let Some(prev) = current_cpu_running {
+            if timestamp_ns > prev.running_since_ns {
                 buf.add_cpu_on_core(
-                    BasicDimension {
-                        pid: running.pid,
-                        client_type: running.client_type,
-                    },
+                    prev.basic_dim,
+                    prev.cpu_id,
+                    timestamp_ns - prev.running_since_ns,
+                );
+            } else if timestamp_ns < prev.running_since_ns {
+                self.restore_running(prev);
+                return;
+            }
+        }
+
+        self.restore_running(next_running);
+    }
+
+    fn handle_process_exit(&mut self, buf: &mut Buffer, tid: u32, timestamp_ns: u64) {
+        if let Some(cpu_id) = self.find_cpu_for_tid(tid) {
+            let running = self
+                .take_running_on_cpu(cpu_id)
+                .expect("find_cpu_for_tid must point to an occupied slot");
+            if timestamp_ns > running.running_since_ns {
+                buf.add_cpu_on_core(
+                    running.basic_dim,
                     running.cpu_id,
                     timestamp_ns - running.running_since_ns,
                 );
-            } else if timestamp_ns == running.running_since_ns {
-                self.remove_running_tid(tid);
+            }
+            if timestamp_ns < running.running_since_ns {
+                self.restore_running(running);
             }
         }
     }
@@ -307,27 +661,22 @@ pub struct AggregatedSink {
     cfg: AggregatedSinkConfig,
     meta_client_name: Arc<str>,
     meta_network_name: Arc<str>,
-    #[allow(dead_code)]
-    collector: Collector,
     exporters: Vec<Exporter>,
 
-    /// Event channel sender for the processing loop.
-    event_tx: mpsc::Sender<ParsedEvent>,
-    /// Event channel receiver, taken by `start`.
-    event_rx: Option<mpsc::Receiver<ParsedEvent>>,
+    /// Event-batch channel sender for the processing loop.
+    event_tx: mpsc::Sender<EventBatch>,
+    /// Event-batch channel receiver, taken by `start`.
+    event_rx: Option<mpsc::Receiver<EventBatch>>,
 
     /// Queue of slot-rotation buffers waiting to be flushed.
-    rotation_tx: mpsc::UnboundedSender<Arc<Buffer>>,
+    rotation_tx: mpsc::UnboundedSender<Buffer>,
     /// Queue receiver, taken by `start`.
-    rotation_rx: Option<mpsc::UnboundedReceiver<Arc<Buffer>>>,
+    rotation_rx: Option<mpsc::UnboundedReceiver<Buffer>>,
 
     /// Queue of slot changes consumed by the run loop.
     slot_rotation_tx: mpsc::UnboundedSender<SlotRotation>,
     /// Slot change receiver, taken by `start`.
     slot_rotation_rx: Option<mpsc::UnboundedReceiver<SlotRotation>>,
-
-    /// Atomic buffer pointer for lock-free rotation.
-    buffer: Arc<atomic_buffer::AtomicBuffer>,
 
     /// Shared atomic state, cloned into the spawned task.
     state: Arc<SharedState>,
@@ -343,12 +692,11 @@ impl AggregatedSink {
         meta_client_name: String,
         meta_network_name: String,
     ) -> Self {
-        let (event_tx, event_rx) = mpsc::channel(65536);
+        let (event_tx, event_rx) = mpsc::channel(EVENT_BATCH_CHANNEL_CAPACITY);
         let (rotation_tx, rotation_rx) = mpsc::unbounded_channel();
         let (slot_rotation_tx, slot_rotation_rx) = mpsc::unbounded_channel();
 
         Self {
-            collector: Collector::new(cfg.resolution.interval, &cfg.sampling),
             cfg,
             meta_client_name: Arc::from(meta_client_name),
             meta_network_name: Arc::from(meta_network_name),
@@ -359,7 +707,6 @@ impl AggregatedSink {
             rotation_rx: Some(rotation_rx),
             slot_rotation_tx,
             slot_rotation_rx: Some(slot_rotation_rx),
-            buffer: Arc::new(atomic_buffer::AtomicBuffer::new()),
             state: Arc::new(SharedState::new()),
             run_task: Arc::new(tokio::sync::Mutex::new(None)),
         }
@@ -398,6 +745,21 @@ impl AggregatedSink {
             state.el_offline.load(Ordering::Relaxed) == 1,
             system_cores,
         )
+    }
+
+    /// Resets a reusable buffer for the next aggregation window while preserving allocations.
+    fn reset_buffer_from_state(state: &SharedState, buf: &mut Buffer, now: SystemTime, slot: u64) {
+        let system_cores =
+            u16::try_from(state.system_cores.load(Ordering::Relaxed)).unwrap_or(u16::MAX);
+        buf.reset(
+            now,
+            slot,
+            state.slot_start_time(),
+            state.cl_syncing.load(Ordering::Relaxed) == 1,
+            state.el_optimistic.load(Ordering::Relaxed) == 1,
+            state.el_offline.load(Ordering::Relaxed) == 1,
+            system_cores,
+        );
     }
 
     /// Builds a sync-state row from current shared state.
@@ -470,150 +832,302 @@ impl AggregatedSink {
         }
     }
 
-    /// Routes a parsed event to the appropriate buffer aggregator.
-    fn process_event(buf: &Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
-        let basic_dim = BasicDimension {
-            pid: event.raw.pid,
-            client_type: event.raw.client_type as u8,
-        };
+    #[inline(always)]
+    fn process_event_inner<
+        const WITH_SCHEDULER_STATE: bool,
+        const WITH_NETWORK_PORT_LABELS: bool,
+    >(
+        buf: &mut Buffer,
+        event: &ParsedEvent,
+        dimensions: &ResolvedDimensions<'_>,
+        scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
+    ) {
+        let basic_dim = BasicDimension::from_packed(event.raw.basic_dimension_key());
 
         match &event.typed {
-            TypedEvent::Syscall(e) => {
-                buf.add_syscall(event.raw.event_type, basic_dim, e.latency_ns);
+            TypedEvent::SyscallRead(e) => {
+                buf.add_syscall_read(basic_dim, e.latency_ns);
             }
 
-            TypedEvent::NetIO(e) => {
-                let net_dim = build_network_dimension(
-                    event.raw.pid,
-                    event.raw.client_type as u8,
-                    e,
-                    dimensions,
-                );
-                buf.add_net_io(net_dim, i64::from(e.bytes));
+            TypedEvent::SyscallWrite(e) => {
+                buf.add_syscall_write(basic_dim, e.latency_ns);
+            }
 
-                // Inline metrics are valid only for TCP net_tx events.
-                if e.has_metrics && e.transport == NetTransport::Tcp {
-                    let tcp_dim = build_tcp_metrics_dim_from_net_io(
-                        event.raw.pid,
-                        event.raw.client_type as u8,
-                        e,
-                        dimensions,
-                    );
-                    buf.add_tcp_metrics(tcp_dim, e.srtt_us, e.cwnd);
-                }
+            TypedEvent::SyscallFutex(e) => {
+                buf.add_syscall_futex(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::SyscallMmap(e) => {
+                buf.add_syscall_mmap(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::SyscallEpollWait(e) => {
+                buf.add_syscall_epoll_wait(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::SyscallFsync(e) => {
+                buf.add_syscall_fsync(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::SyscallFdatasync(e) => {
+                buf.add_syscall_fdatasync(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::SyscallPwrite(e) => {
+                buf.add_syscall_pwrite(basic_dim, e.latency_ns);
+            }
+
+            TypedEvent::NetIOTx(e) => {
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    e.transport,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
+                buf.add_net_io_tx(net_dim, i64::from(e.bytes));
+            }
+
+            TypedEvent::NetIORx(e) => {
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    e.transport,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
+                buf.add_net_io_rx(net_dim, i64::from(e.bytes));
+            }
+
+            TypedEvent::NetIOTcpTxMetrics(e) => {
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    NetTransport::Tcp as u8,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
+                );
+                buf.add_net_io_with_tcp_metrics_dim(net_dim, i64::from(e.bytes), e.srtt_us, e.cwnd);
             }
 
             TypedEvent::TcpRetransmit(e) => {
-                let net_dim = build_network_dimension_from_tcp_retransmit(
-                    event.raw.pid,
-                    event.raw.client_type as u8,
-                    e.src_port,
-                    e.dst_port,
-                    dimensions,
+                let net_dim = build_tcp_metrics_dimension::<WITH_NETWORK_PORT_LABELS>(
+                    basic_dim,
+                    NetTransport::Tcp as u8,
+                    e.local_port,
+                    e.remote_port,
+                    dimensions.network_port_label_map,
+                    port_label_cache,
                 );
-                buf.add_tcp_retransmit(net_dim, i64::from(e.bytes));
+                buf.add_tcp_retransmit_dim(net_dim, i64::from(e.bytes));
             }
 
-            TypedEvent::TcpState(_) => {
+            TypedEvent::TcpState => {
                 buf.add_tcp_state_change(basic_dim);
             }
 
             TypedEvent::DiskIO(e) => {
-                let disk_dim = build_disk_dimension(
-                    event.raw.pid,
-                    event.raw.client_type as u8,
-                    e.device_id,
+                let disk_dim =
+                    build_disk_io_dimension_from_basic(basic_dim, e.device_id, dimensions);
+                buf.add_disk_io_with_device_key(
+                    disk_dim,
                     e.rw,
-                    dimensions,
+                    e.latency_ns,
+                    e.bytes,
+                    e.queue_depth,
                 );
-                buf.add_disk_io(disk_dim, e.latency_ns, e.bytes, e.queue_depth);
             }
 
             TypedEvent::BlockMerge(e) => {
-                let disk_dim = build_disk_dimension(
-                    event.raw.pid,
-                    event.raw.client_type as u8,
-                    0,
-                    e.rw,
-                    dimensions,
-                );
+                let disk_dim = build_disk_dimension_from_basic(basic_dim, 0, e.rw, dimensions);
                 buf.add_block_merge(disk_dim, e.bytes);
             }
 
             TypedEvent::Sched(e) => {
-                buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+                let cpu_id = event.raw.scheduler_cpu_id();
+                if WITH_SCHEDULER_STATE {
+                    scheduler_state.handle_sched_switch(
+                        buf,
+                        event.raw.tid,
+                        event.raw.timestamp_ns,
+                        basic_dim,
+                        e.on_cpu_ns,
+                        cpu_id,
+                    );
+                } else {
+                    buf.add_sched_switch(basic_dim, e.on_cpu_ns, cpu_id);
+                }
+            }
+
+            TypedEvent::SchedCombined(e) => {
+                let prev_dim = basic_dim;
+                let next_dim =
+                    BasicDimension::new(e.next_pid, event.raw.secondary_client_type_raw());
+                let cpu_id = event.raw.scheduler_cpu_id();
+
+                if WITH_SCHEDULER_STATE {
+                    scheduler_state.handle_sched_combined(
+                        buf,
+                        event.raw.tid,
+                        e.next_tid,
+                        event.raw.timestamp_ns,
+                        prev_dim,
+                        next_dim,
+                        e.on_cpu_ns,
+                        e.runqueue_ns,
+                        e.off_cpu_ns,
+                        cpu_id,
+                    );
+                } else {
+                    buf.add_sched_switch(prev_dim, e.on_cpu_ns, cpu_id);
+                    buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
+                }
             }
 
             TypedEvent::SchedRunqueue(e) => {
-                buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
+                let cpu_id = event.raw.scheduler_cpu_id();
+                if WITH_SCHEDULER_STATE {
+                    scheduler_state.handle_sched_runqueue(
+                        buf,
+                        event.raw.tid,
+                        event.raw.timestamp_ns,
+                        basic_dim,
+                        e.runqueue_ns,
+                        e.off_cpu_ns,
+                        cpu_id,
+                    );
+                } else {
+                    buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
+                }
             }
 
             TypedEvent::PageFault(e) => {
                 buf.add_page_fault(basic_dim, e.major);
             }
 
-            TypedEvent::FD(_) => {
-                if event.raw.event_type == EventType::FDOpen {
-                    buf.add_fd_open(basic_dim);
-                } else {
-                    buf.add_fd_close(basic_dim);
-                }
+            TypedEvent::FDOpen => {
+                buf.add_fd_open(basic_dim);
             }
 
-            TypedEvent::MemLatency(e) => {
-                if event.raw.event_type == EventType::MemReclaim {
-                    buf.add_mem_reclaim(basic_dim, e.duration_ns);
-                } else {
-                    buf.add_mem_compaction(basic_dim, e.duration_ns);
-                }
+            TypedEvent::FDClose => {
+                buf.add_fd_close(basic_dim);
             }
 
-            TypedEvent::Swap(e) => {
-                if event.raw.event_type == EventType::SwapIn {
-                    buf.add_swap_in(basic_dim, e.pages);
-                } else {
-                    buf.add_swap_out(basic_dim, e.pages);
-                }
+            TypedEvent::MemReclaim(e) => {
+                buf.add_mem_reclaim(basic_dim, e.duration_ns);
             }
 
-            TypedEvent::OOMKill(_) => {
+            TypedEvent::MemCompaction(e) => {
+                buf.add_mem_compaction(basic_dim, e.duration_ns);
+            }
+
+            TypedEvent::SwapIn(e) => {
+                buf.add_swap_in(basic_dim, e.pages);
+            }
+
+            TypedEvent::SwapOut(e) => {
+                buf.add_swap_out(basic_dim, e.pages);
+            }
+
+            TypedEvent::OOMKill => {
                 buf.add_oom_kill(basic_dim);
             }
 
-            TypedEvent::ProcessExit(_) => {
+            TypedEvent::ProcessExit => {
                 buf.add_process_exit(basic_dim);
+                if WITH_SCHEDULER_STATE {
+                    scheduler_state.handle_process_exit(buf, event.raw.tid, event.raw.timestamp_ns);
+                }
             }
         }
     }
 
-    /// Routes a parsed event while maintaining carried scheduler state for
-    /// exact per-core window accounting across buffer rotations.
-    fn process_event_with_scheduler_state(
-        buf: &Buffer,
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    fn process_event_resolved<const WITH_SCHEDULER_STATE: bool>(
+        buf: &mut Buffer,
         event: &ParsedEvent,
-        dimensions: &DimensionsConfig,
+        dimensions: &ResolvedDimensions<'_>,
         scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
     ) {
-        let basic_dim = BasicDimension {
-            pid: event.raw.pid,
-            client_type: event.raw.client_type as u8,
-        };
+        if dimensions.network_port_label_map.is_some() {
+            Self::process_event_inner::<WITH_SCHEDULER_STATE, true>(
+                buf,
+                event,
+                dimensions,
+                scheduler_state,
+                port_label_cache,
+            );
+        } else {
+            Self::process_event_inner::<WITH_SCHEDULER_STATE, false>(
+                buf,
+                event,
+                dimensions,
+                scheduler_state,
+                port_label_cache,
+            );
+        }
+    }
 
-        match &event.typed {
-            TypedEvent::Sched(_) => {
-                scheduler_state.handle_sched_switch(buf, event);
+    /// Routes a parsed event to the appropriate buffer aggregator.
+    #[cfg(test)]
+    fn process_event(buf: &mut Buffer, event: &ParsedEvent, dimensions: &DimensionsConfig) {
+        let mut port_label_cache = PortLabelResolveCache::default();
+        let resolved_dimensions = ResolvedDimensions::from_config(dimensions);
+        let mut scheduler_state = SchedulerWindowState::default();
+        Self::process_event_resolved::<false>(
+            buf,
+            event,
+            &resolved_dimensions,
+            &mut scheduler_state,
+            &mut port_label_cache,
+        );
+    }
+
+    #[inline(always)]
+    fn process_event_batch_with_scheduler_state(
+        buf: &mut Buffer,
+        events: &EventBatch,
+        dimensions: &ResolvedDimensions<'_>,
+        scheduler_state: &mut SchedulerWindowState,
+        port_label_cache: &mut PortLabelResolveCache,
+    ) {
+        if dimensions.network_port_label_map.is_some() {
+            for event in &events.events {
+                Self::process_event_inner::<true, true>(
+                    buf,
+                    event,
+                    dimensions,
+                    scheduler_state,
+                    port_label_cache,
+                );
             }
-
-            TypedEvent::SchedRunqueue(_) => {
-                scheduler_state.handle_sched_runqueue(buf, event);
+        } else {
+            for event in &events.events {
+                Self::process_event_inner::<true, false>(
+                    buf,
+                    event,
+                    dimensions,
+                    scheduler_state,
+                    port_label_cache,
+                );
             }
+        }
+    }
 
-            TypedEvent::ProcessExit(_) => {
-                buf.add_process_exit(basic_dim);
-                scheduler_state.handle_process_exit(buf, event);
-            }
+    pub fn handle_event_batch(&self, events: EventBatch) {
+        if events.is_empty() {
+            return;
+        }
+        debug_assert!(events.len() <= EVENT_BATCH_SIZE);
 
-            _ => Self::process_event(buf, event, dimensions),
+        if self.event_tx.try_send(events).is_err() {
+            warn!("aggregated sink event batch channel full, dropping batch");
         }
     }
 }
@@ -637,7 +1151,6 @@ impl Sink for AggregatedSink {
         // Initialize first buffer.
         let now = SystemTime::now();
         let initial_buf = Self::new_buffer_from_state(&self.state, now, 0);
-        self.buffer.store(initial_buf);
 
         // Take the receivers out of self for the run loop.
         let mut event_rx = self.event_rx.take().expect("start called more than once");
@@ -657,7 +1170,6 @@ impl Sink for AggregatedSink {
             info!(exporter = exporter.name(), "exporter started");
         }
 
-        let buffer = Arc::clone(&self.buffer);
         let state = Arc::clone(&self.state);
         let dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
@@ -665,7 +1177,9 @@ impl Sink for AggregatedSink {
         let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
         let resolution_overrides = self.cfg.resolution.overrides.clone();
         let sampling_cfg = self.cfg.sampling.clone();
-        let collect_process_snapshots = self.cfg.collect_process_snapshots;
+        // Keep parse + aggregate collection running even with no exporters, but
+        // avoid /proc snapshot reads when nothing can consume those metrics.
+        let collect_process_snapshots = !exporters.is_empty();
         let collector = Collector::new_with_process_snapshots(
             interval,
             &sampling_cfg,
@@ -678,6 +1192,7 @@ impl Sink for AggregatedSink {
         let slot_aligned = self.cfg.resolution.slot_aligned;
 
         let run_task = tokio::spawn(async move {
+            let resolved_dimensions = ResolvedDimensions::from_config(&dimensions);
             let mut ticker = tokio::time::interval(interval);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             let mut sync_state_ticker = tokio::time::interval(sync_state_interval);
@@ -704,8 +1219,14 @@ impl Sink for AggregatedSink {
                 process_sched_usage: Vec::new(),
             };
             let mut scheduler_state = SchedulerWindowState::default();
-
-            const BATCH_SIZE: usize = 256;
+            let mut port_label_cache = PortLabelResolveCache::default();
+            let mut current_buf = initial_buf;
+            let mut reusable_buf =
+                AggregatedSink::new_buffer_from_state(&state, SystemTime::now(), 0);
+            // Slot-aligned rotations are flushed asynchronously through
+            // `rotation_rx`, so keep a separate pool entry instead of
+            // reallocating a fresh buffer at every slot boundary.
+            let mut reusable_slot_rotation_buf: Option<Buffer> = None;
 
             // Emit host specs once on startup, then on the configured ticker.
             {
@@ -733,6 +1254,17 @@ impl Sink for AggregatedSink {
             loop {
                 tokio::select! {
                     _ = ctx.cancelled() => {
+                        while let Ok(events) = event_rx.try_recv() {
+                            AggregatedSink::process_event_batch_with_scheduler_state(
+                                &mut current_buf,
+                                &events,
+                                &resolved_dimensions,
+                                &mut scheduler_state,
+                                &mut port_label_cache,
+                            );
+                            events.recycle();
+                        }
+
                         // Flush pending slot-rotation buffers first.
                         while let Ok(rotated_buf) = rotation_rx.try_recv() {
                             reusable_batch.metadata.updated_time = SystemTime::now();
@@ -752,51 +1284,47 @@ impl Sink for AggregatedSink {
                         }
 
                         // Final flush.
-                        if let Some(final_buf) = buffer.take() {
-                            let boundary_ns = monotonic_ns();
-                            scheduler_state.flush_running_to_boundary(&final_buf, boundary_ns);
-                            final_buf.mark_flushed(boundary_ns);
-                            reusable_batch.metadata.updated_time = SystemTime::now();
-                            collector.collect_into(&final_buf, &mut reusable_batch);
-                            flush_controller.force_flush_all(&mut reusable_batch);
-                            if !reusable_batch.is_empty() {
-                                #[cfg(feature = "bpf")]
-                                let memory_usage = reusable_batch.memory_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let memory_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_io_usage = reusable_batch.process_io_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_io_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_fd_usage = reusable_batch.process_fd_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_fd_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_sched_usage = reusable_batch.process_sched_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_sched_usage = 0usize;
-                                for exporter in &exporters {
-                                    if let Err(e) = exporter.export(&reusable_batch).await {
-                                        tracing::error!(
-                                            exporter = exporter.name(),
-                                            error = %e,
-                                            "final export failed",
-                                        );
-                                    }
+                        scheduler_state.flush_running_to_boundary(&mut current_buf, monotonic_ns());
+                        reusable_batch.metadata.updated_time = SystemTime::now();
+                        collector.collect_into(&current_buf, &mut reusable_batch);
+                        flush_controller.force_flush_all(&mut reusable_batch);
+                        if !reusable_batch.is_empty() {
+                            #[cfg(feature = "bpf")]
+                            let memory_usage = reusable_batch.memory_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let memory_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_io_usage = reusable_batch.process_io_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_io_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_fd_usage = reusable_batch.process_fd_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_fd_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_sched_usage = reusable_batch.process_sched_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_sched_usage = 0usize;
+                            for exporter in &exporters {
+                                if let Err(e) = exporter.export(&reusable_batch).await {
+                                    tracing::error!(
+                                        exporter = exporter.name(),
+                                        error = %e,
+                                        "final export failed",
+                                    );
                                 }
-                                info!(
-                                    latency = reusable_batch.latency.len(),
-                                    counter = reusable_batch.counter.len(),
-                                    gauge = reusable_batch.gauge.len(),
-                                    cpu_util = reusable_batch.cpu_util.len(),
-                                    memory_usage,
-                                    process_io_usage,
-                                    process_fd_usage,
-                                    process_sched_usage,
-                                    "final flush"
-                                );
                             }
+                            info!(
+                                latency = reusable_batch.latency.len(),
+                                counter = reusable_batch.counter.len(),
+                                gauge = reusable_batch.gauge.len(),
+                                cpu_util = reusable_batch.cpu_util.len(),
+                                memory_usage,
+                                process_io_usage,
+                                process_fd_usage,
+                                process_sched_usage,
+                                "final flush"
+                            );
                         }
 
                         // Stop all exporters.
@@ -813,29 +1341,31 @@ impl Sink for AggregatedSink {
                         return;
                     }
 
-                    Some(event) = event_rx.recv() => {
-                        // Process the first event.
-                        if let Some(buf) = buffer.load() {
-                            AggregatedSink::process_event_with_scheduler_state(
-                                &buf,
-                                &event,
-                                &dimensions,
-                                &mut scheduler_state,
-                            );
+                    Some(events) = event_rx.recv() => {
+                        // Process the first batch.
+                        AggregatedSink::process_event_batch_with_scheduler_state(
+                            &mut current_buf,
+                            &events,
+                            &resolved_dimensions,
+                            &mut scheduler_state,
+                            &mut port_label_cache,
+                        );
+                        events.recycle();
 
-                            // Drain up to BATCH_SIZE-1 more events without blocking.
-                            for _ in 0..BATCH_SIZE - 1 {
-                                match event_rx.try_recv() {
-                                    Ok(event) => {
-                                        AggregatedSink::process_event_with_scheduler_state(
-                                            &buf,
-                                            &event,
-                                            &dimensions,
-                                            &mut scheduler_state,
-                                        );
-                                    }
-                                    Err(_) => break,
+                        // Drain more queued batches without blocking.
+                        for _ in 0..EVENT_BATCHES_PER_WAKE - 1 {
+                            match event_rx.try_recv() {
+                                Ok(events) => {
+                                    AggregatedSink::process_event_batch_with_scheduler_state(
+                                        &mut current_buf,
+                                        &events,
+                                        &resolved_dimensions,
+                                        &mut scheduler_state,
+                                        &mut port_label_cache,
+                                    );
+                                    events.recycle();
                                 }
+                                Err(_) => break,
                             }
                         }
                     }
@@ -852,22 +1382,33 @@ impl Sink for AggregatedSink {
                         if slot_aligned {
                             // keep slot-aligned rotation behavior in run loop so scheduler carry
                             // can be applied exactly at the boundary.
-                            if let Some(old_buf) = buffer.swap(AggregatedSink::new_buffer_from_state(
-                                &state,
-                                SystemTime::now(),
-                                rotation.new_slot,
-                            )) {
-                                let boundary_ns = monotonic_ns();
-                                scheduler_state.flush_running_to_boundary(&old_buf, boundary_ns);
-                                old_buf.mark_flushed(boundary_ns);
-                                if rotation_tx.send(old_buf).is_err() {
-                                    warn!(
-                                        slot = rotation.new_slot,
-                                        "slot-aligned buffer rotation queue closed, dropping flush"
-                                    );
-                                } else {
-                                    tracing::debug!(slot = rotation.new_slot, "slot-aligned buffer rotation");
-                                }
+                            let now = SystemTime::now();
+                            let next_buf = if let Some(mut buf) =
+                                reusable_slot_rotation_buf.take()
+                            {
+                                AggregatedSink::reset_buffer_from_state(
+                                    &state,
+                                    &mut buf,
+                                    now,
+                                    rotation.new_slot,
+                                );
+                                buf
+                            } else {
+                                AggregatedSink::new_buffer_from_state(
+                                    &state,
+                                    now,
+                                    rotation.new_slot,
+                                )
+                            };
+                            let mut old_buf = std::mem::replace(&mut current_buf, next_buf);
+                            scheduler_state.flush_running_to_boundary(&mut old_buf, monotonic_ns());
+                            if rotation_tx.send(old_buf).is_err() {
+                                warn!(
+                                    slot = rotation.new_slot,
+                                    "slot-aligned buffer rotation queue closed, dropping flush"
+                                );
+                            } else {
+                                tracing::debug!(slot = rotation.new_slot, "slot-aligned buffer rotation");
                             }
                         }
                     }
@@ -914,60 +1455,61 @@ impl Sink for AggregatedSink {
                                 "slot-aligned buffer flushed"
                             );
                         }
+                        reusable_slot_rotation_buf = Some(rotated_buf);
                     }
 
                     _ = ticker.tick() => {
                         let now = SystemTime::now();
                         let slot = state.current_slot.load(Ordering::Relaxed);
-                        let new_buf = AggregatedSink::new_buffer_from_state(
-                            &state, now, slot,
+                        AggregatedSink::reset_buffer_from_state(
+                            &state,
+                            &mut reusable_buf,
+                            now,
+                            slot,
                         );
-
-                        if let Some(old_buf) = buffer.swap(new_buf) {
-                            let boundary_ns = monotonic_ns();
-                            scheduler_state.flush_running_to_boundary(&old_buf, boundary_ns);
-                            old_buf.mark_flushed(boundary_ns);
-                            reusable_batch.metadata.updated_time = SystemTime::now();
-                            collector.collect_into(&old_buf, &mut reusable_batch);
-                            flush_controller.process_tick(&mut reusable_batch);
-                            if !reusable_batch.is_empty() {
-                                #[cfg(feature = "bpf")]
-                                let memory_usage = reusable_batch.memory_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let memory_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_io_usage = reusable_batch.process_io_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_io_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_fd_usage = reusable_batch.process_fd_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_fd_usage = 0usize;
-                                #[cfg(feature = "bpf")]
-                                let process_sched_usage = reusable_batch.process_sched_usage.len();
-                                #[cfg(not(feature = "bpf"))]
-                                let process_sched_usage = 0usize;
-                                for exporter in &exporters {
-                                    if let Err(e) = exporter.export(&reusable_batch).await {
-                                        tracing::error!(
-                                            exporter = exporter.name(),
-                                            error = %e,
-                                            "export failed",
-                                        );
-                                    }
+                        std::mem::swap(&mut current_buf, &mut reusable_buf);
+                        scheduler_state
+                            .flush_running_to_boundary(&mut reusable_buf, monotonic_ns());
+                        reusable_batch.metadata.updated_time = SystemTime::now();
+                        collector.collect_into(&reusable_buf, &mut reusable_batch);
+                        flush_controller.process_tick(&mut reusable_batch);
+                        if !reusable_batch.is_empty() {
+                            #[cfg(feature = "bpf")]
+                            let memory_usage = reusable_batch.memory_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let memory_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_io_usage = reusable_batch.process_io_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_io_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_fd_usage = reusable_batch.process_fd_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_fd_usage = 0usize;
+                            #[cfg(feature = "bpf")]
+                            let process_sched_usage = reusable_batch.process_sched_usage.len();
+                            #[cfg(not(feature = "bpf"))]
+                            let process_sched_usage = 0usize;
+                            for exporter in &exporters {
+                                if let Err(e) = exporter.export(&reusable_batch).await {
+                                    tracing::error!(
+                                        exporter = exporter.name(),
+                                        error = %e,
+                                        "export failed",
+                                    );
                                 }
-                                tracing::debug!(
-                                    latency = reusable_batch.latency.len(),
-                                    counter = reusable_batch.counter.len(),
-                                    gauge = reusable_batch.gauge.len(),
-                                    cpu_util = reusable_batch.cpu_util.len(),
-                                    memory_usage,
-                                    process_io_usage,
-                                    process_fd_usage,
-                                    process_sched_usage,
-                                    "buffer flushed"
-                                );
                             }
+                            tracing::debug!(
+                                latency = reusable_batch.latency.len(),
+                                counter = reusable_batch.counter.len(),
+                                gauge = reusable_batch.gauge.len(),
+                                cpu_util = reusable_batch.cpu_util.len(),
+                                memory_usage,
+                                process_io_usage,
+                                process_fd_usage,
+                                process_sched_usage,
+                                "buffer flushed"
+                            );
                         }
                     }
 
@@ -1032,9 +1574,9 @@ impl Sink for AggregatedSink {
     }
 
     fn handle_event(&self, event: ParsedEvent) {
-        if self.event_tx.try_send(event).is_err() {
-            warn!("aggregated sink event channel full, dropping event");
-        }
+        let mut batch = ParsedEventBatch::with_capacity(1);
+        batch.push(event);
+        self.handle_event_batch(batch);
     }
 
     fn on_slot_changed(&self, new_slot: u64, slot_start: SystemTime) {
@@ -1118,37 +1660,70 @@ fn parse_cpu_online_text(text: &str) -> Option<u32> {
 // --- Dimension builder helpers ---
 
 /// Creates a NetworkDimension based on config.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_network_dimension(
     pid: u32,
     client_type: u8,
+    direction: u8,
     e: &NetIOEvent,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
-    let mut dim = NetworkDimension {
-        pid,
-        client_type,
-        port_label: 0,
-        direction: 0,
-    };
+    let resolved_dims = ResolvedDimensions::from_config(dims);
+    build_network_dimension_from_parts_uncached(
+        BasicDimension::new(pid, client_type),
+        direction,
+        e.transport,
+        e.local_port,
+        e.remote_port,
+        &resolved_dims,
+    )
+}
 
-    if dims.network.include_direction {
-        dim.direction = e.direction as u8;
+#[inline(always)]
+fn build_tcp_metrics_dimension_with_port_label_cached(
+    basic: BasicDimension,
+    transport: u8,
+    local_port: u16,
+    remote_port: u16,
+    port_label_map: &crate::agent::ports::PortLabelMap,
+    port_label_cache: &mut PortLabelResolveCache,
+) -> TCPMetricsDimension {
+    let port_label = port_label_cache.resolve(
+        port_label_map,
+        basic.client_type(),
+        transport,
+        local_port,
+        remote_port,
+    );
+
+    TCPMetricsDimension::from_basic(basic, port_label)
+}
+
+#[inline(always)]
+fn build_tcp_metrics_dimension<const WITH_PORT_LABELS: bool>(
+    basic: BasicDimension,
+    transport: u8,
+    local_port: u16,
+    remote_port: u16,
+    port_label_map: Option<&crate::agent::ports::PortLabelMap>,
+    port_label_cache: &mut PortLabelResolveCache,
+) -> TCPMetricsDimension {
+    if WITH_PORT_LABELS {
+        build_tcp_metrics_dimension_with_port_label_cached(
+            basic,
+            transport,
+            local_port,
+            remote_port,
+            port_label_map.expect("WITH_PORT_LABELS requires a port label map"),
+            port_label_cache,
+        )
+    } else {
+        TCPMetricsDimension::from_basic(basic, 0)
     }
-
-    if dims.network.include_port {
-        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
-        let local = local_port(e);
-        let remote = remote_port(e);
-        dim.port_label = match e.transport {
-            NetTransport::Tcp => dims.network.resolve_tcp_port_label(client, local, remote),
-            NetTransport::Udp => dims.network.resolve_udp_port_label(client, local, remote),
-        };
-    }
-
-    dim
 }
 
 /// Creates a NetworkDimension for TCP retransmit events.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_network_dimension_from_tcp_retransmit(
     pid: u32,
     client_type: u8,
@@ -1156,49 +1731,73 @@ fn build_network_dimension_from_tcp_retransmit(
     dst_port: u16,
     dims: &DimensionsConfig,
 ) -> NetworkDimension {
-    let mut dim = NetworkDimension {
-        pid,
-        client_type,
-        port_label: 0,
-        direction: 0, // Retransmits are always TX.
-    };
-
-    if dims.network.include_port {
-        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
-        // Retransmits are TCP-only by definition.
-        dim.port_label = dims
-            .network
-            .resolve_tcp_port_label(client, src_port, dst_port);
-    }
-
-    dim
+    let resolved_dims = ResolvedDimensions::from_config(dims);
+    build_network_dimension_from_parts_uncached(
+        BasicDimension::new(pid, client_type),
+        Direction::TX as u8,
+        NetTransport::Tcp as u8,
+        src_port,
+        dst_port,
+        &resolved_dims,
+    )
 }
 
-/// Creates a TCPMetricsDimension from a merged NetIOEvent.
-fn build_tcp_metrics_dim_from_net_io(
-    pid: u32,
-    client_type: u8,
-    e: &NetIOEvent,
-    dims: &DimensionsConfig,
-) -> TCPMetricsDimension {
-    let mut dim = TCPMetricsDimension {
-        pid,
-        client_type,
-        port_label: 0,
+#[inline(always)]
+fn build_network_dimension_from_parts_uncached(
+    basic: BasicDimension,
+    raw_direction: u8,
+    transport: u8,
+    local_port: u16,
+    remote_port: u16,
+    dims: &ResolvedDimensions<'_>,
+) -> NetworkDimension {
+    let direction = raw_direction & dims.network_direction_mask;
+    let port_label = if let Some(port_label_map) = dims.network_port_label_map {
+        resolve_network_port_label_uncached(
+            basic.client_type(),
+            transport,
+            local_port,
+            remote_port,
+            port_label_map,
+        )
+    } else {
+        0
     };
 
-    if dims.network.include_port {
-        let client = ClientType::from_u8(client_type).unwrap_or(ClientType::Unknown);
-        let local = local_port(e);
-        let remote = remote_port(e);
-        // Inline TCP metrics are only attached to net_tx TCP probes.
-        dim.port_label = dims.network.resolve_tcp_port_label(client, local, remote);
-    }
+    NetworkDimension::from_basic(basic, port_label, direction)
+}
 
-    dim
+#[inline(always)]
+fn resolve_network_port_label_uncached(
+    client_type: u8,
+    transport: u8,
+    primary_port: u16,
+    secondary_port: u16,
+    port_label_map: &crate::agent::ports::PortLabelMap,
+) -> u8 {
+    match transport {
+        transport if transport == NetTransport::Tcp as u8 => {
+            port_label_map.resolve_tcp_raw(client_type, primary_port, secondary_port) as u8
+        }
+        _ => port_label_map.resolve_udp_raw(client_type, primary_port, secondary_port) as u8,
+    }
+}
+
+/// Extracts the local port from a network event.
+/// Ports are normalized during parsing, so this is just a field read.
+#[cfg_attr(not(test), allow(dead_code))]
+fn local_port(e: &NetIOEvent) -> u16 {
+    e.local_port
+}
+
+/// Extracts the peer/remote port from a network event.
+#[cfg_attr(not(test), allow(dead_code))]
+fn remote_port(e: &NetIOEvent) -> u16 {
+    e.remote_port
 }
 
 /// Creates a DiskDimension based on config.
+#[cfg_attr(not(test), allow(dead_code))]
 fn build_disk_dimension(
     pid: u32,
     client_type: u8,
@@ -1206,41 +1805,36 @@ fn build_disk_dimension(
     rw: u8,
     dims: &DimensionsConfig,
 ) -> DiskDimension {
-    let mut dim = DiskDimension {
-        pid,
-        client_type,
-        device_id: 0,
-        rw: 0,
-    };
-
-    if dims.disk.include_device {
-        dim.device_id = device_id;
-    }
-
-    if dims.disk.include_rw {
-        dim.rw = rw;
-    }
-
-    dim
+    let resolved_dims = ResolvedDimensions::from_config(dims);
+    build_disk_dimension_from_basic(
+        BasicDimension::new(pid, client_type),
+        device_id,
+        rw,
+        &resolved_dims,
+    )
 }
 
-/// Extracts the local port from a network event.
-/// For TX (outbound), source is local. For RX (inbound), dest is local.
-fn local_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX {
-        e.src_port
-    } else {
-        e.dst_port
-    }
+#[inline(always)]
+fn build_disk_io_dimension_from_basic(
+    basic: BasicDimension,
+    device_id: u32,
+    dims: &ResolvedDimensions<'_>,
+) -> DiskDeviceDimension {
+    DiskDeviceDimension::from_basic(basic, device_id & dims.disk_device_mask)
 }
 
-/// Extracts the peer/remote port from a network event.
-fn remote_port(e: &NetIOEvent) -> u16 {
-    if e.direction == Direction::TX {
-        e.dst_port
-    } else {
-        e.src_port
-    }
+#[inline(always)]
+fn build_disk_dimension_from_basic(
+    basic: BasicDimension,
+    device_id: u32,
+    rw: u8,
+    dims: &ResolvedDimensions<'_>,
+) -> DiskDimension {
+    DiskDimension::from_basic(
+        basic,
+        device_id & dims.disk_device_mask,
+        rw & dims.disk_rw_mask,
+    )
 }
 
 /// Returns current monotonic clock value in nanoseconds.
@@ -1260,48 +1854,6 @@ fn monotonic_ns() -> u64 {
     }
 }
 
-/// Atomic buffer wrapper using `Arc<Buffer>` with lock-free swap.
-mod atomic_buffer {
-    use arc_swap::ArcSwapOption;
-    use std::sync::Arc;
-
-    use super::Buffer;
-
-    /// Thread-safe atomic buffer holder.
-    /// Uses lock-free atomic loads/swaps for the hot event-processing path.
-    pub struct AtomicBuffer {
-        inner: ArcSwapOption<Buffer>,
-    }
-
-    impl AtomicBuffer {
-        pub fn new() -> Self {
-            Self {
-                inner: ArcSwapOption::empty(),
-            }
-        }
-
-        /// Stores a new buffer.
-        pub fn store(&self, buf: Buffer) {
-            self.inner.store(Some(Arc::new(buf)));
-        }
-
-        /// Loads the current buffer, returning a clone of the Arc.
-        pub fn load(&self) -> Option<Arc<Buffer>> {
-            self.inner.load_full()
-        }
-
-        /// Swaps in a new buffer, returning the old one.
-        pub fn swap(&self, new_buf: Buffer) -> Option<Arc<Buffer>> {
-            self.inner.swap(Some(Arc::new(new_buf)))
-        }
-
-        /// Takes the buffer out, leaving None.
-        pub fn take(&self) -> Option<Arc<Buffer>> {
-            self.inner.swap(None)
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1311,13 +1863,7 @@ mod tests {
 
     fn make_event(event_type: EventType, typed: TypedEvent) -> ParsedEvent {
         ParsedEvent {
-            raw: Event {
-                timestamp_ns: 0,
-                pid: 123,
-                tid: 123,
-                event_type,
-                client_type: ClientType::Geth,
-            },
+            raw: Event::new(0, 123, 123, event_type, ClientType::Geth as u8),
             typed,
         }
     }
@@ -1330,34 +1876,237 @@ mod tests {
         typed: TypedEvent,
     ) -> ParsedEvent {
         ParsedEvent {
-            raw: Event {
-                timestamp_ns,
-                pid,
-                tid,
-                event_type,
-                client_type: ClientType::Geth,
-            },
+            raw: Event::new(timestamp_ns, pid, tid, event_type, ClientType::Geth as u8),
             typed,
         }
     }
 
-    fn test_buffer() -> Buffer {
-        let mut buf = Buffer::new(
-            SystemTime::now(),
-            0,
-            SystemTime::now(),
-            false,
-            false,
-            false,
-            8,
+    fn make_scheduler_event_at(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        event_type: EventType,
+        cpu_id: u32,
+        typed: TypedEvent,
+    ) -> ParsedEvent {
+        ParsedEvent {
+            raw: Event::new(timestamp_ns, pid, tid, event_type, ClientType::Geth as u8)
+                .with_scheduler_cpu_id(cpu_id),
+            typed,
+        }
+    }
+
+    fn make_sched_combined_event_at(
+        timestamp_ns: u64,
+        pid: u32,
+        tid: u32,
+        cpu_id: u32,
+        next_client_type: u8,
+        typed: TypedEvent,
+    ) -> ParsedEvent {
+        ParsedEvent {
+            raw: Event::new(
+                timestamp_ns,
+                pid,
+                tid,
+                EventType::SchedSwitch,
+                ClientType::Geth as u8,
+            )
+            .with_secondary_logical_event(EventType::SchedRunqueue, next_client_type)
+            .with_scheduler_cpu_id(cpu_id),
+            typed,
+        }
+    }
+
+    fn process_event_with_scheduler_state(
+        buf: &mut Buffer,
+        event: &ParsedEvent,
+        dims: &DimensionsConfig,
+        scheduler_state: &mut SchedulerWindowState,
+    ) {
+        let mut port_label_cache = PortLabelResolveCache::default();
+        let resolved_dimensions = ResolvedDimensions::from_config(dims);
+        AggregatedSink::process_event_resolved::<true>(
+            buf,
+            event,
+            &resolved_dimensions,
+            scheduler_state,
+            &mut port_label_cache,
         );
-        buf.set_start_monotonic_ns_for_test(0);
-        buf
+    }
+
+    #[test]
+    fn test_running_thread_store_grows_cpu_slots() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let mut store = RunningThreadStore::with_capacity(4);
+        *store.cpu_slot_mut(0) = Some(RunningThread {
+            tid: 10,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        *store.cpu_slot_mut(2) = Some(RunningThread {
+            tid: 30,
+            basic_dim: dim,
+            cpu_id: 2,
+            running_since_ns: 300,
+        });
+
+        assert_eq!(store.entries.len(), 3);
+        assert!(store.contains_tid(30));
+    }
+
+    #[test]
+    fn test_running_thread_store_take_cpu_clears_slot() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let mut store = RunningThreadStore::with_capacity(4);
+        *store.cpu_slot_mut(0) = Some(RunningThread {
+            tid: 10,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        *store.cpu_slot_mut(1) = Some(RunningThread {
+            tid: 20,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+
+        let removed = store.take_cpu(1).expect("cpu slot occupied");
+        assert_eq!(removed.tid, 20);
+        assert!(!store.contains_tid(20));
+        assert!(store.contains_tid(10));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_collision_falls_back_to_running_scan() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_keeps_two_colliding_tids_hot() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+
+        let cache_set = &scheduler_state.tid_to_cpu_cache[sched_tid_cache_slot(tid_a)];
+        assert!(cache_set
+            .iter()
+            .flatten()
+            .any(|entry| entry.tid == tid_a && entry.cpu_id == 0));
+        assert!(cache_set
+            .iter()
+            .flatten()
+            .any(|entry| entry.tid == tid_b && entry.cpu_id == 1));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_clear_preserves_other_collision_entry() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = (tid_a + 1..)
+            .find(|tid| sched_tid_cache_slot(*tid) == sched_tid_cache_slot(tid_a))
+            .expect("colliding tid");
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 1,
+            running_since_ns: 200,
+        });
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(1));
+
+        scheduler_state.clear_cached_tid_cpu(tid_a);
+
+        let cache_set = &scheduler_state.tid_to_cpu_cache[sched_tid_cache_slot(tid_a)];
+        assert!(!cache_set.iter().flatten().any(|entry| entry.tid == tid_a));
+        assert!(cache_set.iter().flatten().any(|entry| entry.tid == tid_b));
+    }
+
+    #[test]
+    fn test_scheduler_tid_cache_drops_old_cpu_mapping_on_reuse() {
+        let dim = BasicDimension::new(123, ClientType::Geth as u8);
+        let tid_a = 10u32;
+        let tid_b = 20u32;
+        let mut scheduler_state = SchedulerWindowState::default();
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_a,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 100,
+        });
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), Some(0));
+
+        let removed = scheduler_state
+            .take_running_on_cpu(0)
+            .expect("cpu 0 should be occupied");
+        assert_eq!(removed.tid, tid_a);
+
+        scheduler_state.restore_running(RunningThread {
+            tid: tid_b,
+            basic_dim: dim,
+            cpu_id: 0,
+            running_since_ns: 200,
+        });
+
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_a), None);
+        assert_eq!(scheduler_state.find_cpu_for_tid(tid_b), Some(0));
     }
 
     #[test]
     fn test_process_event_syscall() {
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1370,34 +2119,19 @@ mod tests {
 
         let event = make_event(
             EventType::SyscallRead,
-            TypedEvent::Syscall(SyscallEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::SyscallRead,
-                    client_type: ClientType::Geth,
-                },
-                latency_ns: 5_000,
-                ret: 0,
-                syscall_nr: 0,
-                fd: 0,
-            }),
+            TypedEvent::SyscallRead(SyscallEvent { latency_ns: 5_000 }),
         );
 
-        AggregatedSink::process_event(&buf, &event, &dims);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        let dim = BasicDimension {
-            pid: 123,
-            client_type: 1,
-        };
+        let dim = BasicDimension::new(123, 1);
         let entry = buf.syscall_read.get(&dim).expect("entry exists");
         assert_eq!(entry.snapshot().count, 1);
     }
 
     #[test]
     fn test_process_event_net_io() {
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1410,38 +2144,58 @@ mod tests {
 
         let event = make_event(
             EventType::NetTX,
-            TypedEvent::NetIO(NetIOEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::NetTX,
-                    client_type: ClientType::Geth,
-                },
+            TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
                 bytes: 1024,
-                src_port: 8545,
-                dst_port: 30303,
-                direction: Direction::TX,
-                transport: NetTransport::Tcp,
-                has_metrics: true,
+                local_port: 8545,
+                remote_port: 30303,
                 srtt_us: 100,
                 cwnd: 65535,
             }),
         );
 
-        AggregatedSink::process_event(&buf, &event, &dims);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        // Check net_io was recorded.
-        assert!(!buf.net_io.is_empty());
+        // Metrics-bearing TCP TX events now use the combined TCP TX aggregate.
+        assert!(!buf.tcp_tx.is_empty());
+    }
 
-        // Check TCP metrics were recorded (has_metrics = true).
-        assert!(!buf.tcp_rtt.is_empty());
-        assert!(!buf.tcp_cwnd.is_empty());
+    #[test]
+    fn test_process_event_net_io_reuses_network_port_label_for_tcp_metrics() {
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        let mut dims = DimensionsConfig::default();
+        let mut map = PortLabelMap::default();
+        map.insert(ClientType::Geth, 30303, PortLabel::ElP2PTcp);
+        dims.network.set_port_label_map(map);
+
+        let event = make_event(
+            EventType::NetTX,
+            TypedEvent::NetIOTcpTxMetrics(NetIOTcpTxMetricsEvent {
+                bytes: 1024,
+                local_port: 45_000,
+                remote_port: 30_303,
+                srtt_us: 100,
+                cwnd: 65535,
+            }),
+        );
+
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+
+        let net_dim =
+            TCPMetricsDimension::new(123, ClientType::Geth as u8, PortLabel::ElP2PTcp as u8);
+        assert!(buf.tcp_tx.contains_key(&net_dim));
     }
 
     #[test]
     fn test_process_event_disk_io() {
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1455,13 +2209,6 @@ mod tests {
         let event = make_event(
             EventType::DiskIO,
             TypedEvent::DiskIO(DiskIOEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::DiskIO,
-                    client_type: ClientType::Geth,
-                },
                 latency_ns: 50_000,
                 bytes: 4096,
                 rw: 1,
@@ -1470,16 +2217,14 @@ mod tests {
             }),
         );
 
-        AggregatedSink::process_event(&buf, &event, &dims);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
 
-        assert!(!buf.disk_latency.is_empty());
-        assert!(!buf.disk_bytes.is_empty());
-        assert!(!buf.disk_queue_depth.is_empty());
+        assert!(!buf.disk_io_write.is_empty());
     }
 
     #[test]
     fn test_process_event_fd_open_close() {
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1490,46 +2235,19 @@ mod tests {
         );
         let dims = DimensionsConfig::default();
 
-        let open_event = make_event(
-            EventType::FDOpen,
-            TypedEvent::FD(FDEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::FDOpen,
-                    client_type: ClientType::Geth,
-                },
-                fd: 5,
-                filename: "/tmp/test".to_string(),
-            }),
-        );
+        let open_event = make_event(EventType::FDOpen, TypedEvent::FDOpen);
 
-        let close_event = make_event(
-            EventType::FDClose,
-            TypedEvent::FD(FDEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::FDClose,
-                    client_type: ClientType::Geth,
-                },
-                fd: 5,
-                filename: String::new(),
-            }),
-        );
+        let close_event = make_event(EventType::FDClose, TypedEvent::FDClose);
 
-        AggregatedSink::process_event(&buf, &open_event, &dims);
-        AggregatedSink::process_event(&buf, &close_event, &dims);
+        AggregatedSink::process_event(&mut buf, &open_event, &dims);
+        AggregatedSink::process_event(&mut buf, &close_event, &dims);
 
-        assert!(!buf.fd_open.is_empty());
-        assert!(!buf.fd_close.is_empty());
+        assert!(!buf.fd_metrics.is_empty());
     }
 
     #[test]
     fn test_process_event_all_types() {
-        let buf = Buffer::new(
+        let mut buf = Buffer::new(
             SystemTime::now(),
             0,
             SystemTime::now(),
@@ -1541,130 +2259,180 @@ mod tests {
         let dims = DimensionsConfig::default();
 
         // Sched switch
-        let event = make_event(
+        let event = make_scheduler_event_at(
+            0,
+            123,
+            123,
             EventType::SchedSwitch,
+            3,
             TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
                 on_cpu_ns: 1_000_000,
-                voluntary: true,
-                cpu_id: 3,
             }),
         );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.sched_on_cpu.is_empty());
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(buf
+            .sched_on_cpu_snapshot(BasicDimension::new(123, 1))
+            .is_some());
         assert!(!buf.cpu_on_core.is_empty());
 
         // Page fault
         let event = make_event(
             EventType::PageFault,
-            TypedEvent::PageFault(PageFaultEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::PageFault,
-                    client_type: ClientType::Geth,
-                },
-                address: 0xdeadbeef,
-                major: true,
-            }),
+            TypedEvent::PageFault(PageFaultEvent { major: true }),
         );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.page_fault_major.is_empty());
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.page_fault_metrics.is_empty());
 
         // OOM kill
-        let event = make_event(
-            EventType::OOMKill,
-            TypedEvent::OOMKill(OOMKillEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::OOMKill,
-                    client_type: ClientType::Geth,
-                },
-                target_pid: 456,
-            }),
-        );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.oom_kill.is_empty());
+        let event = make_event(EventType::OOMKill, TypedEvent::OOMKill);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Process exit
-        let event = make_event(
-            EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::ProcessExit,
-                    client_type: ClientType::Geth,
-                },
-                exit_code: 0,
-            }),
-        );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.process_exit.is_empty());
+        let event = make_event(EventType::ProcessExit, TypedEvent::ProcessExit);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Mem reclaim
         let event = make_event(
             EventType::MemReclaim,
-            TypedEvent::MemLatency(MemLatencyEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::MemReclaim,
-                    client_type: ClientType::Geth,
-                },
-                duration_ns: 5_000,
-            }),
+            TypedEvent::MemReclaim(MemLatencyEvent { duration_ns: 5_000 }),
         );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.mem_reclaim.is_empty());
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // Swap in
         let event = make_event(
             EventType::SwapIn,
-            TypedEvent::Swap(SwapEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::SwapIn,
-                    client_type: ClientType::Geth,
-                },
-                pages: 1,
-            }),
+            TypedEvent::SwapIn(SwapEvent { pages: 1 }),
         );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.swap_in.is_empty());
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.basic_cold_metrics.is_empty());
 
         // TCP state
-        let event = make_event(
-            EventType::TcpState,
-            TypedEvent::TcpState(TcpStateEvent {
-                event: Event {
-                    timestamp_ns: 0,
-                    pid: 123,
-                    tid: 123,
-                    event_type: EventType::TcpState,
-                    client_type: ClientType::Geth,
-                },
-                src_port: 8545,
-                dst_port: 30303,
-                new_state: 1,
-                old_state: 0,
+        let event = make_event(EventType::TcpState, TypedEvent::TcpState);
+        AggregatedSink::process_event(&mut buf, &event, &dims);
+        assert!(!buf.basic_cold_metrics.is_empty());
+    }
+
+    #[test]
+    fn test_process_event_sched_combined_with_scheduler_state() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let event = make_sched_combined_event_at(
+            1_000,
+            123,
+            77,
+            2,
+            ClientType::Geth as u8,
+            TypedEvent::SchedCombined(SchedCombinedEvent {
+                on_cpu_ns: 300,
+                runqueue_ns: 50,
+                off_cpu_ns: 100,
+                next_pid: 124,
+                next_tid: 88,
             }),
         );
-        AggregatedSink::process_event(&buf, &event, &dims);
-        assert!(!buf.tcp_state_change.is_empty());
+
+        process_event_with_scheduler_state(&mut buf, &event, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
+
+        let prev_sched = buf
+            .sched_on_cpu_snapshot(BasicDimension::new(123, ClientType::Geth as u8))
+            .expect("prev sched_on_cpu");
+        assert_eq!(prev_sched.sum, 300);
+
+        let next_wait = buf
+            .sched_wait
+            .get(&BasicDimension::new(124, ClientType::Geth as u8))
+            .expect("next sched_wait");
+        assert_eq!(next_wait.runqueue_snapshot().sum, 50);
+        assert_eq!(next_wait.off_cpu_snapshot().sum, 100);
+
+        let prev_core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
+            .expect("prev core usage");
+        assert_eq!(prev_core.cpu_on_core_snapshot().sum, 300);
+
+        let next_core = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
+            .expect("next core usage");
+        assert_eq!(next_core.cpu_on_core_snapshot().sum, 300);
+    }
+
+    #[test]
+    fn test_sched_combined_reattributes_existing_next_thread_runtime() {
+        let dims = DimensionsConfig::default();
+        let mut scheduler_state = SchedulerWindowState::default();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+
+        let seed_running = make_scheduler_event_at(
+            1_000,
+            124,
+            88,
+            EventType::SchedRunqueue,
+            1,
+            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
+                runqueue_ns: 0,
+                off_cpu_ns: 0,
+            }),
+        );
+        process_event_with_scheduler_state(&mut buf, &seed_running, &dims, &mut scheduler_state);
+
+        let combined = make_sched_combined_event_at(
+            1_300,
+            123,
+            77,
+            2,
+            ClientType::Geth as u8,
+            TypedEvent::SchedCombined(SchedCombinedEvent {
+                on_cpu_ns: 50,
+                runqueue_ns: 10,
+                off_cpu_ns: 20,
+                next_pid: 124,
+                next_tid: 88,
+            }),
+        );
+        process_event_with_scheduler_state(&mut buf, &combined, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_500);
+
+        let cpu1 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 1))
+            .expect("carried runtime on old cpu");
+        assert_eq!(cpu1.cpu_on_core_snapshot().sum, 300);
+
+        let prev_cpu2 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(123, ClientType::Geth as u8, 2))
+            .expect("fallback runtime on outgoing cpu");
+        assert_eq!(prev_cpu2.cpu_on_core_snapshot().sum, 50);
+
+        let next_cpu2 = buf
+            .cpu_on_core
+            .get(&CpuCoreDimension::new(124, ClientType::Geth as u8, 2))
+            .expect("new running thread on target cpu");
+        assert_eq!(next_cpu2.cpu_on_core_snapshot().sum, 200);
     }
 
     #[test]
@@ -1672,66 +2440,59 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf1 = test_buffer();
+        let mut buf1 = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             1_000,
             123,
             77,
             EventType::SchedRunqueue,
+            2,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 77,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 50,
                 off_cpu_ns: 100,
-                cpu_id: 2,
             }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf1,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf1, 1_500);
+        process_event_with_scheduler_state(&mut buf1, &rq_event, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf1, 1_500);
 
         let core1 = buf1
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 2,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("core usage in first buffer");
-        assert_eq!(core1.snapshot().sum, 500);
+        assert_eq!(core1.cpu_on_core_snapshot().sum, 500);
 
         let rq = buf1
-            .sched_runqueue
-            .get(&BasicDimension {
-                pid: 123,
-                client_type: 1,
-            })
+            .sched_wait
+            .get(&BasicDimension::new(123, 1))
             .expect("runqueue metric");
-        assert_eq!(rq.snapshot().sum, 50);
+        assert_eq!(rq.runqueue_snapshot().sum, 50);
 
-        let buf2 = test_buffer();
-        scheduler_state.flush_running_to_boundary(&buf2, 1_900);
+        let mut buf2 = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        scheduler_state.flush_running_to_boundary(&mut buf2, 1_900);
 
         let core2 = buf2
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 2,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("core usage carried into second buffer");
-        assert_eq!(core2.snapshot().sum, 400);
+        assert_eq!(core2.cpu_on_core_snapshot().sum, 400);
     }
 
     #[test]
@@ -1739,80 +2500,61 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf1 = test_buffer();
+        let mut buf1 = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             10_000,
             123,
             88,
             EventType::SchedRunqueue,
+            3,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 10_000,
-                    pid: 123,
-                    tid: 88,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 0,
                 off_cpu_ns: 0,
-                cpu_id: 3,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf1,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf1, 10_500);
+        process_event_with_scheduler_state(&mut buf1, &rq_event, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf1, 10_500);
 
-        let buf2 = test_buffer();
-        let switch_event = make_event_at(
+        let mut buf2 = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        let switch_event = make_scheduler_event_at(
             11_000,
             123,
             88,
             EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 11_000,
-                    pid: 123,
-                    tid: 88,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 2_000,
-                voluntary: false,
-                cpu_id: 3,
-            }),
+            3,
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 2_000 }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf2,
-            &switch_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf2, &switch_event, &dims, &mut scheduler_state);
 
         let core2 = buf2
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 3,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 3))
             .expect("core usage on switch-out");
         // Uses carried state (11_000 - 10_500), not the raw 2_000ns slice.
-        assert_eq!(core2.snapshot().sum, 500);
+        assert_eq!(core2.cpu_on_core_snapshot().sum, 500);
 
         let on_cpu = buf2
-            .sched_on_cpu
-            .get(&BasicDimension {
-                pid: 123,
-                client_type: 1,
-            })
+            .sched_on_cpu_snapshot(BasicDimension::new(123, 1))
             .expect("sched_on_cpu recorded");
         // Latency distribution remains raw from sched_switch payload.
-        assert_eq!(on_cpu.snapshot().sum, 2_000);
+        assert_eq!(on_cpu.sum, 2_000);
     }
 
     #[test]
@@ -1820,87 +2562,30 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let mut buf = test_buffer();
-        buf.set_start_monotonic_ns_for_test(1_000);
-        let switch_event = make_event_at(
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
+        let switch_event = make_scheduler_event_at(
             2_000,
             123,
             99,
             EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 2_000,
-                    pid: 123,
-                    tid: 99,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 700,
-                voluntary: true,
-                cpu_id: 1,
-            }),
+            1,
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 700 }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &switch_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &switch_event, &dims, &mut scheduler_state);
 
         let core = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 1,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("fallback core usage");
-        assert_eq!(core.snapshot().sum, 700);
-    }
-
-    #[test]
-    fn test_scheduler_state_fallback_caps_raw_slice_to_window_elapsed() {
-        let dims = DimensionsConfig::default();
-        let mut scheduler_state = SchedulerWindowState::default();
-
-        let mut buf = test_buffer();
-        buf.set_start_monotonic_ns_for_test(1_000);
-
-        let switch_event = make_event_at(
-            1_050,
-            123,
-            100,
-            EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 1_050,
-                    pid: 123,
-                    tid: 100,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 700,
-                voluntary: true,
-                cpu_id: 1,
-            }),
-        );
-
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &switch_event,
-            &dims,
-            &mut scheduler_state,
-        );
-
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 1,
-            })
-            .expect("capped fallback core usage");
-        assert_eq!(core.snapshot().sum, 50);
+        assert_eq!(core.cpu_on_core_snapshot().sum, 700);
     }
 
     #[test]
@@ -1908,69 +2593,47 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = test_buffer();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
 
-        let rq_event = make_event_at(
+        let rq_event = make_scheduler_event_at(
             1_000,
             123,
             50,
             EventType::SchedRunqueue,
+            4,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 50,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 0,
                 off_cpu_ns: 0,
-                cpu_id: 4,
             }),
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &rq_event,
-            &dims,
-            &mut scheduler_state,
-        );
+        process_event_with_scheduler_state(&mut buf, &rq_event, &dims, &mut scheduler_state);
 
-        scheduler_state.flush_running_to_boundary(&buf, 1_300);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_300);
 
         let exit_event = make_event_at(
             1_500,
             123,
             50,
             EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent {
-                event: Event {
-                    timestamp_ns: 1_500,
-                    pid: 123,
-                    tid: 50,
-                    event_type: EventType::ProcessExit,
-                    client_type: ClientType::Geth,
-                },
-                exit_code: 0,
-            }),
+            TypedEvent::ProcessExit,
         );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &exit_event,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf, 2_000);
+        process_event_with_scheduler_state(&mut buf, &exit_event, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 2_000);
 
         let core = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 4,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 4))
             .expect("process-exit accounted runtime");
-        assert_eq!(core.snapshot().sum, 500);
-        assert!(scheduler_state.running_by_tid.is_empty());
+        assert_eq!(core.cpu_on_core_snapshot().sum, 500);
+        assert!(scheduler_state.running_by_cpu.is_empty());
     }
 
     #[test]
@@ -1978,222 +2641,54 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = test_buffer();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
 
-        let rq1 = make_event_at(
+        let rq1 = make_scheduler_event_at(
             1_000,
             123,
             60,
             EventType::SchedRunqueue,
+            1,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 60,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 1,
                 off_cpu_ns: 1,
-                cpu_id: 1,
             }),
         );
-        let rq2 = make_event_at(
+        let rq2 = make_scheduler_event_at(
             1_300,
             123,
             60,
             EventType::SchedRunqueue,
+            3,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_300,
-                    pid: 123,
-                    tid: 60,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 1,
                 off_cpu_ns: 1,
-                cpu_id: 3,
             }),
         );
 
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
-        scheduler_state.flush_running_to_boundary(&buf, 1_500);
+        process_event_with_scheduler_state(&mut buf, &rq1, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &rq2, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_500);
 
         let core1 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 1,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 1))
             .expect("first core usage");
-        assert_eq!(core1.snapshot().sum, 299);
+        assert_eq!(core1.cpu_on_core_snapshot().sum, 300);
 
         let core3 = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 3,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 3))
             .expect("second core usage");
-        assert_eq!(core3.snapshot().sum, 200);
-    }
-
-    #[test]
-    fn test_scheduler_state_duplicate_runqueue_subtracts_offcpu_gap() {
-        let dims = DimensionsConfig::default();
-        let mut scheduler_state = SchedulerWindowState::default();
-
-        let buf = test_buffer();
-
-        let rq1 = make_event_at(
-            1_000,
-            123,
-            61,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 61,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 0,
-                off_cpu_ns: 0,
-                cpu_id: 1,
-            }),
-        );
-        let rq2 = make_event_at(
-            5_000,
-            123,
-            61,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 5_000,
-                    pid: 123,
-                    tid: 61,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 100,
-                off_cpu_ns: 3_500,
-                cpu_id: 3,
-            }),
-        );
-
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
-        scheduler_state.flush_running_to_boundary(&buf, 5_200);
-
-        let core1 = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 1,
-            })
-            .expect("first core usage");
-        assert_eq!(core1.snapshot().sum, 500);
-
-        let core3 = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 3,
-            })
-            .expect("second core usage");
-        assert_eq!(core3.snapshot().sum, 200);
-    }
-
-    #[test]
-    fn test_scheduler_state_same_core_switch_in_evicts_stale_occupant() {
-        let dims = DimensionsConfig::default();
-        let mut scheduler_state = SchedulerWindowState::default();
-
-        let buf = test_buffer();
-
-        let rq1 = make_event_at(
-            1_000,
-            123,
-            61,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 61,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 0,
-                off_cpu_ns: 0,
-                cpu_id: 2,
-            }),
-        );
-        let rq2 = make_event_at(
-            1_600,
-            123,
-            62,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_600,
-                    pid: 123,
-                    tid: 62,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 50,
-                off_cpu_ns: 25,
-                cpu_id: 2,
-            }),
-        );
-        let switch1 = make_event_at(
-            1_600,
-            123,
-            61,
-            EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 1_600,
-                    pid: 123,
-                    tid: 61,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 600,
-                voluntary: false,
-                cpu_id: 2,
-            }),
-        );
-
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq1, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq2, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &switch1,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf, 2_000);
-
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 2,
-            })
-            .expect("shared core usage");
-        assert_eq!(core.snapshot().sum, 1_000);
-        assert_eq!(scheduler_state.running_tid_by_core.get(&2), Some(&62));
-        assert!(scheduler_state.recovered_switch_out_by_tid.is_empty());
+        assert_eq!(core3.cpu_on_core_snapshot().sum, 200);
     }
 
     #[test]
@@ -2201,297 +2696,90 @@ mod tests {
         let dims = DimensionsConfig::default();
         let mut scheduler_state = SchedulerWindowState::default();
 
-        let buf = test_buffer();
+        let mut buf = Buffer::new(
+            SystemTime::now(),
+            0,
+            SystemTime::now(),
+            false,
+            false,
+            false,
+            8,
+        );
 
-        let rq = make_event_at(
+        let rq = make_scheduler_event_at(
             1_000,
             123,
             70,
             EventType::SchedRunqueue,
+            2,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 70,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 10,
                 off_cpu_ns: 20,
-                cpu_id: 2,
             }),
         );
-        let stale_rq = make_event_at(
+        let stale_rq = make_scheduler_event_at(
             900,
             123,
             70,
             EventType::SchedRunqueue,
+            4,
             TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 900,
-                    pid: 123,
-                    tid: 70,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
                 runqueue_ns: 15,
                 off_cpu_ns: 25,
-                cpu_id: 4,
             }),
         );
-        let stale_switch = make_event_at(
+        let stale_switch = make_scheduler_event_at(
             950,
             123,
             70,
             EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 950,
-                    pid: 123,
-                    tid: 70,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 50,
-                voluntary: false,
-                cpu_id: 1,
-            }),
+            1,
+            TypedEvent::Sched(SchedEvent { on_cpu_ns: 50 }),
         );
         let stale_exit = make_event_at(
             980,
             123,
             70,
             EventType::ProcessExit,
-            TypedEvent::ProcessExit(ProcessExitEvent {
-                event: Event {
-                    timestamp_ns: 980,
-                    pid: 123,
-                    tid: 70,
-                    event_type: EventType::ProcessExit,
-                    client_type: ClientType::Geth,
-                },
-                exit_code: 0,
-            }),
+            TypedEvent::ProcessExit,
         );
 
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &stale_rq,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &stale_switch,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &stale_exit,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf, 1_200);
+        process_event_with_scheduler_state(&mut buf, &rq, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_rq, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_switch, &dims, &mut scheduler_state);
+        process_event_with_scheduler_state(&mut buf, &stale_exit, &dims, &mut scheduler_state);
+        scheduler_state.flush_running_to_boundary(&mut buf, 1_200);
 
         let carried_core = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 2,
-            })
+            .get(&CpuCoreDimension::new(123, 1, 2))
             .expect("carried running core usage");
-        assert_eq!(carried_core.snapshot().sum, 200);
+        assert_eq!(carried_core.cpu_on_core_snapshot().sum, 200);
 
-        assert!(buf
+        let fallback_core = buf
             .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 1,
-            })
-            .is_none());
-        assert!(scheduler_state.running_by_tid.contains_key(&70));
-    }
-
-    #[test]
-    fn test_scheduler_state_stale_same_core_runqueue_does_not_evict_newer_runner() {
-        let dims = DimensionsConfig::default();
-        let mut scheduler_state = SchedulerWindowState::default();
-
-        let buf = test_buffer();
-
-        let current_rq = make_event_at(
-            1_000,
-            123,
-            80,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 80,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 10,
-                off_cpu_ns: 5,
-                cpu_id: 3,
-            }),
-        );
-        let stale_other_rq = make_event_at(
-            900,
-            123,
-            81,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 900,
-                    pid: 123,
-                    tid: 81,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 1,
-                off_cpu_ns: 1,
-                cpu_id: 3,
-            }),
-        );
-
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &current_rq,
-            &dims,
-            &mut scheduler_state,
-        );
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &stale_other_rq,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf, 1_200);
-
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 3,
-            })
-            .expect("newer runner retained");
-        assert_eq!(core.snapshot().sum, 200);
-        assert_eq!(scheduler_state.running_tid_by_core.get(&3), Some(&80));
-        assert!(scheduler_state.running_by_tid.contains_key(&80));
-    }
-
-    #[test]
-    fn test_scheduler_state_out_of_window_switch_is_dropped() {
-        let dims = DimensionsConfig::default();
-        let mut scheduler_state = SchedulerWindowState::default();
-
-        let mut buf = test_buffer();
-        buf.set_start_monotonic_ns_for_test(1_000);
-
-        let rq = make_event_at(
-            1_000,
-            123,
-            90,
-            EventType::SchedRunqueue,
-            TypedEvent::SchedRunqueue(SchedRunqueueEvent {
-                event: Event {
-                    timestamp_ns: 1_000,
-                    pid: 123,
-                    tid: 90,
-                    event_type: EventType::SchedRunqueue,
-                    client_type: ClientType::Geth,
-                },
-                runqueue_ns: 0,
-                off_cpu_ns: 0,
-                cpu_id: 2,
-            }),
-        );
-        let stale_switch = make_event_at(
-            950,
-            123,
-            90,
-            EventType::SchedSwitch,
-            TypedEvent::Sched(SchedEvent {
-                event: Event {
-                    timestamp_ns: 950,
-                    pid: 123,
-                    tid: 90,
-                    event_type: EventType::SchedSwitch,
-                    client_type: ClientType::Geth,
-                },
-                on_cpu_ns: 500,
-                voluntary: false,
-                cpu_id: 2,
-            }),
-        );
-
-        AggregatedSink::process_event_with_scheduler_state(&buf, &rq, &dims, &mut scheduler_state);
-        AggregatedSink::process_event_with_scheduler_state(
-            &buf,
-            &stale_switch,
-            &dims,
-            &mut scheduler_state,
-        );
-        scheduler_state.flush_running_to_boundary(&buf, 1_200);
-
-        let core = buf
-            .cpu_on_core
-            .get(&CpuCoreDimension {
-                pid: 123,
-                client_type: 1,
-                cpu_id: 2,
-            })
-            .expect("current window runtime");
-        assert_eq!(core.snapshot().sum, 200);
-        assert!(buf.sched_on_cpu.is_empty());
-        assert!(scheduler_state.running_by_tid.contains_key(&90));
+            .get(&CpuCoreDimension::new(123, 1, 1))
+            .expect("stale switch fallback usage");
+        assert_eq!(fallback_core.cpu_on_core_snapshot().sum, 50);
+        assert!(scheduler_state.running_by_cpu.contains_tid(70));
     }
 
     #[test]
     fn test_local_port_tx_vs_rx() {
         let tx_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetTX,
-                client_type: ClientType::Geth,
-            },
             bytes: 100,
-            src_port: 8545,
-            dst_port: 30303,
-            direction: Direction::TX,
-            transport: NetTransport::Tcp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 8545,
+            remote_port: 30303,
+            transport: NetTransport::Tcp as u8,
         };
         assert_eq!(local_port(&tx_event), 8545);
         assert_eq!(remote_port(&tx_event), 30303);
 
         let rx_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetRX,
-                client_type: ClientType::Geth,
-            },
             bytes: 100,
-            src_port: 30303,
-            dst_port: 8545,
-            direction: Direction::RX,
-            transport: NetTransport::Tcp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 8545,
+            remote_port: 30303,
+            transport: NetTransport::Tcp as u8,
         };
         assert_eq!(local_port(&rx_event), 8545);
         assert_eq!(remote_port(&rx_event), 30303);
@@ -2505,25 +2793,20 @@ mod tests {
         dims.network.set_port_label_map(map);
 
         let net_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetTX,
-                client_type: ClientType::Prysm,
-            },
             bytes: 100,
-            src_port: 45432,
-            dst_port: 13000,
-            direction: Direction::TX,
-            transport: NetTransport::Tcp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 45432,
+            remote_port: 13000,
+            transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
-        assert_eq!(net_dim.port_label, PortLabel::ClP2PTcp as u8);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::TX as u8,
+            &net_event,
+            &dims,
+        );
+        assert_eq!(net_dim.port_label(), PortLabel::ClP2PTcp as u8);
     }
 
     #[test]
@@ -2535,25 +2818,20 @@ mod tests {
         dims.network.set_port_label_map(map);
 
         let net_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetRX,
-                client_type: ClientType::Prysm,
-            },
             bytes: 100,
-            src_port: 13000,
-            dst_port: 13000,
-            direction: Direction::RX,
-            transport: NetTransport::Tcp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 13000,
+            remote_port: 13000,
+            transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
-        assert_eq!(net_dim.port_label, PortLabel::ClP2PTcp as u8);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::RX as u8,
+            &net_event,
+            &dims,
+        );
+        assert_eq!(net_dim.port_label(), PortLabel::ClP2PTcp as u8);
 
         let retransmit_dim = build_network_dimension_from_tcp_retransmit(
             1,
@@ -2562,7 +2840,7 @@ mod tests {
             13000,
             &dims,
         );
-        assert_eq!(retransmit_dim.port_label, PortLabel::ClP2PTcp as u8);
+        assert_eq!(retransmit_dim.port_label(), PortLabel::ClP2PTcp as u8);
     }
 
     #[test]
@@ -2574,25 +2852,20 @@ mod tests {
         dims.network.set_port_label_map(map);
 
         let net_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetRX,
-                client_type: ClientType::Prysm,
-            },
             bytes: 100,
-            src_port: 13000,
-            dst_port: 13000,
-            direction: Direction::RX,
-            transport: NetTransport::Udp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 13000,
+            remote_port: 13000,
+            transport: NetTransport::Udp as u8,
         };
 
-        let net_dim = build_network_dimension(1, ClientType::Prysm as u8, &net_event, &dims);
-        assert_eq!(net_dim.port_label, PortLabel::ClDiscovery as u8);
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Prysm as u8,
+            Direction::RX as u8,
+            &net_event,
+            &dims,
+        );
+        assert_eq!(net_dim.port_label(), PortLabel::ClDiscovery as u8);
     }
 
     #[test]
@@ -2623,30 +2896,41 @@ mod tests {
         dims.disk.include_rw = false;
 
         let net_event = NetIOEvent {
-            event: Event {
-                timestamp_ns: 0,
-                pid: 1,
-                tid: 1,
-                event_type: EventType::NetTX,
-                client_type: ClientType::Geth,
-            },
             bytes: 100,
-            src_port: 8545,
-            dst_port: 30303,
-            direction: Direction::TX,
-            transport: NetTransport::Tcp,
-            has_metrics: false,
-            srtt_us: 0,
-            cwnd: 0,
+            local_port: 8545,
+            remote_port: 30303,
+            transport: NetTransport::Tcp as u8,
         };
 
-        let net_dim = build_network_dimension(1, 1, &net_event, &dims);
-        assert_eq!(net_dim.port_label, 0);
-        assert_eq!(net_dim.direction, 0);
+        let net_dim = build_network_dimension(1, 1, Direction::TX as u8, &net_event, &dims);
+        assert_eq!(net_dim.port_label(), 0);
+        assert_eq!(net_dim.direction(), 0);
 
         let disk_dim = build_disk_dimension(1, 1, 259, 1, &dims);
-        assert_eq!(disk_dim.device_id, 0);
-        assert_eq!(disk_dim.rw, 0);
+        assert_eq!(disk_dim.device_id(), 0);
+        assert_eq!(disk_dim.rw(), 0);
+    }
+
+    #[test]
+    fn test_network_dimension_skips_empty_port_map() {
+        let mut dims = DimensionsConfig::default();
+        dims.network.set_port_label_map(PortLabelMap::default());
+
+        let net_event = NetIOEvent {
+            bytes: 100,
+            local_port: 19999,
+            remote_port: 45000,
+            transport: NetTransport::Udp as u8,
+        };
+
+        let net_dim = build_network_dimension(
+            1,
+            ClientType::Unknown as u8,
+            Direction::TX as u8,
+            &net_event,
+            &dims,
+        );
+        assert_eq!(net_dim.port_label(), PortLabel::Unknown as u8);
     }
 
     #[test]

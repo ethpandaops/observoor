@@ -5,9 +5,7 @@ use observoor::config::NetworkDimensionsConfig;
 use observoor::config::SamplingConfig;
 use observoor::sink::aggregated::buffer::Buffer;
 use observoor::sink::aggregated::collector::Collector;
-use observoor::sink::aggregated::dimension::{
-    BasicDimension, DiskDimension, NetworkDimension, TCPMetricsDimension,
-};
+use observoor::sink::aggregated::dimension::{BasicDimension, DiskDimension, NetworkDimension};
 use observoor::sink::aggregated::metric::{BatchMetadata, MetricBatch};
 use observoor::tracer::event::{
     ClientType, Direction, EventType, NetTransport, ParsedEvent, TypedEvent,
@@ -29,10 +27,11 @@ fn header(ts: u64, pid: u32, tid: u32, event_type: u8, client_type: u8) -> Vec<u
 
 fn syscall_payload(event_type: EventType, pid: u32, tid: u32, latency_ns: u64) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, event_type as u8, 1);
-    data.extend_from_slice(&latency_ns.to_le_bytes());
-    data.extend_from_slice(&0i64.to_le_bytes());
-    data.extend_from_slice(&202u32.to_le_bytes());
-    data.extend_from_slice(&12i32.to_le_bytes());
+    data[HEADER_SIZE - 6..HEADER_SIZE - 2].copy_from_slice(
+        &u32::try_from(latency_ns)
+            .expect("test syscall latency must fit in u32")
+            .to_le_bytes(),
+    );
     data
 }
 
@@ -69,10 +68,9 @@ fn disk_payload(
     device_id: u32,
 ) -> Vec<u8> {
     let mut data = header(123_456_789, pid, tid, EventType::DiskIO as u8, 1);
+    data[18] = rw;
     data.extend_from_slice(&latency_ns.to_le_bytes());
     data.extend_from_slice(&bytes.to_le_bytes());
-    data.push(rw);
-    data.extend_from_slice(&[0u8; 3]);
     data.extend_from_slice(&queue_depth.to_le_bytes());
     data.extend_from_slice(&device_id.to_le_bytes());
     data
@@ -93,7 +91,7 @@ fn net_payload(
     bytes: u32,
     src_port: u16,
     dst_port: u16,
-    direction: Direction,
+    _direction: Direction,
     transport: NetTransport,
     has_metrics: bool,
     srtt_us: u32,
@@ -103,12 +101,14 @@ fn net_payload(
     data.extend_from_slice(&bytes.to_le_bytes());
     data.extend_from_slice(&src_port.to_le_bytes());
     data.extend_from_slice(&dst_port.to_le_bytes());
-    data.push(direction as u8);
-    data.push(u8::from(has_metrics));
-    data.push(transport as u8);
-    data.push(0);
-    data.extend_from_slice(&srtt_us.to_le_bytes());
-    data.extend_from_slice(&cwnd.to_le_bytes());
+    if event_type == EventType::NetTX && has_metrics {
+        debug_assert_eq!(transport, NetTransport::Tcp);
+        data.extend_from_slice(&srtt_us.to_le_bytes());
+        data.extend_from_slice(&cwnd.to_le_bytes());
+    } else {
+        data.push(transport as u8);
+        data.extend_from_slice(&[0u8; 3]);
+    }
     data
 }
 
@@ -124,25 +124,22 @@ fn tcp_retransmit_payload(pid: u32, tid: u32, bytes: u32, src_port: u16, dst_por
 fn tcp_state_payload(
     pid: u32,
     tid: u32,
-    src_port: u16,
-    dst_port: u16,
-    new_state: u8,
-    old_state: u8,
+    _src_port: u16,
+    _dst_port: u16,
+    _new_state: u8,
+    _old_state: u8,
 ) -> Vec<u8> {
-    let mut data = header(123_456_789, pid, tid, EventType::TcpState as u8, 1);
-    data.extend_from_slice(&src_port.to_le_bytes());
-    data.extend_from_slice(&dst_port.to_le_bytes());
-    data.push(new_state);
-    data.push(old_state);
-    data.extend_from_slice(&[0u8; 10]);
-    data
+    header(123_456_789, pid, tid, EventType::TcpState as u8, 1)
 }
 
 fn page_fault_payload(pid: u32, tid: u32, major: bool) -> Vec<u8> {
-    let mut data = header(123_456_789, pid, tid, EventType::PageFault as u8, 1);
-    data.extend_from_slice(&0xdeadbeefu64.to_le_bytes());
+    let _ = tid;
+    let mut data = Vec::with_capacity(8);
+    data.extend_from_slice(&pid.to_le_bytes());
+    data.push(EventType::PageFault as u8);
+    data.push(1);
     data.push(u8::from(major));
-    data.extend_from_slice(&[0u8; 7]);
+    data.push(0);
     data
 }
 
@@ -183,55 +180,66 @@ fn process_exit_payload(pid: u32, tid: u32, exit_code: u32) -> Vec<u8> {
     data
 }
 
-fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
-    let basic_dim = BasicDimension {
-        pid: event.raw.pid,
-        client_type: event.raw.client_type as u8,
-    };
+fn process_parsed_event(buf: &mut Buffer, event: &ParsedEvent) {
+    let pid = event.raw.pid();
+    let client_type = event.raw.client_type();
+    let basic_dim = BasicDimension::new(pid, client_type);
 
     match &event.typed {
-        TypedEvent::Syscall(e) => {
-            buf.add_syscall(event.raw.event_type, basic_dim, e.latency_ns);
+        TypedEvent::SyscallRead(e) => {
+            buf.add_syscall(EventType::SyscallRead, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallWrite(e) => {
+            buf.add_syscall(EventType::SyscallWrite, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallFutex(e) => {
+            buf.add_syscall(EventType::SyscallFutex, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallMmap(e) => {
+            buf.add_syscall(EventType::SyscallMmap, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallEpollWait(e) => {
+            buf.add_syscall(EventType::SyscallEpollWait, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallFsync(e) => {
+            buf.add_syscall(EventType::SyscallFsync, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallFdatasync(e) => {
+            buf.add_syscall(EventType::SyscallFdatasync, basic_dim, e.latency_ns);
+        }
+        TypedEvent::SyscallPwrite(e) => {
+            buf.add_syscall(EventType::SyscallPwrite, basic_dim, e.latency_ns);
         }
         TypedEvent::DiskIO(e) => {
-            let disk = DiskDimension {
-                pid: event.raw.pid,
-                client_type: event.raw.client_type as u8,
-                device_id: e.device_id,
-                rw: e.rw,
-            };
+            let disk = DiskDimension::new(pid, client_type, e.device_id, e.rw);
             buf.add_disk_io(disk, e.latency_ns, e.bytes, e.queue_depth);
         }
-        TypedEvent::NetIO(e) => {
+        TypedEvent::NetIOTx(e) => {
             // In production, port_label is resolved via config's port_label_map.
             // Here we use 0 (Unknown) since we don't have a port map.
-            let net = NetworkDimension {
-                pid: event.raw.pid,
-                client_type: event.raw.client_type as u8,
-                port_label: 0,
-                direction: e.direction as u8,
-            };
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
             buf.add_net_io(net, i64::from(e.bytes));
-            if e.has_metrics && e.transport == NetTransport::Tcp {
-                let tcp = TCPMetricsDimension {
-                    pid: event.raw.pid,
-                    client_type: event.raw.client_type as u8,
-                    port_label: 0,
-                };
-                buf.add_tcp_metrics(tcp, e.srtt_us, e.cwnd);
-            }
+        }
+        TypedEvent::NetIORx(e) => {
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::RX as u8);
+            buf.add_net_io(net, i64::from(e.bytes));
+        }
+        TypedEvent::NetIOTcpTxMetrics(e) => {
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
+            buf.add_net_io_with_tcp_metrics(net, i64::from(e.bytes), e.srtt_us, e.cwnd);
         }
         TypedEvent::TcpRetransmit(e) => {
-            let net = NetworkDimension {
-                pid: event.raw.pid,
-                client_type: event.raw.client_type as u8,
-                port_label: 0,
-                direction: Direction::TX as u8,
-            };
+            let net = NetworkDimension::new(pid, client_type, 0, Direction::TX as u8);
             buf.add_tcp_retransmit(net, i64::from(e.bytes));
         }
         TypedEvent::Sched(e) => {
-            buf.add_sched_switch(basic_dim, e.on_cpu_ns, e.cpu_id);
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, event.raw.scheduler_cpu_id());
+        }
+        TypedEvent::SchedCombined(e) => {
+            let cpu_id = event.raw.scheduler_cpu_id();
+            buf.add_sched_switch(basic_dim, e.on_cpu_ns, cpu_id);
+            let next_dim = BasicDimension::new(e.next_pid, event.raw.secondary_client_type_raw());
+            buf.add_sched_runqueue(next_dim, e.runqueue_ns, e.off_cpu_ns);
         }
         TypedEvent::SchedRunqueue(e) => {
             buf.add_sched_runqueue(basic_dim, e.runqueue_ns, e.off_cpu_ns);
@@ -239,43 +247,35 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
         TypedEvent::PageFault(e) => {
             buf.add_page_fault(basic_dim, e.major);
         }
-        TypedEvent::FD(_) => {
-            if event.raw.event_type == EventType::FDOpen {
-                buf.add_fd_open(basic_dim);
-            } else {
-                buf.add_fd_close(basic_dim);
-            }
+        TypedEvent::FDOpen => {
+            buf.add_fd_open(basic_dim);
+        }
+        TypedEvent::FDClose => {
+            buf.add_fd_close(basic_dim);
         }
         TypedEvent::BlockMerge(e) => {
-            let disk = DiskDimension {
-                pid: event.raw.pid,
-                client_type: event.raw.client_type as u8,
-                device_id: 0,
-                rw: e.rw,
-            };
+            let disk = DiskDimension::new(pid, client_type, 0, e.rw);
             buf.add_block_merge(disk, e.bytes);
         }
-        TypedEvent::TcpState(_) => {
+        TypedEvent::TcpState => {
             buf.add_tcp_state_change(basic_dim);
         }
-        TypedEvent::MemLatency(e) => {
-            if event.raw.event_type == EventType::MemReclaim {
-                buf.add_mem_reclaim(basic_dim, e.duration_ns);
-            } else {
-                buf.add_mem_compaction(basic_dim, e.duration_ns);
-            }
+        TypedEvent::MemReclaim(e) => {
+            buf.add_mem_reclaim(basic_dim, e.duration_ns);
         }
-        TypedEvent::Swap(e) => {
-            if event.raw.event_type == EventType::SwapIn {
-                buf.add_swap_in(basic_dim, e.pages);
-            } else {
-                buf.add_swap_out(basic_dim, e.pages);
-            }
+        TypedEvent::MemCompaction(e) => {
+            buf.add_mem_compaction(basic_dim, e.duration_ns);
         }
-        TypedEvent::OOMKill(_) => {
+        TypedEvent::SwapIn(e) => {
+            buf.add_swap_in(basic_dim, e.pages);
+        }
+        TypedEvent::SwapOut(e) => {
+            buf.add_swap_out(basic_dim, e.pages);
+        }
+        TypedEvent::OOMKill => {
             buf.add_oom_kill(basic_dim);
         }
-        TypedEvent::ProcessExit(_) => {
+        TypedEvent::ProcessExit => {
             buf.add_process_exit(basic_dim);
         }
     }
@@ -309,7 +309,7 @@ fn gauge_totals(batch: &MetricBatch, metric_type: &str) -> (u32, i64) {
 fn pipeline_blackbox_correctness_and_invariants() {
     let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     let collector = Collector::new(Duration::from_millis(200), &SamplingConfig::default());
-    let buffer = Buffer::new(now, 42, now, false, false, false, 16);
+    let mut buffer = Buffer::new(now, 42, now, false, false, false, 16);
 
     let p1 = 2_001;
     let p2 = 2_002;
@@ -369,7 +369,7 @@ fn pipeline_blackbox_correctness_and_invariants() {
 
     for payload in payloads.drain(..) {
         let parsed = parse_event(&payload).expect("parse payload");
-        process_parsed_event(&buffer, &parsed);
+        process_parsed_event(&mut buffer, &parsed);
     }
 
     let batch = collector.collect(

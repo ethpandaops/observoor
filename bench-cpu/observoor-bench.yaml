@@ -1,0 +1,29 @@
+log_level: warn
+
+meta_client_name: "cpu-bench"
+meta_network_name: "bench-local"
+
+beacon:
+  endpoint: "http://127.0.0.1:15999"
+  timeout: 5s
+
+pid:
+  process_names:
+    - stress-bench
+
+sync_poll_interval: 300s
+ring_buffer_size: 4194304  # 4MB
+
+sinks:
+  aggregated:
+    enabled: true
+    resolution:
+      interval: 100ms
+      slot_aligned: true
+    clickhouse:
+      enabled: false
+    http:
+      enabled: false
+
+health:
+  addr: ":19090"

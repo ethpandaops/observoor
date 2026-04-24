@@ -3,10 +3,8 @@
 //! Implements the [`Tracer`] trait using aya to manage eBPF programs.
 //! All code is gated behind `#[cfg(feature = "bpf")]`.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::Arc;
-
 use anyhow::{Context, Result};
+use std::collections::{HashMap, HashSet};
 use tokio::io::unix::AsyncFd;
 
 use aya::maps::hash_map::HashMap as BpfHashMap;
@@ -19,9 +17,10 @@ use crate::config::{EventSamplingMode, ProbeGroup, SamplingConfig};
 
 use super::event::ClientType;
 use super::event::EventType;
-use super::parse::{parse_event, ParseError};
+use super::parse::{parse_event, parse_event_into_batch, ParseError};
 use super::{
-    ErrorHandler, EventHandler, RingbufStats, RingbufStatsHandler, Tracer, TrackedTidInfo,
+    ErrorHandler, EventBatchHandler, EventHandler, ParsedEventBatch, ParsedEventBatchPool,
+    RingbufStats, RingbufStatsHandler, Tracer, TrackedTidInfo, PARSED_EVENT_BATCH_SIZE,
 };
 
 /// Compiled BPF object, embedded at build time.
@@ -82,6 +81,7 @@ pub struct BpfTracer {
     ring_buf_size: u32,
     disabled_probes: HashSet<ProbeGroup>,
     event_handlers: Vec<EventHandler>,
+    event_batch_handlers: Vec<EventBatchHandler>,
     error_handlers: Vec<ErrorHandler>,
     stats_handlers: Vec<RingbufStatsHandler>,
     ebpf: Option<Ebpf>,
@@ -96,6 +96,7 @@ impl BpfTracer {
             ring_buf_size,
             disabled_probes,
             event_handlers: Vec::with_capacity(4),
+            event_batch_handlers: Vec::with_capacity(2),
             error_handlers: Vec::with_capacity(2),
             stats_handlers: Vec::with_capacity(2),
             ebpf: None,
@@ -134,40 +135,30 @@ impl BpfTracer {
         )?;
 
         for event_type in EventType::all() {
-            let bpf_value = if *event_type == EventType::ProcessExit
-                && self.disabled_probes.contains(&ProbeGroup::ProcessExit)
-            {
-                // Keep do_exit attached for scheduler-state cleanup even when
-                // process_exit is disabled, but suppress user-visible events.
-                BpfEventSamplingVal {
-                    mode: BPF_SAMPLING_MODE_PROBABILITY,
-                    _pad: [0; 3],
-                    value: 0,
-                }
-            } else {
-                let resolved = sampling
-                    .resolved_rule_for_event(*event_type)
-                    .with_context(|| format!("resolving sampling for {}", event_type.as_str()))?;
+            let resolved = sampling
+                .resolved_rule_for_event(*event_type)
+                .with_context(|| format!("resolving sampling for {}", event_type.as_str()))?;
 
-                let (mode, value) = match resolved.mode {
-                    EventSamplingMode::None => (BPF_SAMPLING_MODE_NONE, 1),
-                    EventSamplingMode::Probability => (
-                        BPF_SAMPLING_MODE_PROBABILITY,
-                        ((resolved.rate * BPF_SAMPLING_PROBABILITY_SCALE as f32).round() as u32)
-                            .min(BPF_SAMPLING_PROBABILITY_SCALE),
-                    ),
-                    EventSamplingMode::Nth => (BPF_SAMPLING_MODE_NTH, resolved.nth),
-                };
+            let (mode, value) = match resolved.mode {
+                EventSamplingMode::None => (BPF_SAMPLING_MODE_NONE, 1),
+                EventSamplingMode::Probability => (
+                    BPF_SAMPLING_MODE_PROBABILITY,
+                    ((resolved.rate * BPF_SAMPLING_PROBABILITY_SCALE as f32).round() as u32)
+                        .min(BPF_SAMPLING_PROBABILITY_SCALE),
+                ),
+                EventSamplingMode::Nth => (BPF_SAMPLING_MODE_NTH, resolved.nth),
+            };
 
+            map.set(
+                u32::from(*event_type as u8),
                 BpfEventSamplingVal {
                     mode,
                     _pad: [0; 3],
                     value,
-                }
-            };
-
-            map.set(u32::from(*event_type as u8), bpf_value, 0)
-                .with_context(|| format!("updating event_sampling for {}", event_type.as_str()))?;
+                },
+                0,
+            )
+            .with_context(|| format!("updating event_sampling for {}", event_type.as_str()))?;
         }
 
         Ok(())
@@ -194,9 +185,10 @@ impl Tracer for BpfTracer {
             RingBuf::try_from(events_map).context("creating ring buffer from events map")?;
 
         // Move handlers into the read task.
-        let event_handlers = Arc::new(std::mem::take(&mut self.event_handlers));
-        let error_handlers = Arc::new(std::mem::take(&mut self.error_handlers));
-        let stats_handlers = Arc::new(std::mem::take(&mut self.stats_handlers));
+        let event_handlers = std::mem::take(&mut self.event_handlers);
+        let event_batch_handlers = std::mem::take(&mut self.event_batch_handlers);
+        let error_handlers = std::mem::take(&mut self.error_handlers);
+        let stats_handlers = std::mem::take(&mut self.stats_handlers);
         let ring_buf_size = self.ring_buf_size;
 
         let handle = tokio::spawn(async move {
@@ -204,6 +196,7 @@ impl Tracer for BpfTracer {
                 ring_buf,
                 ring_buf_size,
                 event_handlers,
+                event_batch_handlers,
                 error_handlers,
                 stats_handlers,
                 ctx,
@@ -290,11 +283,10 @@ impl Tracer for BpfTracer {
         clear_hash_map::<u32, BpfTrackedTidVal>(ebpf, "tracked_tids")?;
         clear_hash_map::<u32, u64>(ebpf, "wakeup_ts")?;
 
-        // NOTE: sched_on_ts and offcpu_ts are LRU maps that record timestamps
-        // unconditionally for all threads. Clearing them on TID refresh would
-        // lose timestamps for currently-running threads, creating on_cpu_ns=0
-        // holes. Thread exit cleanup in do_exit handles normal TID reuse; the
-        // LRU behavior is only a backstop for missed exits or long-idle tasks.
+        // NOTE: sched_on_ts and offcpu_ts are LRU maps populated by live
+        // scheduler events. Clearing them on TID refresh would lose
+        // timestamps for currently-running tracked threads, creating
+        // on_cpu_ns=0 holes. LRU eviction handles staleness automatically.
 
         const TRACKED_TIDS_CAPACITY: usize = 65536;
         if tids.len() > TRACKED_TIDS_CAPACITY {
@@ -331,6 +323,10 @@ impl Tracer for BpfTracer {
         self.event_handlers.push(handler);
     }
 
+    fn on_event_batch(&mut self, handler: EventBatchHandler) {
+        self.event_batch_handlers.push(handler);
+    }
+
     fn on_error(&mut self, handler: ErrorHandler) {
         self.error_handlers.push(handler);
     }
@@ -344,15 +340,13 @@ impl Tracer for BpfTracer {
 // Ring buffer read loop
 // ---------------------------------------------------------------------------
 
-/// Report stats every N events to reduce overhead.
-const STATS_INTERVAL: u32 = 1000;
-
 async fn read_loop(
     ring_buf: RingBuf<aya::maps::MapData>,
     ring_buf_size: u32,
-    event_handlers: Arc<Vec<EventHandler>>,
-    error_handlers: Arc<Vec<ErrorHandler>>,
-    stats_handlers: Arc<Vec<RingbufStatsHandler>>,
+    mut event_handlers: Vec<EventHandler>,
+    mut event_batch_handlers: Vec<EventBatchHandler>,
+    error_handlers: Vec<ErrorHandler>,
+    stats_handlers: Vec<RingbufStatsHandler>,
     cancel: tokio_util::sync::CancellationToken,
 ) {
     let mut async_fd = match AsyncFd::new(ring_buf) {
@@ -363,7 +357,21 @@ async fn read_loop(
         }
     };
 
-    let mut event_count: u32 = 0;
+    // `aya` does not expose live ring-buffer fill, so repeated callbacks would
+    // only rewrite the same zero-valued gauge on the event hot path.
+    if !stats_handlers.is_empty() {
+        let stats = RingbufStats {
+            used_bytes: 0,
+            size_bytes: ring_buf_size as usize,
+        };
+        for stats_handler in stats_handlers.iter() {
+            stats_handler(stats);
+        }
+    }
+
+    let batch_pool = std::sync::Arc::new(ParsedEventBatchPool::default());
+    let mut parsed_batch = ParsedEventBatch::checkout(&batch_pool);
+    let single_batch_handler_only = event_handlers.is_empty() && event_batch_handlers.len() == 1;
 
     loop {
         tokio::select! {
@@ -380,57 +388,163 @@ async fn read_loop(
 
                 // Drain all available events.
                 let rb = guard.get_inner_mut();
-                while let Some(item) = rb.next() {
-                    let data: &[u8] = &item;
+                if single_batch_handler_only {
+                    let handler = event_batch_handlers
+                        .first_mut()
+                        .expect("single_batch_handler_only requires exactly one batch handler");
 
-                    // Empty record indicates ring buffer overflow.
-                    if data.is_empty() {
-                        tracing::warn!("ring buffer overflow detected");
-                        continue;
-                    }
+                    while let Some(item) = rb.next() {
+                        let data: &[u8] = &item;
 
-                    event_count += 1;
-                    if event_count >= STATS_INTERVAL {
-                        let stats = RingbufStats {
-                            used_bytes: 0, // aya does not expose remaining/capacity
-                            size_bytes: ring_buf_size as usize,
-                        };
-                        for handler in stats_handlers.iter() {
-                            handler(stats);
+                        // Empty record indicates ring buffer overflow.
+                        if data.is_empty() {
+                            tracing::warn!("ring buffer overflow detected");
+                            continue;
                         }
-                        event_count = 0;
+
+                        match parse_event_into_batch(data, &mut parsed_batch) {
+                            Ok(()) => {
+                                if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
+                                    dispatch_single_event_batch_handler(
+                                        &mut parsed_batch,
+                                        handler,
+                                        &batch_pool,
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::debug!(error = %e, "event parse error");
+                                report_parse_error(&error_handlers, &e);
+                            }
+                        }
                     }
 
-                    match parse_event(data) {
-                        Ok(event) => {
-                            match event_handlers.len() {
-                                0 => {}
-                                1 => {
-                                    if let Some(handler) = event_handlers.first() {
-                                        handler(event);
-                                    }
-                                }
-                                len => {
-                                    for handler in event_handlers.iter().take(len - 1) {
-                                        handler(event.clone());
-                                    }
-                                    if let Some(last_handler) = event_handlers.get(len - 1) {
-                                        last_handler(event);
+                    dispatch_single_event_batch_handler(
+                        &mut parsed_batch,
+                        handler,
+                        &batch_pool,
+                    );
+                } else {
+                    while let Some(item) = rb.next() {
+                        let data: &[u8] = &item;
+
+                        // Empty record indicates ring buffer overflow.
+                        if data.is_empty() {
+                            tracing::warn!("ring buffer overflow detected");
+                            continue;
+                        }
+
+                        match parse_event(data) {
+                            Ok(event) => {
+                                if event_batch_handlers.is_empty() {
+                                    dispatch_event(event, &mut event_handlers);
+                                } else {
+                                    parsed_batch.push(event);
+                                    if parsed_batch.len() >= PARSED_EVENT_BATCH_SIZE {
+                                        dispatch_event_batch(
+                                            &mut parsed_batch,
+                                            &mut event_handlers,
+                                            &mut event_batch_handlers,
+                                            &batch_pool,
+                                        );
                                     }
                                 }
                             }
-                        }
-                        Err(e) => {
-                            tracing::debug!(error = %e, "event parse error");
-                            report_parse_error(&error_handlers, &e);
+                            Err(e) => {
+                                tracing::debug!(error = %e, "event parse error");
+                                report_parse_error(&error_handlers, &e);
+                            }
                         }
                     }
-                }
 
+                    dispatch_event_batch(
+                        &mut parsed_batch,
+                        &mut event_handlers,
+                        &mut event_batch_handlers,
+                        &batch_pool,
+                    );
+                }
                 guard.clear_ready();
             }
         }
     }
+}
+
+fn dispatch_event(event: super::event::ParsedEvent, event_handlers: &mut [EventHandler]) {
+    match event_handlers.len() {
+        0 => {}
+        1 => {
+            if let Some(handler) = event_handlers.first_mut() {
+                handler(event);
+            }
+        }
+        len => {
+            for handler in event_handlers.iter_mut().take(len - 1) {
+                handler(event.clone());
+            }
+            if let Some(last_handler) = event_handlers.get_mut(len - 1) {
+                last_handler(event);
+            }
+        }
+    }
+}
+
+fn dispatch_event_batch(
+    parsed_batch: &mut ParsedEventBatch,
+    event_handlers: &mut [EventHandler],
+    event_batch_handlers: &mut [EventBatchHandler],
+    batch_pool: &std::sync::Arc<ParsedEventBatchPool>,
+) {
+    if parsed_batch.is_empty() {
+        return;
+    }
+
+    if !event_handlers.is_empty() {
+        for event in parsed_batch.events.iter().cloned() {
+            dispatch_event(event, event_handlers);
+        }
+    }
+
+    match event_batch_handlers.len() {
+        0 => {
+            parsed_batch.clear();
+        }
+        1 => {
+            if let Some(handler) = event_batch_handlers.first_mut() {
+                handler(std::mem::replace(
+                    parsed_batch,
+                    ParsedEventBatch::checkout(batch_pool),
+                ));
+            }
+        }
+        len => {
+            for handler in event_batch_handlers.iter_mut().take(len - 1) {
+                handler(parsed_batch.clone());
+            }
+            if let Some(last_handler) = event_batch_handlers.get_mut(len - 1) {
+                last_handler(std::mem::replace(
+                    parsed_batch,
+                    ParsedEventBatch::checkout(batch_pool),
+                ));
+            }
+        }
+    }
+}
+
+#[inline(always)]
+fn dispatch_single_event_batch_handler(
+    parsed_batch: &mut ParsedEventBatch,
+    handler: &mut EventBatchHandler,
+    batch_pool: &std::sync::Arc<ParsedEventBatchPool>,
+) {
+    if parsed_batch.is_empty() {
+        return;
+    }
+
+    handler(std::mem::replace(
+        parsed_batch,
+        ParsedEventBatch::checkout(batch_pool),
+    ));
 }
 
 fn report_error(handlers: &[ErrorHandler], err: &std::io::Error) {
@@ -530,15 +644,8 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // ---------------------------------------------------------------
     if disabled.contains(&ProbeGroup::FdOpen) {
         tracing::info!(probe = "fd_open", "skipping (disabled)");
-        stats.tracepoints_skipped += 2;
+        stats.tracepoints_skipped += 1;
     } else {
-        attach_tracepoint_required(
-            ebpf,
-            "trace_sys_enter_openat",
-            "syscalls",
-            "sys_enter_openat",
-            &mut stats,
-        )?;
         attach_tracepoint_required(
             ebpf,
             "trace_sys_exit_openat",
@@ -650,15 +757,8 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // ---------------------------------------------------------------
     if disabled.contains(&ProbeGroup::PageFault) {
         tracing::info!(probe = "page_fault", "skipping (disabled)");
-        stats.kprobes_skipped += 1;
         stats.kretprobes_skipped += 1;
     } else {
-        attach_kprobe_required(
-            ebpf,
-            "kprobe_handle_mm_fault",
-            "handle_mm_fault",
-            &mut stats,
-        )?;
         attach_kprobe_required(
             ebpf,
             "kretprobe_handle_mm_fault",
@@ -763,6 +863,7 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             "kprobe_tcp_set_state",
             "tcp_set_state",
         ),
+        (ProbeGroup::ProcessExit, "kprobe_do_exit", "do_exit"),
     ];
 
     for (group, prog_name, symbol) in optional_kprobes {
@@ -772,25 +873,6 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             continue;
         }
         attach_kprobe_optional(ebpf, prog_name, symbol, &mut stats);
-    }
-
-    let process_exit_enabled = !disabled.contains(&ProbeGroup::ProcessExit);
-    if scheduler_enabled || process_exit_enabled {
-        if !process_exit_enabled && scheduler_enabled {
-            tracing::info!(
-                probe = %ProbeGroup::ProcessExit,
-                program = "kprobe_do_exit",
-                "attaching for scheduler TID cleanup; process_exit events suppressed"
-            );
-        }
-        attach_kprobe_optional(ebpf, "kprobe_do_exit", "do_exit", &mut stats);
-    } else {
-        tracing::info!(
-            probe = %ProbeGroup::ProcessExit,
-            program = "kprobe_do_exit",
-            "skipping (disabled)"
-        );
-        stats.kprobes_skipped += 1;
     }
 
     Ok(stats)
