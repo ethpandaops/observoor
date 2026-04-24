@@ -685,6 +685,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `8821a76`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 67: Inline hot scheduler-wait aggregate (2026-04-24)
+- **Hypothesis**: Stress-bench's mutex contention emits repeated scheduler
+  wait events for the same pid/client. `sched_wait` still goes through the
+  generic `FastMap` last-hit cache on every event, while the hotter syscall,
+  FD, and page-fault counters now keep their dominant `BasicDimension` entry
+  inline. Giving scheduler wait the same inline-first shape should remove the
+  remaining map/cache indirection for that hot dimension while preserving exact
+  aggregation through a spill map.
+- **Change**: Add `HotBasicSchedWaitMap` and use it for scheduler wait metrics.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 2272a6c
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
