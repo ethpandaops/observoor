@@ -508,9 +508,13 @@ Key cost centers (from Criterion benchmarks):
   changing aggregation semantics.
 - **Change**: Emit `tcp_state` as an 8-byte compact marker and parse it through
   the existing compact basic-marker path.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 9.16s vs 10.17s master, CV 0.2%/0.4% —
+  **-9.93% vs master**. Beats HWM -7.82% by 2.11pp.
+- **Verdict**: KEPT (tentatively — note this run landed on a fast-runner class:
+  master=10.17s here vs 13.30s when HWM was measured. Per-runner % delta seems
+  to vary; iter 54 on a slow-runner class will confirm/deny.)
 - **Commit**: 8ef28eb
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -520,9 +524,14 @@ been seen at 10.14s and 15.98s across two back-to-back runs). The meaningful
 signal is HEAD-vs-base on the **same** runner. As of 2026-04-24 the bench runs
 5 interleaved base/head pairs plus a discarded warmup, and reports min/max/stdev.
 
-**High-water mark: -7.82%** vs master (iter 46, commit `ea8e205`,
-measured on new methodology at commit `4c9d784`, 2026-04-24)
-**44 kept iterations.**
+**Runner-class caveat**: the % delta itself appears runner-dependent — iter 46
+code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
+(master ~13s). So cross-iteration comparisons need a runner-class disclaimer
+until we get multi-runner medians.
+
+**High-water mark: -9.93%** vs master (iter 53, commit `8ef28eb`, 2026-04-24,
+measured on fast-runner class — slow-runner HWM remains -7.82% from iter 46).
+**45 kept iterations.**
 
 ## Rules
 
