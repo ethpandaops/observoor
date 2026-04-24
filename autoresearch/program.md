@@ -880,6 +880,32 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: 8ea5db9
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 81: Defer UDP recv port reads until success (2026-04-25) — REVERTED
+- **Hypothesis**: BPF `kprobe_udp_recvmsg` does `BPF_CORE_READ` on port fields
+  at entry even though EAGAIN dominates. Move port reads into the return probe.
+- **Change**: Entry stores only `sk` + `client_type`; return probe reads ports
+  on `ret > 0`. (commit `3cdd196`)
+- **Result (abnormal runner, wall 166s)**: 11.31s vs 13.00s, -13.00%.
+  Outsized delta flagged as suspicious; iter 82's sanity run (with iter 81's
+  code in HEAD) on a normal runner showed -9.24% at master=15.69s — tied with
+  interpolated neutral ≈-9.17%. iter 81's 13% was an artifact of the
+  abnormal runner, not a real improvement.
+- **Verdict**: REVERTED retroactively. Branch reset to `2e82bb6`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
+### Iteration 82: Pack syscall start map value 16→9 bytes (2026-04-25) — REVERTED
+- **Hypothesis**: `struct syscall_val` has 7 bytes of alignment padding.
+  Adding `__attribute__((packed))` shrinks the hot syscall_start map value.
+- **Change**: Pack the struct. (commits `703d229`, `a307070`)
+- **Result (new methodology)**: 14.24s vs 15.69s master, CV 0.5%/0.4% —
+  **-9.24% vs master** at master=15.69s. Interpolation between medium HWM
+  (-9.73% at 13.67s) and slow HWM (-9.03% at 16.17s) predicts neutral
+  ≈-9.17%. iter 82 at -9.24% is 0.07pp above neutral — essentially tied.
+  Includes iter 81's code, which this sanity run also showed as neutral.
+- **Verdict**: REVERTED. Branch reset to `2e82bb6` (dropping both iter 81
+  and iter 82).
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
