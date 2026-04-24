@@ -114,12 +114,13 @@ struct sched_runqueue_event {
     __u8  pad[4];
 };
 
-// Block merge event (32 bytes total).
+// Block merge event (40 bytes total).
 struct block_merge_event {
     struct event_header hdr;
     __u32 bytes;
+    __u32 dev;
     __u8  rw; // 0=read, 1=write
-    __u8  pad[3];
+    __u8  pad[7];
 };
 
 // TCP retransmit event (40 bytes total).
@@ -176,12 +177,15 @@ struct syscall_key {
 struct syscall_val {
     __u64 ts;
     __s32 fd;
-    __u32 pad;
+    __u8  client_type;
+    __u8  pad[3];
 };
 
 // Openat filename capture.
 struct openat_val {
     __u64 ts;
+    __u8  client_type;
+    __u8  pad[7];
     char  filename[64];
 };
 
@@ -230,6 +234,8 @@ struct net_send_val {
 struct fault_val {
     __u64 ts;
     __u64 address;
+    __u8  client_type;
+    __u8  pad[7];
 };
 
 // Tracepoint context structs (non-CO-RE). Defined here (outside vmlinux.h)

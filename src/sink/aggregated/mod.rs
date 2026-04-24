@@ -580,7 +580,7 @@ impl AggregatedSink {
                 let disk_dim = build_disk_dimension(
                     event.raw.pid,
                     event.raw.client_type as u8,
-                    0,
+                    e.device_id,
                     e.rw,
                     dimensions,
                 );

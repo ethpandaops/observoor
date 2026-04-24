@@ -278,13 +278,14 @@ fn parse_fd(event: Event, data: &[u8]) -> Result<FDEvent, ParseError> {
     })
 }
 
-/// Block merge event: type 17. Payload: 8 bytes.
+/// Block merge event: type 17. Payload: 16 bytes.
 fn parse_block_merge(event: Event, data: &[u8]) -> Result<BlockMergeEvent, ParseError> {
-    ensure_payload(data, 8, "block merge event")?;
+    ensure_payload(data, 16, "block merge event")?;
     Ok(BlockMergeEvent {
         event,
         bytes: read_u32_le(data, 0),
-        rw: read_u8(data, 4),
+        device_id: read_u32_le(data, 4),
+        rw: read_u8(data, 8),
     })
 }
 
@@ -746,14 +747,16 @@ mod tests {
     fn test_block_merge_read() {
         let mut data = header(11_000_000, 110, 210, 17, 1); // BlockMerge, Geth
         data.extend_from_slice(&8192u32.to_le_bytes());
+        data.extend_from_slice(&66304u32.to_le_bytes());
         data.push(0); // rw = read
-        data.extend_from_slice(&[0u8; 3]);
+        data.extend_from_slice(&[0u8; 7]);
 
         let parsed = parse_event(&data).unwrap();
         let TypedEvent::BlockMerge(e) = &parsed.typed else {
             panic!("expected BlockMerge");
         };
         assert_eq!(e.bytes, 8192);
+        assert_eq!(e.device_id, 66304);
         assert_eq!(e.rw, 0);
     }
 

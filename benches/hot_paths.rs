@@ -145,7 +145,7 @@ fn process_parsed_event(buf: &Buffer, event: &ParsedEvent) {
             let disk = DiskDimension {
                 pid: event.raw.pid,
                 client_type: event.raw.client_type as u8,
-                device_id: 0,
+                device_id: e.device_id,
                 rw: e.rw,
             };
             buf.add_block_merge(disk, e.bytes);
