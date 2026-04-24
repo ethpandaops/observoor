@@ -564,9 +564,12 @@ Key cost centers (from Criterion benchmarks):
   overhead for the dominant single-process workload while preserving exact
   aggregation via a spill map for additional dimensions.
 - **Change**: Add `HotBasicPageFaultMap` and use it for page-fault counters.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 8.86s vs 9.97s master, CV 0.4%/0.3% —
+  **-11.13% vs master** on fast runner. Beats fast-runner HWM -9.93% by 1.20pp
+  (just above noise floor).
+- **Verdict**: KEPT. New fast-runner HWM is -11.13%.
 - **Commit**: 831accc
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -581,9 +584,9 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 (master ~13s). So cross-iteration comparisons need a runner-class disclaimer
 until we get multi-runner medians.
 
-**High-water mark: -9.93%** vs master (iter 53, commit `8ef28eb`, 2026-04-24,
-measured on fast-runner class — slow-runner HWM remains -7.82% from iter 46).
-**45 kept iterations.**
+**High-water mark: -11.13%** vs master (iter 57, commit `831accc`, 2026-04-24,
+fast runner — slow-runner HWM remains -7.82% from iter 46).
+**46 kept iterations.**
 
 ## Rules
 
