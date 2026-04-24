@@ -762,6 +762,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `cdaeed0`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 73: Drop event tag from compact page-fault records (2026-04-24)
+- **Hypothesis**: Page-fault records are already identified by their compact
+  record length, so carrying `EVENT_PAGE_FAULT` inside every 7-byte sample is
+  redundant. Making the tag implicit should reduce ring-buffer bandwidth and
+  parser work on the hot mmap/page-fault path without changing aggregation
+  semantics.
+- **Change**: Emit 6-byte page-fault records (`pid + client_type + major`) and
+  parse the previous 7-byte shape as a legacy fallback.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 32bce1f
+- **Author**: gpt-5 / medium reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
