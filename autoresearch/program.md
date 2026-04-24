@@ -1021,6 +1021,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `49cd3ee`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 92: Defer scheduler CPU id lookup (2026-04-25) — REVERTED
+- **Hypothesis**: `trace_sched_switch` calls `bpf_get_smp_processor_id()`
+  before `bpf_ringbuf_reserve`. Deferring past the reserve avoids the helper
+  on dropped/filtered events.
+- **Change**: Move CPU-id lookup after successful reserve. (commits
+  `e9b66fe`, `9d9193d`)
+- **Result (new methodology)**: 12.33s vs 13.60s master, CV 0.3%/0.3% —
+  **-9.34% vs master** at master=13.60s (same class as medium HWM).
+  Medium HWM -9.73% → 0.39pp worse.
+- **Verdict**: REVERTED. Branch reset to `8514da5`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
