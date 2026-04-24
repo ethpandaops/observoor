@@ -136,7 +136,7 @@ struct sched_switch_runqueue_event {
     __u32 next_tid;
 };
 
-// Page fault event (8 bytes total).
+// Page fault event (7-byte populated prefix).
 // Aggregation only needs pid + client + event tag + major/minor, so keep this
 // hot event in a compact marker-style record instead of carrying the full
 // generic header.
@@ -145,8 +145,7 @@ struct page_fault_event {
     __u8  event_type;
     __u8  client_type;
     __u8  major;
-    __u8  pad;
-};
+} __attribute__((packed));
 
 // FD event (8 bytes total).
 // Userspace only counts open/close events, so keep just the fields needed to

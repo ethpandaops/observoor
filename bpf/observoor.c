@@ -1196,7 +1196,6 @@ int BPF_KRETPROBE(kretprobe_handle_mm_fault, unsigned long ret)
     e->event_type = EVENT_PAGE_FAULT;
     e->client_type = ct;
     e->major = (ret & 0x04) ? 1 : 0;
-    e->pad = 0;
 
     bpf_ringbuf_submit(e, 0);
     return 0;
