@@ -945,6 +945,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `106a309`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 86: Direct-decode compact page-fault records (2026-04-25) — REVERTED
+- **Hypothesis**: 6-byte page-fault parser copies through a packed struct
+  before extracting pid/client/major. Direct-load from the byte slice skips
+  the copy.
+- **Change**: Inline u32/u8 decodes in `parse_compact_page_fault_event`.
+  (commits `b4b1f1f`, `ebb7917`)
+- **Result (new methodology)**: 14.18s vs 15.55s master, CV 0.5%/0.4% —
+  **-8.81% vs master** at master=15.55s. Interpolation predicts neutral
+  ≈ -9.20%; iter 86 is 0.39pp worse. Compiler likely already elides the
+  packed-struct copy.
+- **Verdict**: REVERTED. Branch reset to `be84685`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
