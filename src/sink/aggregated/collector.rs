@@ -369,7 +369,7 @@ impl Collector {
             + buf.syscall_mmap.len()
             + buf.syscall_fsync.len()
             + buf.cpu_on_core.len()
-            + (map_len(&buf.sched_wait) * 2)
+            + (buf.sched_wait.len() * 2)
             + (map_len(&buf.basic_cold_metrics) * 5)
             + map_len(&buf.disk_io_read)
             + map_len(&buf.disk_io_write)

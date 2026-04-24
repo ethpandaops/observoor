@@ -470,6 +470,77 @@ impl HotBasicPageFaultMap {
     }
 }
 
+/// Keeps the hottest `BasicDimension -> SchedWaitAggregate` entry inline.
+///
+/// Mutex-heavy workloads tend to emit scheduler wait samples repeatedly for
+/// one process/client key. Mirroring the other hot BasicDimension maps avoids
+/// even the cached hash-map indirection on that dominant scheduler path.
+pub struct HotBasicSchedWaitMap {
+    inline: Option<(BasicDimension, SchedWaitAggregate)>,
+    spill: FastMap<BasicDimension, SchedWaitAggregate>,
+}
+
+impl HotBasicSchedWaitMap {
+    #[inline(always)]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            inline: None,
+            spill: FastMap::with_capacity(capacity),
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn len(&self) -> usize {
+        self.spill.len() + usize::from(self.inline.is_some())
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.inline.is_none() && self.spill.is_empty()
+    }
+
+    #[inline(always)]
+    pub(crate) fn clear(&mut self) {
+        self.inline = None;
+        self.spill.clear();
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
+    #[inline(always)]
+    pub(crate) fn get(&self, key: &BasicDimension) -> Option<&SchedWaitAggregate> {
+        self.inline
+            .as_ref()
+            .and_then(|(inline_key, aggregate)| (inline_key == key).then_some(aggregate))
+            .or_else(|| self.spill.get(key))
+    }
+
+    #[inline(always)]
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&BasicDimension, &SchedWaitAggregate)> + '_ {
+        self.inline
+            .iter()
+            .map(|(dim, aggregate)| (dim, aggregate))
+            .chain(self.spill.iter())
+    }
+
+    #[inline(always)]
+    fn record(&mut self, key: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
+        if let Some((inline_key, aggregate)) = self.inline.as_mut() {
+            if *inline_key == key {
+                aggregate.record(runqueue_ns, off_cpu_ns);
+                return;
+            }
+
+            get_or_default_mut(&mut self.spill, key).record(runqueue_ns, off_cpu_ns);
+            return;
+        }
+
+        let mut aggregate = SchedWaitAggregate::new();
+        aggregate.record(runqueue_ns, off_cpu_ns);
+        self.inline = Some((key, aggregate));
+    }
+}
+
 #[inline(always)]
 pub(crate) fn get_or_default_mut<K, V>(map: &mut FastMap<K, V>, key: K) -> &mut V
 where
@@ -686,7 +757,7 @@ pub struct Buffer {
     // them in their own smaller map entry instead of carrying page-fault state.
     pub fd_metrics: HotBasicFdMap,
     pub page_fault_metrics: HotBasicPageFaultMap,
-    pub sched_wait: FastMap<BasicDimension, SchedWaitAggregate>,
+    pub sched_wait: HotBasicSchedWaitMap,
     pub basic_cold_metrics: FastMap<BasicDimension, BasicColdAggregate>,
 
     // --- Network (TCPMetricsDimension -> CounterAggregate) ---
@@ -741,7 +812,7 @@ impl Buffer {
             // BasicDimension counters.
             fd_metrics: HotBasicFdMap::with_capacity(16),
             page_fault_metrics: HotBasicPageFaultMap::with_capacity(16),
-            sched_wait: fast_map_with_capacity(8),
+            sched_wait: HotBasicSchedWaitMap::with_capacity(8),
             basic_cold_metrics: fast_map_with_capacity(8),
             // Network.
             net_io_tx: fast_map_with_capacity(64),
@@ -990,7 +1061,7 @@ impl Buffer {
     /// Adds scheduler runqueue and off-CPU latency.
     pub fn add_sched_runqueue(&mut self, dim: BasicDimension, runqueue_ns: u64, off_cpu_ns: u64) {
         if runqueue_ns > 0 || off_cpu_ns > 0 {
-            get_or_default_mut(&mut self.sched_wait, dim).record(runqueue_ns, off_cpu_ns);
+            self.sched_wait.record(dim, runqueue_ns, off_cpu_ns);
         }
     }
 
@@ -1159,6 +1230,25 @@ mod tests {
         let spill = map.get(&key2).expect("spill entry exists");
         assert_eq!(spill.page_fault_minor_snapshot().count, 1);
         assert_eq!(spill.page_fault_major_snapshot().count, 0);
+    }
+
+    #[test]
+    fn test_hot_basic_sched_wait_map_keeps_inline_entry_and_spills_others() {
+        let mut map = HotBasicSchedWaitMap::with_capacity(1);
+        let key1 = BasicDimension::new(1, 1);
+        let key2 = BasicDimension::new(2, 1);
+
+        map.record(key1, 10, 20);
+        map.record(key1, 30, 40);
+        map.record(key2, 50, 60);
+
+        let inline = map.get(&key1).expect("inline entry exists");
+        assert_eq!(inline.runqueue_snapshot().count, 2);
+        assert_eq!(inline.off_cpu_snapshot().count, 2);
+
+        let spill = map.get(&key2).expect("spill entry exists");
+        assert_eq!(spill.runqueue_snapshot().count, 1);
+        assert_eq!(spill.off_cpu_snapshot().count, 1);
     }
 
     #[test]
