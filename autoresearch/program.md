@@ -958,6 +958,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `be84685`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 87: Prioritize FD/TCP compact marker parsing (2026-04-25) — REVERTED
+- **Hypothesis**: Compact-marker parser currently tests page-fault tag first;
+  FD/TCP-state markers are more numerous on stress-bench. Reorder so FD/TCP
+  arms are tested first.
+- **Change**: Reordered marker tag checks in parser dispatch. (commits
+  `d0a9f02`, `e8b4e84`)
+- **Result (new methodology)**: 12.49s vs 13.76s master, CV 0.8%/0.5% —
+  **-9.23% vs master** at master=13.76s (near-identical to medium HWM's
+  13.67s). Medium HWM (iter 80) -9.73% → 0.50pp worse. Reordering doesn't
+  help on this runner.
+- **Verdict**: REVERTED. Branch reset to `435645f`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
