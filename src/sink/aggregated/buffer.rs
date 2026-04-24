@@ -1,4 +1,5 @@
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use dashmap::DashMap;
@@ -35,6 +36,8 @@ pub struct Buffer {
     pub el_offline: bool,
     /// Number of online CPU cores on the host.
     pub system_cores: u16,
+    /// Tracked process dimensions captured when this buffer was created.
+    pub tracked_processes: Arc<Vec<BasicDimension>>,
 
     // --- Syscalls (BasicDimension -> LatencyAggregate) ---
     pub syscall_read: DashMap<BasicDimension, LatencyAggregate>,
@@ -95,6 +98,28 @@ impl Buffer {
         el_offline: bool,
         system_cores: u16,
     ) -> Self {
+        Self::new_with_tracked_processes(
+            start_time,
+            wallclock_slot,
+            wallclock_slot_start,
+            cl_syncing,
+            el_optimistic,
+            el_offline,
+            system_cores,
+            Arc::new(Vec::new()),
+        )
+    }
+
+    pub fn new_with_tracked_processes(
+        start_time: SystemTime,
+        wallclock_slot: u64,
+        wallclock_slot_start: SystemTime,
+        cl_syncing: bool,
+        el_optimistic: bool,
+        el_offline: bool,
+        system_cores: u16,
+        tracked_processes: Arc<Vec<BasicDimension>>,
+    ) -> Self {
         Self {
             start_time,
             start_monotonic_ns: super::monotonic_ns(),
@@ -105,6 +130,7 @@ impl Buffer {
             el_optimistic,
             el_offline,
             system_cores,
+            tracked_processes,
             // Syscalls.
             syscall_read: DashMap::with_capacity(16),
             syscall_write: DashMap::with_capacity(16),

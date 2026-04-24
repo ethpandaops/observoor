@@ -1,3 +1,9 @@
+#![allow(
+    clippy::indexing_slicing,
+    clippy::needless_borrow,
+    clippy::uninlined_format_args
+)]
+
 use std::alloc::System;
 use std::hint::black_box;
 use std::time::{Duration, SystemTime};

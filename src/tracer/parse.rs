@@ -352,7 +352,12 @@ fn parse_process_exit(event: Event, data: &[u8]) -> Result<ProcessExitEvent, Par
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::panic)]
+#[allow(
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::uninlined_format_args,
+    clippy::unwrap_used
+)]
 mod tests {
     use super::*;
 

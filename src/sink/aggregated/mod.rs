@@ -18,9 +18,11 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 use tracing::{info, warn};
 
+use crate::agent::ports::PortLabelMap;
 use crate::beacon::SyncStatus;
 use crate::config::{AggregatedSinkConfig, DimensionsConfig};
 use crate::sink::Sink;
@@ -49,6 +51,8 @@ struct SharedState {
     el_offline: AtomicU32,
     /// Number of online CPU cores.
     system_cores: AtomicU32,
+    /// Tracked process dimensions for process snapshot tables.
+    tracked_processes: ArcSwap<Vec<BasicDimension>>,
 }
 
 impl SharedState {
@@ -60,6 +64,7 @@ impl SharedState {
             el_optimistic: AtomicU32::new(0),
             el_offline: AtomicU32::new(0),
             system_cores: AtomicU32::new(0),
+            tracked_processes: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -326,6 +331,11 @@ pub struct AggregatedSink {
     /// Slot change receiver, taken by `start`.
     slot_rotation_rx: Option<mpsc::UnboundedReceiver<SlotRotation>>,
 
+    /// Queue of runtime port-label map updates consumed by the run loop.
+    port_label_tx: mpsc::UnboundedSender<PortLabelMap>,
+    /// Port-label update receiver, taken by `start`.
+    port_label_rx: Option<mpsc::UnboundedReceiver<PortLabelMap>>,
+
     /// Atomic buffer pointer for lock-free rotation.
     buffer: Arc<atomic_buffer::AtomicBuffer>,
 
@@ -346,6 +356,7 @@ impl AggregatedSink {
         let (event_tx, event_rx) = mpsc::channel(65536);
         let (rotation_tx, rotation_rx) = mpsc::unbounded_channel();
         let (slot_rotation_tx, slot_rotation_rx) = mpsc::unbounded_channel();
+        let (port_label_tx, port_label_rx) = mpsc::unbounded_channel();
 
         Self {
             collector: Collector::new(cfg.resolution.interval, &cfg.sampling),
@@ -359,6 +370,8 @@ impl AggregatedSink {
             rotation_rx: Some(rotation_rx),
             slot_rotation_tx,
             slot_rotation_rx: Some(slot_rotation_rx),
+            port_label_tx,
+            port_label_rx: Some(port_label_rx),
             buffer: Arc::new(atomic_buffer::AtomicBuffer::new()),
             state: Arc::new(SharedState::new()),
             run_task: Arc::new(tokio::sync::Mutex::new(None)),
@@ -385,11 +398,44 @@ impl AggregatedSink {
         self.cfg.dimensions.network.set_port_label_map(map);
     }
 
+    /// Updates port labels in the running sink.
+    pub fn update_port_label_map(&self, map: PortLabelMap) {
+        if self.port_label_tx.send(map).is_err() {
+            warn!("port-label update queue closed, dropping update");
+        }
+    }
+
+    /// Updates the tracked process set used by per-process snapshot collection.
+    pub fn set_tracked_processes(&self, client_types: &HashMap<u32, ClientType>) {
+        let mut tracked: Vec<BasicDimension> = client_types
+            .iter()
+            .map(|(&pid, &client_type)| BasicDimension {
+                pid,
+                client_type: client_type as u8,
+            })
+            .collect();
+        tracked.sort_unstable_by_key(|dim| (dim.pid, dim.client_type));
+        tracked.dedup_by_key(|dim| (dim.pid, dim.client_type));
+        self.state.tracked_processes.store(Arc::new(tracked));
+    }
+
+    /// Seeds slot state without queueing a slot-aligned rotation.
+    pub fn seed_slot_state(&self, new_slot: u64, slot_start: SystemTime) {
+        self.state.current_slot.store(new_slot, Ordering::Relaxed);
+        let nanos = slot_start
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as i64;
+        self.state
+            .current_slot_start
+            .store(nanos, Ordering::Relaxed);
+    }
+
     /// Creates a new buffer with current sync state.
     fn new_buffer_from_state(state: &SharedState, now: SystemTime, slot: u64) -> Buffer {
         let system_cores =
             u16::try_from(state.system_cores.load(Ordering::Relaxed)).unwrap_or(u16::MAX);
-        Buffer::new(
+        Buffer::new_with_tracked_processes(
             now,
             slot,
             state.slot_start_time(),
@@ -397,6 +443,7 @@ impl AggregatedSink {
             state.el_optimistic.load(Ordering::Relaxed) == 1,
             state.el_offline.load(Ordering::Relaxed) == 1,
             system_cores,
+            state.tracked_processes.load_full(),
         )
     }
 
@@ -649,6 +696,10 @@ impl Sink for AggregatedSink {
             .slot_rotation_rx
             .take()
             .expect("start called more than once");
+        let mut port_label_rx = self
+            .port_label_rx
+            .take()
+            .expect("start called more than once");
 
         // Take exporters and start them.
         let mut exporters = std::mem::take(&mut self.exporters);
@@ -659,7 +710,7 @@ impl Sink for AggregatedSink {
 
         let buffer = Arc::clone(&self.buffer);
         let state = Arc::clone(&self.state);
-        let dimensions = self.cfg.dimensions.clone();
+        let mut dimensions = self.cfg.dimensions.clone();
         let interval = self.cfg.resolution.interval;
         let sync_state_interval = self.cfg.resolution.sync_state_poll_interval;
         let host_specs_interval = self.cfg.resolution.host_specs_poll_interval;
@@ -838,6 +889,11 @@ impl Sink for AggregatedSink {
                                 }
                             }
                         }
+                    }
+
+                    Some(port_label_map) = port_label_rx.recv() => {
+                        dimensions.network.set_port_label_map(port_label_map);
+                        tracing::debug!("updated port label map");
                     }
 
                     Some(rotation) = slot_rotation_rx.recv() => {
@@ -1038,14 +1094,7 @@ impl Sink for AggregatedSink {
     }
 
     fn on_slot_changed(&self, new_slot: u64, slot_start: SystemTime) {
-        self.state.current_slot.store(new_slot, Ordering::Relaxed);
-        let nanos = slot_start
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as i64;
-        self.state
-            .current_slot_start
-            .store(nanos, Ordering::Relaxed);
+        self.seed_slot_state(new_slot, slot_start);
 
         if self.cfg.resolution.slot_aligned
             && self

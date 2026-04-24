@@ -1,3 +1,5 @@
+#![allow(clippy::indexing_slicing)]
+
 use std::time::{Duration, SystemTime};
 
 use observoor::agent::ports::{PortLabel, PortLabelMap};

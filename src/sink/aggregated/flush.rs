@@ -306,6 +306,8 @@ fn to_u16_ms(ms: u128) -> u16 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing)]
+
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
 

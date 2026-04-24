@@ -329,6 +329,10 @@ impl Collector {
         self.collect_tcp_gauges(batch, buf, window, slot);
         self.collect_disk_gauges(batch, buf, window, slot);
         self.collect_cpu_utilization(batch, buf, window, slot, interval_ns);
+        #[cfg(feature = "bpf")]
+        if self.collect_process_snapshots {
+            self.collect_process_snapshots(batch, buf, window, slot);
+        }
     }
 
     fn estimate_latency_capacity(&self, buf: &Buffer) -> usize {
@@ -374,22 +378,22 @@ impl Collector {
 
     #[cfg(feature = "bpf")]
     fn estimate_memory_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        buf.tracked_processes.len().max(buf.cpu_on_core.len())
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_io_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        buf.tracked_processes.len().max(buf.cpu_on_core.len())
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_fd_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        buf.tracked_processes.len().max(buf.cpu_on_core.len())
     }
 
     #[cfg(feature = "bpf")]
     fn estimate_process_sched_usage_capacity(&self, buf: &Buffer) -> usize {
-        buf.cpu_on_core.len()
+        buf.tracked_processes.len().max(buf.cpu_on_core.len())
     }
 
     /// Collects all basic-dimension latency metrics (syscalls, sched, memory).
@@ -882,10 +886,45 @@ impl Collector {
                 min_core_pct: acc.min_core_pct,
                 max_core_pct: acc.max_core_pct,
             });
+        }
+    }
 
-            #[cfg(feature = "bpf")]
-            if self.collect_process_snapshots {
-                self.collect_process_snapshot_metrics(batch, window, slot, pid, client_type);
+    #[cfg(feature = "bpf")]
+    fn collect_process_snapshots(
+        &self,
+        batch: &mut MetricBatch,
+        buf: &Buffer,
+        window: WindowInfo,
+        slot: SlotInfo,
+    ) {
+        if !buf.tracked_processes.is_empty() {
+            for dim in buf.tracked_processes.iter().copied() {
+                self.collect_process_snapshot_metrics(
+                    batch,
+                    window,
+                    slot,
+                    dim.pid,
+                    dim.client_type,
+                );
+            }
+            return;
+        }
+
+        let mut seen = hashbrown::HashSet::new();
+        for entry in buf.cpu_on_core.iter() {
+            let dim = *entry.key();
+            let basic = BasicDimension {
+                pid: dim.pid,
+                client_type: dim.client_type,
+            };
+            if seen.insert(basic) {
+                self.collect_process_snapshot_metrics(
+                    batch,
+                    window,
+                    slot,
+                    basic.pid,
+                    basic.client_type,
+                );
             }
         }
     }
@@ -1269,6 +1308,8 @@ fn reserve_if_needed<T>(vec: &mut Vec<T>, required: usize) {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing, clippy::needless_option_as_deref)]
+
     use std::time::SystemTime;
 
     use super::*;
@@ -1815,6 +1856,59 @@ mod tests {
         let sched = &batch.process_sched_usage[0];
         assert_eq!(sched.threads, 24);
         assert_eq!(sched.voluntary_ctxt_switches, 1234);
+    }
+
+    #[test]
+    #[cfg(feature = "bpf")]
+    fn test_collect_process_snapshots_for_idle_tracked_process() {
+        let mut collector = Collector::new_with_process_snapshots(
+            Duration::from_secs(1),
+            &SamplingConfig::default(),
+            true,
+        );
+
+        collector.proc_status_reader = |pid| {
+            if pid == 123 {
+                Some(ProcStatusSnapshot {
+                    memory: Some(ProcMemorySnapshot {
+                        vm_size_bytes: 10_000,
+                        vm_rss_bytes: 9_000,
+                        rss_anon_bytes: 7_000,
+                        rss_file_bytes: 1_500,
+                        rss_shmem_bytes: 500,
+                        vm_swap_bytes: 100,
+                    }),
+                    threads: 1,
+                    voluntary_ctxt_switches: 10,
+                    nonvoluntary_ctxt_switches: 1,
+                })
+            } else {
+                None
+            }
+        };
+        collector.proc_io_reader = |_pid| None;
+        collector.proc_limits_reader = |_pid| None;
+        collector.proc_fd_count_reader = |_pid| None;
+
+        let buf = Buffer::new_with_tracked_processes(
+            std::time::SystemTime::now(),
+            100,
+            std::time::SystemTime::now(),
+            false,
+            false,
+            false,
+            16,
+            std::sync::Arc::new(vec![BasicDimension {
+                pid: 123,
+                client_type: 1,
+            }]),
+        );
+
+        let batch = collector.collect(&buf, test_meta());
+        assert!(batch.cpu_util.is_empty());
+        assert_eq!(batch.memory_usage.len(), 1);
+        assert_eq!(batch.process_sched_usage.len(), 1);
+        assert_eq!(batch.memory_usage.first().map(|m| m.pid), Some(123));
     }
 
     #[test]

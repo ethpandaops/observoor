@@ -325,28 +325,33 @@ pub fn default_ports(client: ClientType) -> &'static [(u16, PortLabel)] {
             (8546, PortLabel::ElWebSocket),
             (8551, PortLabel::ElEngineApi),
             (30303, PortLabel::ElP2PTcp),
+            (30303, PortLabel::ElDiscovery),
         ],
         ClientType::Reth => &[
             (8545, PortLabel::ElJsonRpc),
             (8546, PortLabel::ElWebSocket),
             (8551, PortLabel::ElEngineApi),
             (30303, PortLabel::ElP2PTcp),
+            (30303, PortLabel::ElDiscovery),
         ],
         ClientType::Besu => &[
             (8545, PortLabel::ElJsonRpc),
             (8546, PortLabel::ElWebSocket),
             (8551, PortLabel::ElEngineApi),
             (30303, PortLabel::ElP2PTcp),
+            (30303, PortLabel::ElDiscovery),
         ],
         ClientType::Nethermind => &[
             (8545, PortLabel::ElJsonRpc),
             (8551, PortLabel::ElEngineApi),
             (30303, PortLabel::ElP2PTcp),
+            (30303, PortLabel::ElDiscovery),
         ],
         ClientType::Erigon => &[
             (8545, PortLabel::ElJsonRpc),
             (8551, PortLabel::ElEngineApi),
             (30303, PortLabel::ElP2PTcp),
+            (30303, PortLabel::ElDiscovery),
         ],
         // Consensus clients.
         ClientType::Lighthouse => &[
@@ -712,7 +717,8 @@ mod tests {
         assert_contains_label(ports, 8546, PortLabel::ElWebSocket);
         assert_contains_label(ports, 8551, PortLabel::ElEngineApi);
         assert_contains_label(ports, 30303, PortLabel::ElP2PTcp);
-        assert_eq!(ports.len(), 4);
+        assert_contains_label(ports, 30303, PortLabel::ElDiscovery);
+        assert_eq!(ports.len(), 5);
     }
 
     #[test]

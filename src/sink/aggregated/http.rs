@@ -1435,6 +1435,8 @@ fn format_datetime(t: std::time::SystemTime) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing)]
+
     use std::time::SystemTime;
 
     use super::*;

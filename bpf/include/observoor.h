@@ -239,8 +239,9 @@ struct trace_event_raw_block_rq_local {
     __u32 dev;
     __u64 sector;
     __u32 nr_sector;
-    __u32 bytes;
-    char rwbs[8];
+    __u32 bytes_or_error;
+    __u16 ioprio;
+    char rwbs[10];
 };
 
 struct trace_event_raw_sched_wakeup_local {
@@ -252,12 +253,9 @@ struct trace_event_raw_sched_wakeup_local {
     int target_cpu;
 };
 
-struct trace_event_raw_oom_kill_local {
+struct trace_event_raw_oom_mark_victim_local {
     __u64 unused;
-    char comm[16];
     int pid;
-    int tgid;
-    unsigned long totalpages;
 };
 
 #endif /* __OBSERVOOR_H */

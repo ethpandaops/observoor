@@ -199,6 +199,7 @@ impl Agent {
             self.cfg.meta_network_name.clone(),
         );
         sink.set_port_label_map(port_label_map);
+        sink.set_tracked_processes(&client_types);
 
         // Add ClickHouse exporter if enabled.
         if self.cfg.sinks.aggregated.clickhouse.enabled {
@@ -235,15 +236,18 @@ impl Agent {
             );
         }
 
+        // Seed sink state before startup exports.
+        sink.set_sync_state(initial_sync);
+        let initial_slot = clock.current_slot();
+        self.health.current_slot.set(initial_slot as f64);
+        sink.seed_slot_state(initial_slot, clock.slot_start_time(initial_slot));
+
         // Start sink (spawns background processing task).
         sink.start(self.cancel.child_token())
             .await
             .context("starting aggregated sink")?;
 
         let sink = Arc::new(sink);
-
-        // Set initial sync state.
-        sink.set_sync_state(initial_sync);
 
         // 7. Register slot change callback.
         {
@@ -260,11 +264,6 @@ impl Agent {
                 sink_ref.on_slot_changed(slot, slot_start);
             }));
         }
-
-        // 8. Seed sinks with current slot.
-        let initial_slot = clock.current_slot();
-        self.health.current_slot.set(initial_slot as f64);
-        sink.on_slot_changed(initial_slot, clock.slot_start_time(initial_slot));
 
         // 9. Start the clock.
         clock.start();
@@ -325,6 +324,11 @@ impl Agent {
                 .set(f64::from(ring_buf_size));
             tracer.on_ringbuf_stats(Box::new(move |stats| {
                 health_rb.ringbuf_used.set(stats.used_bytes as f64);
+                if stats.dropped_events > 0 {
+                    health_rb
+                        .bpf_ringbuf_overflows
+                        .inc_by(stats.dropped_events as f64);
+                }
             }));
 
             // Start tracer (load BPF programs, attach, start ring buffer reader).
@@ -548,6 +552,7 @@ impl Agent {
         let health = Arc::clone(&self.health);
         let poll_interval = self.cfg.sync_poll_interval;
         let disc = CompositeDiscovery::new(&self.cfg.pid);
+        let sink = self.sink.as_ref().map(Arc::clone);
 
         #[cfg(feature = "bpf")]
         let tracer = self.tracer.as_ref().map(Arc::clone);
@@ -573,6 +578,11 @@ impl Agent {
                         health.pids_tracked.set(pids.len() as f64);
                         let client_types = pid::resolve_client_types(&pids);
                         Agent::set_pids_by_client_metrics(&health, &client_types);
+                        if let Some(sink) = &sink {
+                            sink.set_tracked_processes(&client_types);
+                            let port_infos = ports::discover_ports(&pids, &client_types);
+                            sink.update_port_label_map(ports::all_port_labels(&port_infos));
+                        }
 
                         #[cfg(feature = "bpf")]
                         if let Some(tracer) = &tracer {

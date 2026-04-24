@@ -45,6 +45,7 @@ pub trait Discovery: Send + Sync {
 }
 
 /// Composite PID discovery combining process-name and cgroup scanning.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct CompositeDiscovery {
     process_names: Vec<String>,
     cgroup_paths: Vec<String>,
@@ -294,6 +295,7 @@ pub fn discover_tids(
 }
 
 /// Map comm name to ClientType.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn client_type_from_comm(comm: &str) -> Option<ClientType> {
     let normalized = comm.strip_suffix("-binary").unwrap_or(comm);
 
@@ -315,6 +317,7 @@ fn client_type_from_comm(comm: &str) -> Option<ClientType> {
 }
 
 /// Search cmdline for client keywords (case-insensitive).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn client_type_from_cmdline(cmdline: &str) -> Option<ClientType> {
     let lower = cmdline.to_lowercase();
 
@@ -377,6 +380,8 @@ fn read_proc_cmdline(pid: u32) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing)]
+
     use super::*;
 
     #[test]

@@ -10,8 +10,8 @@ use anyhow::{Context, Result};
 use tokio::io::unix::AsyncFd;
 
 use aya::maps::hash_map::HashMap as BpfHashMap;
-use aya::maps::Array;
 use aya::maps::RingBuf;
+use aya::maps::{Array, PerCpuArray};
 use aya::programs::{KProbe, TracePoint};
 use aya::{Ebpf, EbpfLoader};
 
@@ -76,6 +76,8 @@ pub struct AttachmentStats {
     pub kretprobes_failed: u32,
     pub kretprobes_skipped: u32,
 }
+
+type DropCounterMap = PerCpuArray<aya::maps::MapData, u64>;
 
 /// BPF-backed tracer implementation.
 pub struct BpfTracer {
@@ -192,6 +194,11 @@ impl Tracer for BpfTracer {
             .ok_or_else(|| anyhow::anyhow!("events map not found"))?;
         let ring_buf =
             RingBuf::try_from(events_map).context("creating ring buffer from events map")?;
+        let drop_counter_map = ebpf
+            .take_map("ringbuf_drops")
+            .map(DropCounterMap::try_from)
+            .transpose()
+            .context("creating ring buffer drop counter map")?;
 
         // Move handlers into the read task.
         let event_handlers = Arc::new(std::mem::take(&mut self.event_handlers));
@@ -202,6 +209,7 @@ impl Tracer for BpfTracer {
         let handle = tokio::spawn(async move {
             read_loop(
                 ring_buf,
+                drop_counter_map,
                 ring_buf_size,
                 event_handlers,
                 error_handlers,
@@ -344,11 +352,9 @@ impl Tracer for BpfTracer {
 // Ring buffer read loop
 // ---------------------------------------------------------------------------
 
-/// Report stats every N events to reduce overhead.
-const STATS_INTERVAL: u32 = 1000;
-
 async fn read_loop(
     ring_buf: RingBuf<aya::maps::MapData>,
+    drop_counter_map: Option<DropCounterMap>,
     ring_buf_size: u32,
     event_handlers: Arc<Vec<EventHandler>>,
     error_handlers: Arc<Vec<ErrorHandler>>,
@@ -363,11 +369,21 @@ async fn read_loop(
         }
     };
 
-    let mut event_count: u32 = 0;
+    let mut stats_ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+    stats_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut last_drop_count = 0u64;
 
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
+            _ = stats_ticker.tick() => {
+                report_ringbuf_stats(
+                    drop_counter_map.as_ref(),
+                    ring_buf_size,
+                    &mut last_drop_count,
+                    stats_handlers.as_ref(),
+                );
+            }
             result = async_fd.readable_mut() => {
                 let mut guard = match result {
                     Ok(g) => g,
@@ -383,22 +399,9 @@ async fn read_loop(
                 while let Some(item) = rb.next() {
                     let data: &[u8] = &item;
 
-                    // Empty record indicates ring buffer overflow.
+                    // Empty records are not expected from BPF ring buffers.
                     if data.is_empty() {
-                        tracing::warn!("ring buffer overflow detected");
                         continue;
-                    }
-
-                    event_count += 1;
-                    if event_count >= STATS_INTERVAL {
-                        let stats = RingbufStats {
-                            used_bytes: 0, // aya does not expose remaining/capacity
-                            size_bytes: ring_buf_size as usize,
-                        };
-                        for handler in stats_handlers.iter() {
-                            handler(stats);
-                        }
-                        event_count = 0;
                     }
 
                     match parse_event(data) {
@@ -431,6 +434,34 @@ async fn read_loop(
             }
         }
     }
+}
+
+fn report_ringbuf_stats(
+    drop_counter_map: Option<&DropCounterMap>,
+    ring_buf_size: u32,
+    last_drop_count: &mut u64,
+    stats_handlers: &[RingbufStatsHandler],
+) {
+    let drop_count = drop_counter_map
+        .and_then(|map| read_drop_counter_total(map).ok())
+        .unwrap_or(*last_drop_count);
+    let dropped_events = drop_count.saturating_sub(*last_drop_count);
+    *last_drop_count = drop_count;
+
+    let stats = RingbufStats {
+        used_bytes: 0, // aya does not expose remaining/capacity
+        size_bytes: ring_buf_size as usize,
+        dropped_events,
+    };
+    for handler in stats_handlers {
+        handler(stats);
+    }
+}
+
+fn read_drop_counter_total(map: &DropCounterMap) -> Result<u64> {
+    let key = 0u32;
+    let values = map.get(&key, 0)?;
+    Ok(values.iter().copied().sum())
 }
 
 fn report_error(handlers: &[ErrorHandler], err: &std::io::Error) {
@@ -530,7 +561,7 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // ---------------------------------------------------------------
     if disabled.contains(&ProbeGroup::FdOpen) {
         tracing::info!(probe = "fd_open", "skipping (disabled)");
-        stats.tracepoints_skipped += 2;
+        stats.tracepoints_skipped += 8;
     } else {
         attach_tracepoint_required(
             ebpf,
@@ -546,17 +577,35 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             "sys_exit_openat",
             &mut stats,
         )?;
+        let optional_open_tracepoints = &[
+            ("trace_sys_enter_openat2", "syscalls", "sys_enter_openat2"),
+            ("trace_sys_exit_openat2", "syscalls", "sys_exit_openat2"),
+            ("trace_sys_enter_open", "syscalls", "sys_enter_open"),
+            ("trace_sys_exit_open", "syscalls", "sys_exit_open"),
+            ("trace_sys_enter_creat", "syscalls", "sys_enter_creat"),
+            ("trace_sys_exit_creat", "syscalls", "sys_exit_creat"),
+        ];
+        for (prog_name, group, name) in optional_open_tracepoints {
+            attach_tracepoint_optional(ebpf, prog_name, group, name, &mut stats);
+        }
     }
 
     if disabled.contains(&ProbeGroup::FdClose) {
         tracing::info!(probe = "fd_close", "skipping (disabled)");
-        stats.tracepoints_skipped += 1;
+        stats.tracepoints_skipped += 2;
     } else {
         attach_tracepoint_required(
             ebpf,
             "trace_sys_enter_close",
             "syscalls",
             "sys_enter_close",
+            &mut stats,
+        )?;
+        attach_tracepoint_required(
+            ebpf,
+            "trace_sys_exit_close",
+            "syscalls",
+            "sys_exit_close",
             &mut stats,
         )?;
     }
@@ -715,9 +764,12 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
             "compaction",
             "compaction_end",
         ),
-        (ProbeGroup::SwapIn, "trace_swapin", "swap", "swapin"),
-        (ProbeGroup::SwapOut, "trace_swapout", "swap", "swapout"),
-        (ProbeGroup::OomKill, "trace_oom_kill", "oom", "oom_kill"),
+        (
+            ProbeGroup::OomKill,
+            "trace_oom_mark_victim",
+            "oom",
+            "mark_victim",
+        ),
     ];
 
     for (group, prog_name, tp_group, tp_name) in optional_tracepoints {
@@ -752,6 +804,29 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
     // ---------------------------------------------------------------
     // Optional kprobes (with probe group gating)
     // ---------------------------------------------------------------
+    let swap_kprobes: &[(ProbeGroup, &str, &[&str])] = &[
+        (
+            ProbeGroup::SwapIn,
+            "kprobe_swap_read",
+            &["swap_read_folio", "swap_readpage"],
+        ),
+        (
+            ProbeGroup::SwapOut,
+            "kprobe_swap_write",
+            &["swap_writeout", "swap_writepage"],
+        ),
+    ];
+
+    for (group, prog_name, symbols) in swap_kprobes {
+        if disabled.contains(group) {
+            tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
+            stats.kprobes_skipped += symbols.len() as u32;
+            continue;
+        }
+        attach_kprobe_any_optional(ebpf, prog_name, symbols, &mut stats);
+    }
+
+    let tcp_retransmit_enabled = !disabled.contains(&ProbeGroup::TcpRetransmit);
     let optional_kprobes: &[(ProbeGroup, &str, &str)] = &[
         (
             ProbeGroup::TcpRetransmit,
@@ -769,6 +844,10 @@ fn attach_programs(ebpf: &mut Ebpf, disabled: &HashSet<ProbeGroup>) -> Result<At
         if disabled.contains(group) {
             tracing::info!(probe = %group, program = prog_name, "skipping (disabled)");
             stats.kprobes_skipped += 1;
+            continue;
+        }
+        if *group == ProbeGroup::TcpState && tcp_retransmit_enabled {
+            attach_kprobe_required(ebpf, prog_name, symbol, &mut stats)?;
             continue;
         }
         attach_kprobe_optional(ebpf, prog_name, symbol, &mut stats);
@@ -920,6 +999,60 @@ fn attach_kprobe_optional(
                 symbol,
                 error = %e,
                 "optional kprobe attach failed"
+            );
+        }
+    }
+}
+
+fn attach_kprobe_any_optional(
+    ebpf: &mut Ebpf,
+    prog_name: &str,
+    symbols: &[&str],
+    stats: &mut AttachmentStats,
+) {
+    let result: Result<Option<&str>> = (|| {
+        let prog: &mut KProbe = ebpf
+            .program_mut(prog_name)
+            .ok_or_else(|| anyhow::anyhow!("program '{prog_name}' not found"))?
+            .try_into()?;
+        prog.load()?;
+
+        for &symbol in symbols {
+            match prog.attach(symbol, 0) {
+                Ok(_) => return Ok(Some(symbol)),
+                Err(e) => {
+                    tracing::debug!(
+                        symbol,
+                        error = %e,
+                        "optional kprobe candidate attach failed"
+                    );
+                }
+            }
+        }
+
+        Ok(None)
+    })();
+
+    match result {
+        Ok(Some(symbol)) => {
+            stats.kprobes_attached += 1;
+            tracing::debug!(symbol, "attached optional kprobe");
+        }
+        Ok(None) => {
+            stats.kprobes_failed += 1;
+            tracing::warn!(
+                program = prog_name,
+                symbols = ?symbols,
+                "optional kprobe attach failed for all candidate symbols"
+            );
+        }
+        Err(e) => {
+            stats.kprobes_failed += 1;
+            tracing::warn!(
+                program = prog_name,
+                symbols = ?symbols,
+                error = %e,
+                "optional kprobe load failed"
             );
         }
     }
