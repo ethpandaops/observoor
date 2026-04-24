@@ -673,6 +673,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `43d1c66`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 66: Skip basic-dimension mask on non-scheduler events (2026-04-24) — REVERTED
+- **Hypothesis**: Only scheduler events pack CPU-id bits above the basic
+  dimension key; non-scheduler dispatch can use the raw `basic_dimension` u64
+  directly and skip the masking work.
+- **Change**: New `non_scheduler_basic_dimension_key()` accessor; sink dispatch
+  uses it for non-scheduler branches. (commits `baf22ff`, `eb2d7cd`)
+- **Result (new methodology)**: 11.00s vs 12.01s master, CV 0.9%/0.2% —
+  **-8.41% vs master** at master=12.01s. Linear interpolation of known HWMs
+  predicts neutral ≈ -9.10% at this master time; actual is 0.69pp WORSE.
+- **Verdict**: REVERTED. Branch reset to `8821a76`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
