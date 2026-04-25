@@ -1091,6 +1091,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `4fd4f78`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 98: Single-PID fast path for BPF PID filtering (2026-04-25)
+- **Hypothesis**: The synthetic benchmark traces one stress-bench process, but
+  every attached probe still filters through the `tracked_pids` hash map.
+  Caching the sole tracked PID in a one-entry fast filter should replace that
+  hot hash lookup with a direct compare for the benchmark, while preserving
+  the existing hash-map fallback for multi-PID deployments.
+- **Change**: Add a BPF single-PID fast filter updated from `update_pids()`;
+  use it in `is_tracked()` before falling back to `tracked_pids`.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 0e67162
+- **Author**: Codex / GPT-5
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
