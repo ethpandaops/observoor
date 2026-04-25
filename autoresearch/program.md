@@ -1099,10 +1099,14 @@ Key cost centers (from Criterion benchmarks):
   the existing hash-map fallback for multi-PID deployments.
 - **Change**: Add a BPF single-PID fast filter updated from `update_pids()`;
   use it in `is_tracked()` before falling back to `tracked_pids`.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 8.92s vs 10.28s master, CV 0.8%/0.6% —
+  **-13.23% vs master** at master=10.28s. Fast HWM (iter 73) -12.40% at
+  master=10.40s; iter 98 is 0.83pp better. Interpolated fast neutral at
+  10.28s ≈ -12.50%; iter 98 is 0.73pp better than that. Plausibly real
+  structural win (fast PID filter runs on every one of ~500k events).
+- **Verdict**: KEPT. New fast-runner HWM: -13.23%.
 - **Commit**: 0e67162
-- **Author**: Codex / GPT-5
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -1117,7 +1121,7 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 (master ~13s). So cross-iteration comparisons need a runner-class disclaimer
 until we get multi-runner medians.
 
-**High-water mark: -12.40%** vs master (iter 73, commit `32bce1f`, fast runner).
+**High-water mark: -13.23%** vs master (iter 98, commit `0e67162`, fast runner).
 **Medium-runner HWM: -9.73%** (iter 80, commit `8ea5db9`, master=13.67s).
 **Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
 **47 kept iterations.**
