@@ -1080,6 +1080,17 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `3cb73f1`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 97: Drop unused tid from BPF block request cache (2026-04-25) — REVERTED
+- **Hypothesis**: BPF `req_val` caches `tid` for block request tracking but
+  aggregation never uses it. Removing the field saves a write per request.
+- **Change**: Drop `req_val.tid` and the `trace_block_rq_issue` write.
+  (commits `8c6fdd2`, `f1cee1c`)
+- **Result (new methodology)**: 9.68s vs 10.96s master, CV 0.5%/0.7% —
+  **-11.68% vs master** at master=10.96s (fast runner). Interpolated fast
+  neutral ≈ -11.94%; iter 97 is 0.26pp worse. Block I/O is rare in bench.
+- **Verdict**: REVERTED. Branch reset to `4fd4f78`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
