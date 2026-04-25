@@ -1108,6 +1108,21 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: 0e67162
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 99: Shrink BPF block request tracking key (2026-04-25) — REVERTED
+- **Hypothesis**: `req_key` carries `rw` bits even though they aren't part of
+  the lookup identity. Moving `rw` to `req_val` shrinks the map key and
+  removes a `rwbs` read on completion.
+- **Change**: Drop `rw` from `req_key`; carry it via `req_val`. (commits
+  `149218d`, `8e3f274`)
+- **Result (new methodology)**: 12.30s vs 13.78s master, CV 0.5%/0.8% —
+  **-10.74% vs master** at master=13.78s. Medium HWM (iter 80) -9.73%, so
+  1.01pp better — right at noise floor. But iter 98's PID fast path likely
+  contributes ~0.5-1pp on medium runners on its own; iter 99's incremental
+  contribution is probably 0-0.5pp.
+- **Verdict**: REVERTED. Branch reset to `d824baa`. Block I/O is rare in
+  stress-bench; insufficient signal to confirm real win.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
