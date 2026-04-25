@@ -1068,6 +1068,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `5045bf9`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 96: Drop unused tid from BPF sock_owner_val cache (2026-04-25) — REVERTED
+- **Hypothesis**: BPF `sock_owner_val` caches `tid` for legacy TCP retransmit
+  header, but aggregation only uses pid/client. Removing the field shrinks
+  the per-socket cached state.
+- **Change**: Drop `sock_owner_val.tid`; header sets tid=0 on emit.
+  (commit `52f330e`)
+- **Result (new methodology)**: 15.17s vs 16.77s master, CV 0.3%/0.3% —
+  **-9.54% vs master** at master=16.77s. Extrapolated slow neutral ≈ -9.28%;
+  iter 96 is 0.26pp better — within noise. TCP retransmits rare in bench.
+- **Verdict**: REVERTED. Branch reset to `3cb73f1`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
