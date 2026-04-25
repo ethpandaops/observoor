@@ -1123,6 +1123,19 @@ Key cost centers (from Criterion benchmarks):
   stress-bench; insufficient signal to confirm real win.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 100: Increase parsed event batch size 16384→32767 (2026-04-25) — REVERTED
+- **Hypothesis**: Larger batches cut channel handoff frequency. Bumping
+  `PARSED_EVENT_BATCH_SIZE` to the u16-counter cap (32767) and dropping the
+  sink channel from 4 slots to 2 keeps the queued-event budget similar.
+- **Change**: Constants in `tracer/mod.rs` and `sink/aggregated/mod.rs`.
+  (commits `2789d6b`, `edcdc93`)
+- **Result (new methodology)**: 8.66s vs 10.05s master, CV 0.9%/0.5% —
+  **-13.83% vs master** at master=10.05s. Fast HWM (iter 98) -13.23% at
+  10.28s; interpolated to 10.05s ≈ -13.42%; iter 100 is 0.41pp better —
+  within noise.
+- **Verdict**: REVERTED. Branch reset to `0c0f904`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
