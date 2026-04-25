@@ -45,6 +45,19 @@ struct BpfTrackedTidVal {
 // SAFETY: BpfTrackedTidVal is a plain C struct with no padding concerns.
 unsafe impl aya::Pod for BpfTrackedTidVal {}
 
+/// BPF map value for tracked_pid_fast (matches `struct tracked_pid_fast_val` in maps.h).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+struct BpfTrackedPidFastVal {
+    pid: u32,
+    client_type: u8,
+    enabled: u8,
+    _pad: [u8; 2],
+}
+
+// SAFETY: BpfTrackedPidFastVal is a plain C struct with no padding concerns.
+unsafe impl aya::Pod for BpfTrackedPidFastVal {}
+
 /// BPF map value for event_sampling (matches `struct event_sampling_cfg` in maps.h).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -230,6 +243,8 @@ impl Tracer for BpfTracer {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("BPF objects not loaded"))?;
 
+        update_fast_tracked_pid(ebpf, pids, client_types)?;
+
         // Collect existing keys.
         let existing_keys: Vec<u32> = {
             let map: BpfHashMap<_, u32, u8> = BpfHashMap::try_from(
@@ -334,6 +349,35 @@ impl Tracer for BpfTracer {
     fn on_ringbuf_stats(&mut self, handler: RingbufStatsHandler) {
         self.stats_handlers.push(handler);
     }
+}
+
+fn update_fast_tracked_pid(
+    ebpf: &mut Ebpf,
+    pids: &[u32],
+    client_types: &HashMap<u32, ClientType>,
+) -> Result<()> {
+    let mut map: Array<_, BpfTrackedPidFastVal> = Array::try_from(
+        ebpf.map_mut("tracked_pid_fast")
+            .ok_or_else(|| anyhow::anyhow!("tracked_pid_fast map not found"))?,
+    )?;
+
+    let value = if let [pid] = pids {
+        BpfTrackedPidFastVal {
+            pid: *pid,
+            client_type: client_types
+                .get(pid)
+                .copied()
+                .unwrap_or(ClientType::Unknown) as u8,
+            enabled: 1,
+            _pad: [0; 2],
+        }
+    } else {
+        BpfTrackedPidFastVal::default()
+    };
+
+    map.set(0, value, 0)
+        .context("updating tracked_pid_fast BPF map")?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

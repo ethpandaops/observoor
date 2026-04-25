@@ -13,6 +13,21 @@ struct {
     __type(value, __u8);
 } tracked_pids SEC(".maps");
 
+// tracked_pid_fast: single-PID fast filter for benchmark/common one-process runs.
+struct tracked_pid_fast_val {
+    __u32 pid;
+    __u8  client_type;
+    __u8  enabled;
+    __u8  pad[2];
+};
+
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, __u32);
+    __type(value, struct tracked_pid_fast_val);
+} tracked_pid_fast SEC(".maps");
+
 // events: Ring buffer for all events to userspace.
 struct {
     __uint(type, BPF_MAP_TYPE_RINGBUF);
@@ -187,6 +202,17 @@ struct {
 
 // Helper: Check if PID is tracked and return client_type.
 static __always_inline int is_tracked(__u32 pid, __u8 *client_type) {
+    __u32 fast_key = 0;
+    struct tracked_pid_fast_val *fast =
+        bpf_map_lookup_elem(&tracked_pid_fast, &fast_key);
+    if (fast && fast->enabled) {
+        if (fast->pid == pid) {
+            *client_type = fast->client_type;
+            return 1;
+        }
+        return 0;
+    }
+
     __u8 *ct = bpf_map_lookup_elem(&tracked_pids, &pid);
     if (!ct)
         return 0;
