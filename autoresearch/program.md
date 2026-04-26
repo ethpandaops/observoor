@@ -1193,6 +1193,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `85cf36c`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 105: Fast TID cache for small tracked thread sets (2026-04-26) — REVERTED
+- **Hypothesis**: Same single-PID fast-path idea (iter 98) extended to TIDs.
+  Previous attempt (iter 102) failed BPF compilation due to unrolled loop;
+  this version uses an explicit unroll on an 8-entry array.
+- **Change**: `tracked_tids_fast` BPF array + `update_tids()` populating it.
+  (commits `a6b6e9e`, `f747e9e`)
+- **Result (new methodology)**: 14.70s vs 16.39s master, CV 0.5%/0.5% —
+  **-10.31% vs master** at master=16.39s. Slow HWM (iter 103) -9.75% at
+  16.20s → 0.56pp better, below 1pp noise floor.
+- **Verdict**: REVERTED. Branch reset to `6628f09`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
