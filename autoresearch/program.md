@@ -1252,10 +1252,14 @@ Key cost centers (from Criterion benchmarks):
 - **Change**: Replace scheduler header pad `memset` calls with direct
   byte initialization in the sched_switch, sched_runqueue, and combined
   scheduler emit paths.
-- **Result**: `TBD (CI pending)`
-- **Verdict**: `TBD`
+- **Result (new methodology)**: 14.69s vs 16.47s master, CV 0.5%/0.6% —
+  **-10.81% vs master** at master=16.47s. Slow HWM (iter 103) -9.75% at
+  16.20s → 1.06pp better, above noise floor. sched_switch fires on every
+  context switch — eliminating the 6-byte memset is a real synergy with
+  iter 103's helper deferral.
+- **Verdict**: KEPT. New slow-runner HWM: -10.81%.
 - **Commit**: `fb7ae3d`
-- **Author**: codex / gpt-5
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -1272,7 +1276,7 @@ until we get multi-runner medians.
 
 **High-water mark: -13.23%** vs master (iter 98, commit `0e67162`, fast runner).
 **Medium-runner HWM: -9.73%** (iter 80, commit `8ea5db9`, master=13.67s).
-**Slow-runner HWM: -9.75%** (iter 103, commit `f9ee135`, master=16.20s).
+**Slow-runner HWM: -10.81%** (iter 109, commit `fb7ae3d`, master=16.47s).
 **47 kept iterations.**
 
 ## Rules
