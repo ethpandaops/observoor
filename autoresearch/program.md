@@ -1481,6 +1481,19 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `abf482d`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 126: Reuse HTTP batch window timestamp (2026-04-26) — REVERTED
+- **Hypothesis**: HTTP NDJSON export formats `window_start` per metric via
+  chrono. Caching the formatted string and reusing it for metrics in the
+  same window cuts repeated formatting/allocation in the export path.
+- **Change**: Cache `window_start` Arc<String> per batch and reuse.
+  (commits `2feb329`, `a4a0249`)
+- **Result (post-recalibration)**: 14.97s vs 16.50s master, CV 0.1%/0.4% —
+  **-9.27% vs master** at master=16.50s. Extrapolated post-recal neutral
+  ≈ -9.74%; iter 126 is 0.47pp WORSE. The export path is async/batched
+  and the per-metric format cost is small.
+- **Verdict**: REVERTED. Branch reset to `3a1e803`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
