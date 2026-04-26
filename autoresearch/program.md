@@ -1394,6 +1394,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `41d2bf4`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 120: Drop redundant transport carry in net start-map (2026-04-26) — REVERTED
+- **Hypothesis**: TCP/UDP start-map values carry a `transport` byte that is
+  always `NET_TRANSPORT_TCP` or `NET_TRANSPORT_UDP` based on the probe path.
+  Return probes can pass the constant directly; the byte is dead weight.
+- **Change**: Drop `transport` from `net_recv_val`; return probes pass
+  `NET_TRANSPORT_TCP`/`UDP` constants. (commits `97d55b6`, `5a9e1b2`)
+- **Result (new methodology)**: 15.04s vs 16.70s master, CV 0.4%/0.7% —
+  **-9.94% vs master** at master=16.70s. Extrapolated slow neutral
+  ≈ -10.77%; iter 120 is 0.83pp worse.
+- **Verdict**: REVERTED. Branch reset to `67432fe`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
