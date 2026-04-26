@@ -1513,6 +1513,19 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Commit**: 22a0477
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 128: Direct-load header pad u32 fields (2026-04-26) — REVERTED
+- **Hypothesis**: `decode_u32_from_pad` builds `u32::from_le_bytes([pad[i],
+  pad[i+1], pad[i+2], pad[i+3]])` — explicit byte loads. An unaligned u32
+  read may codegen better than 4 byte indexes.
+- **Change**: `(pad.as_ptr().add(offset) as *const u32).read_unaligned()`
+  (commits `e5cb9a8`, `f804a32`)
+- **Result (post-recalibration)**: 14.86s vs 16.27s master, CV 0.1%/0.2% —
+  **-8.67% vs master** at master=16.27s. Slow post-recal extrapolated to
+  16.27s ≈ -9.78%; iter 128 is 1.11pp WORSE. Compiler already emits the
+  optimal load; explicit unsafe path costs more than it saves.
+- **Verdict**: REVERTED. Branch reset to `31f624e`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
