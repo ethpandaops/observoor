@@ -1705,6 +1705,15 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `4203b56`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 143: Unchecked CPU slot access in take_cpu (2026-04-27) — REVERTED
+- **Hypothesis**: `RunningThreadStore::take_cpu` indexes by cpu_id with
+  bounds check; explicit length check + `get_unchecked_mut` is faster.
+- **Change**: Manual length check + unchecked. (commits `9aaa5f7`, `5b7b2f2`)
+- **Result (post-recalibration)**: 12.35s vs 13.68s master, CV 0.5%/0.3% —
+  **-9.72% vs master** at master=13.68s. Inside medium band -9.5% to -10.5%.
+- **Verdict**: REVERTED. Branch reset to `d4eb812`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
