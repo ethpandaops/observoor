@@ -1596,6 +1596,23 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `9b615d9`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 135: Branchless min/max in record() (2026-04-27) — REVERTED
+- **Hypothesis**: `LatencyAggregate::record()` and `GaugeAggregate::record()`
+  use `if value < self.min` / `if value > self.max` updates. `i64::min`/`max`
+  compile to branchless cmov on x86, removing branch mispredicts on
+  monotonic series.
+- **Change**: Replace branches with `self.min.min(value)` / `.max(value)`.
+  (commits `7923865`, `530d947`)
+- **Result (post-recalibration)**: 12.10s vs 13.40s master, CV 0.2%/0.3% —
+  **-9.70% vs master** at master=13.40s (medium runner, first post-recal
+  medium reading). Linear interp between post-recal fast HWM (-13.68% at
+  11.04s) and slow HWM (-9.87% at 15.81s) gives expected medium neutral
+  ≈ -11.79% at 13.40s; iter 135 is 2.09pp WORSE. Removing the early-exit
+  forces the atomic store on every event, which is more expensive than
+  the branch on stress-bench's mostly-monotonic latencies.
+- **Verdict**: REVERTED. Branch reset to `ae8011b`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
