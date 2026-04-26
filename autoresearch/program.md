@@ -1550,6 +1550,18 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `c047097`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 131: Sentinel sched TID cache entries (no Option) (2026-04-26) — REVERTED
+- **Hypothesis**: Sched TID cache stores ways as `Option<SchedTidCacheEntry>`.
+  Switching to plain entries with a sentinel TID skips Option tag checks
+  on every cache lookup.
+- **Change**: Sentinel-TID cache entries; remove Option layer.
+  (commits `265367e`, `87dd090`)
+- **Result (post-recalibration)**: 9.40s vs 10.80s master, CV 0.5%/0.9% —
+  **-12.96% vs master** at master=10.80s. Fast HWM (iter 127) extrapolated
+  ≈ -13.55% at 10.80s; iter 131 is 0.59pp WORSE — within noise floor.
+- **Verdict**: REVERTED. Branch reset to `ac5f207`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
