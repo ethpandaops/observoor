@@ -1503,10 +1503,15 @@ happened to land on a runner where the small extra branch cost showed up.
   scheduler aggregation CPU without changing carried running-thread state.
 - **Change**: Return `None` directly after a running-slot scan miss instead
   of re-clearing the already-checked scheduler TID cache slot.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 9.53s vs 11.04s master, CV 1.1%/0.6% —
+  **-13.68% vs master** at master=11.04s (fast runner). Post-recal sanity
+  has only the slow-runner data point (-9.87% at 15.81s); extrapolating
+  pre-recal slope to 11.04s gives ~-12.8% pre-recal, → ~-12.2-12.5% post-
+  recal expected. iter 127 at -13.68% is 0.9-1.2pp better — above noise
+  floor on a fast-runner reading.
+- **Verdict**: KEPT. New fast-runner post-recal HWM: -13.68%.
 - **Commit**: 22a0477
-- **Author**: GPT-5
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -1539,9 +1544,9 @@ both sides — clean.
 - Slow: -10.81% (iter 109, master ~16.5s)
 
 **Post-recalibration baseline (HTTP exporter active):**
-- Slow: -9.87% (sanity at master=15.81s) — new slow HWM
-- Fast/medium HWMs to be re-established as iterations land on those
-  runner classes.
+- Fast: -13.68% (iter 127, master=11.04s)
+- Slow: -9.87% (sanity at master=15.81s)
+- Medium HWM still to be re-established post-recalibration.
 **47 kept iterations.**
 
 ## Rules
