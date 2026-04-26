@@ -1329,6 +1329,20 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: b60d8d2
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 115: Stop encoding scheduler voluntary flag (2026-04-26) — REVERTED
+- **Hypothesis**: Scheduler emit paths read `ctx->prev_state` to compute a
+  voluntary-vs-preempted bit in `pad[0]`, but the parser already ignores
+  that bit (iter 94 reverted it from the parsed event). Setting `pad[0]=0`
+  unconditionally drops the read + comparison.
+- **Change**: `e->hdr.pad[0] = 0;` (constant) in scheduler emit paths.
+  (commits `ad999b8`, `51a1df8`)
+- **Result (new methodology)**: 14.20s vs 15.85s master, CV 0.8%/0.6% —
+  **-10.41% vs master** at master=15.85s. Interpolated between medium HWM
+  -11.30% (13.81s) and slow HWM -10.81% (16.47s) gives neutral ≈ -10.92%
+  at 15.85s; iter 115 is 0.51pp worse.
+- **Verdict**: REVERTED. Branch reset to `903229c`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
