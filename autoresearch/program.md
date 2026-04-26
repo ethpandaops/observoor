@@ -1148,6 +1148,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `33dc7d4`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 102: Fast path small tracked_tids set in BPF (2026-04-26) — REVERTED (build failure)
+- **Hypothesis**: Same single-PID fast path (iter 98) extended to TIDs.
+- **Change**: `tracked_tids_fast` BPF array, lookup before falling back to
+  `tracked_tids` map. (commits `cab3e25`, `5b3bf1b`)
+- **Result**: BPF compilation FAILED on Linux CI: clang couldn't unroll the
+  `for (int i = 0; i < TRACKED_TIDS_FAST_CAPACITY; i++)` loop with `-Werror
+  -Wpass-failed=transform-warning`. Loop bound likely needs to be a small
+  literal const that BPF verifier can unroll.
+- **Verdict**: REVERTED. Branch reset to `366f57d`. Future BPF changes
+  involving loops over small fixed bounds need an explicit `#pragma unroll`
+  or constant-bound check that the BPF verifier accepts.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
