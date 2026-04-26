@@ -1299,6 +1299,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `42598e2`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 113: Biased select in BPF ring-buffer read loop (2026-04-26) — REVERTED
+- **Hypothesis**: `tokio::select!` randomizes branch poll order on every
+  wakeup. Adding `biased;` to the 2-branch hot select (cancel/readable)
+  skips the per-wakeup randomization.
+- **Change**: `biased;` directive in the select macro. (commits `6872ca9`,
+  `76b277c`)
+- **Result (new methodology)**: 14.73s vs 16.36s master, CV 0.5%/0.2% —
+  **-9.96% vs master** at master=16.36s. Slow HWM -10.81% → 0.85pp WORSE.
+  The select randomization cost is dwarfed by the actual work in the loop.
+- **Verdict**: REVERTED. Branch reset to `8f5fd89`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
