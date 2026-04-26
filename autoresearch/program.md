@@ -1936,6 +1936,20 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `649031a`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 162: Compact zero-wait sched_runqueue to 21 bytes (2026-04-27) — REVERTED
+- **Hypothesis**: Standalone `sched_runqueue` events with zero
+  runqueue/off-cpu time use the full 40-byte form. Emitting a 21-byte
+  switch-in record and reconstructing zeros in the parser shrinks ring
+  bandwidth.
+- **Change**: BPF emits 21-byte compact form for zero-wait sched_runqueue;
+  parser yields `SchedRunqueue { runqueue_ns: 0, off_cpu_ns: 0 }`.
+  (commits `47c17e6`, `d18d05d`)
+- **Result (post-recalibration)**: 14.58s vs 16.07s master, CV 0.2%/0.4% —
+  **-9.27% vs master** at master=16.07s (slow runner). Inside slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `e0f260e`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
