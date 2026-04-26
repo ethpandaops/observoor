@@ -1287,6 +1287,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `ca54f23`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 112: Compact standalone sched_switch events 32→29 bytes (2026-04-26) — REVERTED
+- **Hypothesis**: Standalone sched_switch records are still 32 bytes; combined
+  records (paired with runqueue) are unchanged. Shrinking to 29 bytes saves
+  ring-buffer bandwidth on every uncombined sched_switch.
+- **Change**: New 29-byte compact path; legacy 32-byte parser fallback.
+  (commits `4379227`, `18ad636`)
+- **Result (new methodology)**: 11.92s vs 13.31s master, CV 0.5%/0.3% —
+  **-10.44% vs master** at master=13.31s. Medium HWM -9.73% → 0.71pp
+  better, below 1pp noise floor.
+- **Verdict**: REVERTED. Branch reset to `42598e2`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
