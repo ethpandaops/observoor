@@ -1650,6 +1650,19 @@ forward:
 To beat HWM by the noise floor, iterations need to land **above** the
 upper bound of the corresponding band by ~0.5pp.
 
+### Iteration 138: Direct-mapped BPF syscall_start_fast cache (2026-04-27) — REVERTED
+- **Hypothesis**: Hot syscall enter/exit probes hash through `syscall_start`
+  for every event. A direct-mapped fast cache (BPF array indexed by
+  pid_tgid hash) catches the dominant pid+tid pair without the hashmap
+  lookup; collisions fall back to the existing hash map.
+- **Change**: `syscall_start_fast` BPF array; helpers route enter/exit.
+  (commits `117f0eb`, `9f5bdf7`)
+- **Result (post-recalibration)**: 15.22s vs 16.88s master, CV 0.7%/0.5% —
+  **-9.83% vs master** at master=16.88s. Slow band is -9% to -10%; iter
+  138 sits inside the band, doesn't beat upper bound by 0.5pp.
+- **Verdict**: REVERTED. Branch reset to `52d8c92`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
