@@ -1900,6 +1900,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `a09e245`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 159: tracked_pid_fast value as raw u64 (2026-04-27) — REVERTED
+- **Hypothesis**: `tracked_pid_fast` stores its packed PID/client value via
+  a one-field wrapper struct. A raw `u64` value avoids the wrapper on the
+  fast-path lookup performed by every BPF probe.
+- **Change**: `tracked_pid_fast` value type → `__u64`; userspace updater
+  packs into a plain `u64`. (commits `b0c75a9`, `0dce73f`)
+- **Result (post-recalibration)**: 14.99s vs 16.53s master, CV 0.5%/0.3% —
+  **-9.32% vs master** at master=16.53s (slow runner). Inside slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `3e8ef83`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
