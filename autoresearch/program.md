@@ -1179,6 +1179,20 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: f9ee135
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 104: Skip start-map lookups on failed net returns (2026-04-26) — REVERTED
+- **Hypothesis**: Extends iter 80's pattern (UDP recv): TCP send/recv and
+  UDP send return paths still do a map lookup before the `ret <= 0` check.
+  Failing fast skips the lookup on common failure paths.
+- **Change**: `tcp_sendmsg`/`tcp_recvmsg`/`udp_sendmsg` returns delete the
+  saved entry and bail when `ret <= 0`. (commits `94abff4`, `03b80e5`)
+- **Result (new methodology)**: 8.81s vs 10.18s master, CV 0.5%/0.4% —
+  **-13.46% vs master** at master=10.18s. Fast HWM (iter 98) -13.23% at
+  10.28s; interpolated to 10.18s ≈ -13.31%; iter 104 is 0.15pp better —
+  within noise. stress-bench's TCP/UDP send paths likely succeed most of
+  the time, so the failure shortcut rarely triggers.
+- **Verdict**: REVERTED. Branch reset to `85cf36c`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
