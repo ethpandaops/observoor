@@ -1479,9 +1479,27 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 (master ~13s). So cross-iteration comparisons need a runner-class disclaimer
 until we get multi-runner medians.
 
-**High-water mark: -13.23%** vs master (iter 98, commit `0e67162`, fast runner).
-**Medium-runner HWM: -11.30%** (iter 114, commit `b60d8d2`, master=13.81s).
-**Slow-runner HWM: -10.81%** (iter 109, commit `fb7ae3d`, master=16.47s).
+### Bench-config recalibration (2026-04-26, commit `0864c18`)
+
+The bench now exercises the HTTP exporter via a local mock-sink (added to
+prevent iter 124's no-exporter bypass). This adds a constant export
+overhead to both base and head, compressing the relative % delta by
+roughly 0.6pp on slow runners. Pre-iter-124 HWMs are NOT directly
+comparable to post-recalibration measurements.
+
+Sanity check on `0864c18` (all kept iterations + bench fix, no observoor
+code changes since iter 109): -9.87% vs master at master=15.81s, CV 0.3%
+both sides — clean.
+
+**Pre-recalibration HWMs (no HTTP exporter):**
+- Fast: -13.23% (iter 98, master ~10s)
+- Medium: -11.30% (iter 114, master ~13.8s)
+- Slow: -10.81% (iter 109, master ~16.5s)
+
+**Post-recalibration baseline (HTTP exporter active):**
+- Slow: -9.87% (sanity at master=15.81s) — new slow HWM
+- Fast/medium HWMs to be re-established as iterations land on those
+  runner classes.
 **47 kept iterations.**
 
 ## Rules
