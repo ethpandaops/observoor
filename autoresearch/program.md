@@ -1769,6 +1769,17 @@ upper bound of the corresponding band by ~0.5pp.
   revert commit on the way; both code commits restored to clean state).
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 149: Drop event_type byte from compact TCP TX metrics (2026-04-27) — REVERTED
+- **Hypothesis**: Compact TCP TX metrics records still include an
+  `event_type` byte; record length 22 already identifies the type.
+  Dropping it cuts records to 21 bytes.
+- **Change**: BPF emits 21-byte record; parser dispatches by length.
+  (commits `73ba79b`, `aaea57b`)
+- **Result**: 15.36s vs 17.04s master, CV 0.6%/0.6% — **-9.86% vs master**
+  at master=17.04s. Inside slow band -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `80b1e9d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
