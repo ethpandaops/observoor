@@ -1216,6 +1216,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `60c9536`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 107: Buffer tracer captured-stats across 4 batches (2026-04-26) — REVERTED
+- **Hypothesis**: `TRACER_STATS_FLUSH_INTERVAL` is currently 1024 events;
+  widening to 4×PARSED_EVENT_BATCH_SIZE further amortizes the shared-atomic
+  flush.
+- **Change**: New constant value. (commits `7a1ae8c`, `8e90ae7`)
+- **Result (new methodology)**: 14.53s vs 16.11s master, CV 0.2%/0.3% —
+  **-9.81% vs master** at master=16.11s. Slow HWM (iter 103) -9.75% →
+  0.06pp better — dead tied. Most of the stats flushing was already
+  amortized by iter 26's batched counter pattern.
+- **Verdict**: REVERTED. Branch reset to `6724734`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
