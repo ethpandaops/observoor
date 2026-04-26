@@ -1261,6 +1261,18 @@ Key cost centers (from Criterion benchmarks):
 - **Commit**: `fb7ae3d`
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 110: Direct-zero FD marker pad (2026-04-26) — REVERTED
+- **Hypothesis**: Same memset→direct-write pattern (iter 109), applied to
+  FD open/close emitters (`__builtin_memset(e->pad, 0, ...)` → `e->pad = 0`
+  with pad widened to `__u16`).
+- **Change**: FD pad as `__u16`, single store. (commits `411c739`, `f136a7b`)
+- **Result (new methodology)**: 14.77s vs 16.41s master, CV 0.3%/0.3% —
+  **-9.99% vs master** at master=16.41s. Slow HWM (iter 109) -10.81% at
+  16.47s → 0.82pp WORSE. FD events less hot than sched_switch; compiler
+  likely already optimized the small memset.
+- **Verdict**: REVERTED. Branch reset to `80687b0`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
