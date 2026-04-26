@@ -1738,6 +1738,17 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `7cd9115`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 146: Sentinel running-thread slots (no Option) (2026-04-27) — REVERTED
+- **Hypothesis**: `RunningThreadStore` slots stored as `Option<RunningThread>`.
+  Switch to direct `RunningThread` with `tid == 0` as empty sentinel; skip
+  Option tag checks in scheduler hot path.
+- **Change**: `RunningThread` direct slots; sentinel-based empty check.
+  (commits `98a6574`, `a43df48`)
+- **Result (post-recalibration)**: 14.90s vs 16.49s master, CV 0.3%/0.5% —
+  **-9.64% vs master** at master=16.49s. Inside slow band -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `008f6a0`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
