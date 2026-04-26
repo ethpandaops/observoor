@@ -1431,6 +1431,18 @@ Key cost centers (from Criterion benchmarks):
   revert commit on the way; both code commits restored to clean state).
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 123: Skip collector/export prep when no exporters (2026-04-26) — REVERTED
+- **Hypothesis**: Aggregated sink runs collector/export work even when no
+  exporters are configured. Skipping it saves CPU on the slot rotation.
+- **Change**: Guard collection block on `!exporters.is_empty()`.
+  (commits `304d9ae`, `f38c917`)
+- **Result (new methodology)**: 15.09s vs 16.64s master, CV 0.3%/0.2% —
+  **-9.31% vs master** at master=16.64s. Slow HWM extrapolated ≈ -10.78%;
+  iter 123 is 1.47pp WORSE. The bench HAS exporters configured, so the
+  guard never triggers — net effect was just an extra branch per slot.
+- **Verdict**: REVERTED. Branch reset to `0d66641`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
