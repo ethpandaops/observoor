@@ -1254,7 +1254,7 @@ Key cost centers (from Criterion benchmarks):
   scheduler emit paths.
 - **Result**: `TBD (CI pending)`
 - **Verdict**: `TBD`
-- **Commit**: `TBD`
+- **Commit**: `fb7ae3d`
 - **Author**: codex / gpt-5
 
 ---
