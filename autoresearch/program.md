@@ -1406,6 +1406,31 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `67432fe`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 121: Sink uses recv_many() to drain batches (2026-04-26) — REVERTED
+- **Hypothesis**: Sink event loop uses `recv()` then a `try_recv()` loop to
+  pull queued batches. Tokio's `recv_many()` does the same in one call,
+  cutting per-batch atomic queue ops.
+- **Change**: `mpsc::Receiver::recv_many()` to drain into a Vec, then process.
+  (commits `9ab5f58`, `659886d`)
+- **Result (new methodology)**: 15.15s vs 16.74s master, CV 0.5%/0.4% —
+  **-9.50% vs master** at master=16.74s. Slow HWM extrapolated ≈ -10.76%;
+  iter 121 is 1.26pp WORSE.
+- **Verdict**: REVERTED. Branch reset to `458003d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
+### Iteration 122: Fall-through default sampling check in BPF (2026-04-26) — REVERTED
+- **Hypothesis**: `should_emit_event()` switches on sampling mode; default
+  `SAMPLING_MODE_NONE` returns 1 from inside the switch. Reordering so the
+  default falls through (returning 1) reduces the common-path branch cost.
+- **Change**: Switch reorganized; `SAMPLING_MODE_NONE` falls out to the
+  return-1 tail. (commits `b7cd14d`, `16ac692`)
+- **Result (new methodology)**: 12.16s vs 13.51s master, CV 0.3%/0.3% —
+  **-9.99% vs master** at master=13.51s. Medium HWM -11.30% → 1.31pp WORSE.
+  The compiler likely already optimized the switch; manual reorder regressed.
+- **Verdict**: REVERTED. Branch reset to `458003d` (also dropped iter 121
+  revert commit on the way; both code commits restored to clean state).
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
