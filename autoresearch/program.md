@@ -1321,10 +1321,13 @@ Key cost centers (from Criterion benchmarks):
   path.
 - **Change**: Store the single-PID fast filter as one packed `u64`
   (`pid | client_type << 32`) and decode it in `is_tracked()`.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 12.25s vs 13.81s master, CV 0.7%/0.5% —
+  **-11.30% vs master** at master=13.81s. Medium HWM (iter 80) -9.73% →
+  1.57pp better, above 1pp noise floor. Single-u64 fast filter saves the
+  separate `enabled` byte load + branch on every PID-filtered probe.
+- **Verdict**: KEPT. New medium-runner HWM: -11.30%.
 - **Commit**: b60d8d2
-- **Author**: gpt-5.5 / medium reasoning
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -1340,7 +1343,7 @@ code measured -11.14% on fast runner (master ~10s) and -7.82% on slow runner
 until we get multi-runner medians.
 
 **High-water mark: -13.23%** vs master (iter 98, commit `0e67162`, fast runner).
-**Medium-runner HWM: -9.73%** (iter 80, commit `8ea5db9`, master=13.67s).
+**Medium-runner HWM: -11.30%** (iter 114, commit `b60d8d2`, master=13.81s).
 **Slow-runner HWM: -10.81%** (iter 109, commit `fb7ae3d`, master=16.47s).
 **47 kept iterations.**
 
