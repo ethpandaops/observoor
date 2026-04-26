@@ -1863,6 +1863,18 @@ upper bound of the corresponding band by ~0.5pp.
   call given between-class runner.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 156: Defer block byte conversion until emit (2026-04-27) — REVERTED
+- **Hypothesis**: Block tracepoints currently call `sectors_to_bytes()`
+  before the early-exit `should_emit_event` checks. Hoisting the conversion
+  past the gate avoids the work when the event isn't emitted.
+- **Change**: Move `sectors_to_bytes(nr_sector)` past `should_emit_event`
+  in block completion / merge paths. (commits `c20f8eb`, `e809720`)
+- **Result (post-recalibration)**: 12.19s vs 13.67s master, CV 0.8%/0.7% —
+  **-10.83% vs master** at master=13.67s (medium runner). Medium band
+  -9.5% to -10.5%; 0.33pp above upper bound, fails 0.5pp threshold.
+- **Verdict**: REVERTED. Branch reset to `cafaa54`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
