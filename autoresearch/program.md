@@ -1574,6 +1574,16 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `448db06`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 133: Early-return after way-0 hit in clear_cached_tid_cpu (2026-04-27) — REVERTED
+- **Hypothesis**: `clear_cached_tid_cpu` checks both ways even after a hit
+  in way-0. Returning immediately after way-0 clear avoids the way-1 check.
+- **Change**: Add `return` after way-0 clear. (commits `cc06640`, `fd36a8d`)
+- **Result (post-recalibration)**: 15.45s vs 17.09s master, CV 0.5%/0.8% —
+  **-9.60% vs master** at master=17.09s. Slow post-recal extrapolated
+  ≈ -9.90%; iter 133 is 0.30pp WORSE — within noise.
+- **Verdict**: REVERTED. Branch reset to `7869dbb`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
