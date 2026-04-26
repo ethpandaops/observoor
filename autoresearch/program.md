@@ -1526,6 +1526,19 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `31f624e`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 129: Bitmask scan for occupied CPU slots in RunningThreadStore (2026-04-26) — REVERTED
+- **Hypothesis**: Sched TID misses scan all CPU slots in `RunningThreadStore`
+  even when most are empty. A 64-bit occupied-CPU bitmask lets misses skip
+  empty slots via `trailing_zeros`.
+- **Change**: `occupied_cpus: u64` bitmask updated in `put_cpu`/`take_cpu`;
+  miss scan iterates set bits. (commits `79755f3`, `f6fdd59`)
+- **Result (post-recalibration)**: 15.10s vs 16.56s master, CV 0.7%/0.5% —
+  **-8.82% vs master** at master=16.56s. Slow post-recal extrapolated
+  ≈ -9.81%; iter 129 is 0.99pp WORSE. The added bitmask maintenance on
+  every put/take eats the savings on miss scans.
+- **Verdict**: REVERTED. Branch reset to `9864ada`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
