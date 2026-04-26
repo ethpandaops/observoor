@@ -1356,6 +1356,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `c6955cd`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 117: Reorder single-PID fast-filter compare (2026-04-26) — REVERTED
+- **Hypothesis**: After iter 114's u64 packed filter, the `is_tracked` hot
+  path checks the disabled sentinel before the PID match. Reversing the
+  order returns on tracked-PID match without paying the sentinel branch.
+- **Change**: PID equality check before sentinel zero check. (commits
+  `db0e6b2`, `3dcefcb`)
+- **Result (new methodology)**: 14.64s vs 16.31s master, CV 0.5%/0.2% —
+  **-10.24% vs master** at master=16.31s. Slow HWM extrapolated to 16.31s
+  ≈ -10.84%; iter 117 is 0.60pp worse.
+- **Verdict**: REVERTED. Branch reset to `1da9d4d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
