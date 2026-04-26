@@ -1343,6 +1343,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `903229c`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 116: Direct-index scheduler TID cache (2026-04-26) — REVERTED
+- **Hypothesis**: Sched TID cache uses `(tid ^ tid.rotate_left(11)) & mask`
+  to index. The XOR/rotate is mixing for adjacent TIDs but costs cycles per
+  lookup. Direct masking is faster.
+- **Change**: `tid as usize & (size - 1)` instead of XOR/rotate mix.
+  (commits `67611be`, `99acd73`)
+- **Result (new methodology)**: 12.20s vs 13.60s master, CV 0.3%/0.3% —
+  **-10.29% vs master** at master=13.60s. Medium HWM -11.30% → 1.01pp
+  WORSE. Removing the mix likely causes more cache collisions for clustered
+  TIDs (e.g. process forks), eating the saved cycles.
+- **Verdict**: REVERTED. Branch reset to `c6955cd`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
