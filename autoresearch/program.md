@@ -1791,6 +1791,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `3d7eadf`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 151: Pack net_tx/net_rx tag byte (15→13 bytes) (2026-04-27) — REVERTED
+- **Hypothesis**: net_tx/net_rx compact records carry separate
+  client/direction/transport bytes. Packing into one tag byte cuts the
+  record from 15 to 13 bytes.
+- **Change**: BPF emits 13-byte records with packed tag; parser decodes.
+  (commits `5dd80b5`, `8a1c952`)
+- **Result (post-recalibration)**: 12.00s vs 13.48s master, CV 0.8%/0.6% —
+  **-10.98% vs master** at master=13.48s. Medium band upper bound -10.5%;
+  iter 151 is 0.48pp above — just at the 0.5pp threshold.
+- **Verdict**: REVERTED. Branch reset to `7c8d04a`. Borderline; per the
+  strict rule, 0.48pp doesn't clearly clear the 0.5pp noise floor.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
