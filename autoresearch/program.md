@@ -1494,6 +1494,20 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `3a1e803`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 127: Skip redundant scheduler TID cache clear on misses (2026-04-26)
+- **Hypothesis**: `SchedulerWindowState::find_cpu_for_tid` already checks both
+  direct-mapped cache ways for the queried TID before scanning live running
+  CPU slots. On a scan miss, calling `clear_cached_tid_cpu(tid)` repeats the
+  same cache-slot hash and two way checks but cannot remove an entry for that
+  TID. Removing that redundant miss-path cleanup should reduce userspace
+  scheduler aggregation CPU without changing carried running-thread state.
+- **Change**: Return `None` directly after a running-slot scan miss instead
+  of re-clearing the already-checked scheduler TID cache slot.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 22a0477
+- **Author**: GPT-5
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
