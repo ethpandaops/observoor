@@ -15,6 +15,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 MOCK_BEACON_PORT=15999
+MOCK_SINK_PORT=18999
 HEALTH_PORT=19090
 READY_FILE="/tmp/stress-bench-ready"
 STRESS_BIN="/tmp/stress-bench"
@@ -25,6 +26,7 @@ cleanup() {
     [ -n "${STRESS_PID:-}" ] && kill "$STRESS_PID" 2>/dev/null
     [ -n "${OBS_PID:-}" ] && kill "$OBS_PID" 2>/dev/null
     [ -n "${MOCK_PID:-}" ] && kill "$MOCK_PID" 2>/dev/null
+    [ -n "${SINK_PID:-}" ] && kill "$SINK_PID" 2>/dev/null
     rm -f "$READY_FILE" "$STRESS_BIN"
     wait 2>/dev/null
 }
@@ -68,6 +70,12 @@ echo "Starting mock beacon on :${MOCK_BEACON_PORT}..." >&2
 python3 "$SCRIPT_DIR/mock-beacon.py" "$MOCK_BEACON_PORT" &
 MOCK_PID=$!
 wait_for_http "http://127.0.0.1:${MOCK_BEACON_PORT}/eth/v1/beacon/genesis" 20
+
+# 2b. Start mock HTTP sink (absorbs observoor's HTTP exporter output).
+echo "Starting mock sink on :${MOCK_SINK_PORT}..." >&2
+python3 "$SCRIPT_DIR/mock-sink.py" "$MOCK_SINK_PORT" &
+SINK_PID=$!
+wait_for_http "http://127.0.0.1:${MOCK_SINK_PORT}/" 20
 
 # 3. Start stress-bench in wait mode (so observoor discovers it at startup).
 #    Redirect stdout to stderr so "DONE" message doesn't pollute our JSON output.

@@ -23,7 +23,13 @@ sinks:
     clickhouse:
       enabled: false
     http:
-      enabled: false
+      enabled: true
+      address: "http://127.0.0.1:18999"
+      batch_size: 512
+      batch_timeout: 1s
+      max_queue_size: 8192
+      workers: 1
+      keep_alive: true
 
 health:
   addr: ":19090"

@@ -1443,6 +1443,29 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `0d66641`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 123 follow-up note: I was wrong about iter 123's "bench HAS
+exporters configured". It does NOT — `observoor-bench.yaml` had both
+`clickhouse.enabled: false` and `http.enabled: false`. iter 123 just
+happened to land on a runner where the small extra branch cost showed up.
+
+### Iteration 124: Bypass no-export aggregation ingest (2026-04-26) — REVERTED + bench fix
+- **Hypothesis**: When no exporters are configured, the agent's BPF→parse
+  →channel→sink work has no consumer. Recycling parsed batches before
+  channel send avoids the entire aggregation pipeline.
+- **Change**: `has_exporters` flag on `AggregatedSink`; bypass send when
+  empty. (commits `290db89`, `a1faea2`)
+- **Result (new methodology)**: 10.57s vs 13.62s master — **-22.39% vs
+  master**. Massive jump because the bench config had no exporters
+  enabled, so iter 124's `has_exporters=false` short-circuit made
+  observoor a no-op.
+- **Verdict**: REVERTED. Branch reset to `8e1ea70`. The optimization is
+  technically valid in production, but the bench was implicitly relying on
+  aggregation running even with no exporters. **Bench config fixed**:
+  enabled HTTP exporter pointing to a new `mock-sink.py` (added to
+  bench-cpu/, started by run-bench.sh) so future iterations can't game
+  this and the bench measures the full pipeline.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
