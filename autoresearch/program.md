@@ -1847,6 +1847,22 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `bb30a86`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 155: Key transient BPF start maps by 32-bit TID (2026-04-27) — REVERTED
+- **Hypothesis**: Syscall and TCP/UDP start/return maps key on 64-bit
+  `pid_tgid`. The lower 32 bits (TID) uniquely identify the in-flight
+  syscall on a single thread; halving the key size reduces hot-path hash
+  work.
+- **Change**: BPF `syscall_key` becomes a `u32` TID; all start-map
+  insert/lookup/delete sites use `syscall_key_from_pid_tgid(pid_tgid)`.
+  (commits `71a4d46`, `11006ca`)
+- **Result (post-recalibration)**: 10.97s vs 12.28s master, CV 0.3%/0.2% —
+  **-10.67% vs master** at master=12.28s (between-class runner). Head/
+  master ratio 0.893 — worse than iter 127 HWM ratio 0.863. Doesn't clearly
+  clear any band's upper bound by 0.5pp.
+- **Verdict**: REVERTED. Branch reset to `b18feca`. Borderline; conservative
+  call given between-class runner.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
