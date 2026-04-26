@@ -1875,6 +1875,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `cafaa54`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 157: Drop tuple staging in compact syscall parse (2026-04-27) — REVERTED
+- **Hypothesis**: `parse_compact_syscall` builds an `(EventType,
+  TypedEvent)` tuple before mapping it through a final wrapping; emitting
+  the typed event directly per-arm avoids the temporary.
+- **Change**: Each syscall tag arm in compact parser returns the typed
+  event directly without the tuple intermediate. (commits `c67474f`,
+  `7cb0600`)
+- **Result (post-recalibration)**: 14.92s vs 16.55s master, CV 0.3%/0.5% —
+  **-9.85% vs master** at master=16.55s (slow runner). Inside slow band
+  -9% to -10%; doesn't clear 0.5pp threshold.
+- **Verdict**: REVERTED. Branch reset to `0280a5f`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
