@@ -1539,6 +1539,17 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `9864ada`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 130: Collapse duplicated next_tid lookup path (2026-04-26) — REVERTED
+- **Hypothesis**: Scheduler aggregation has a duplicated `next_tid`
+  lookup/accounting path. Collapsing the duplicate reduces userspace
+  branching on every sched_switch.
+- **Change**: Single-path next_tid handling. (commits `ca2d703`, `63152e2`)
+- **Result (post-recalibration)**: 14.97s vs 16.47s master, CV 0.7%/0.6% —
+  **-9.11% vs master** at master=16.47s. Slow post-recal extrapolated
+  ≈ -9.79%; iter 130 is 0.68pp WORSE.
+- **Verdict**: REVERTED. Branch reset to `c047097`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
