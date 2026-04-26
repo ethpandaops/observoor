@@ -1243,6 +1243,20 @@ Key cost centers (from Criterion benchmarks):
   Branch reset to `8feeb4f`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 109: Direct scheduler pad initialization (2026-04-26)
+- **Hypothesis**: Scheduler event emitters currently zero the full 6-byte
+  header pad with `memset` and then overwrite most of those bytes with the
+  voluntary flag and CPU id. Writing only the parsed bytes plus the remaining
+  pad tail should remove redundant BPF stores on sched_switch/runqueue events
+  without changing the ring-buffer record shape.
+- **Change**: Replace scheduler header pad `memset` calls with direct
+  byte initialization in the sched_switch, sched_runqueue, and combined
+  scheduler emit paths.
+- **Result**: `TBD (CI pending)`
+- **Verdict**: `TBD`
+- **Commit**: `TBD`
+- **Author**: codex / gpt-5
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with

@@ -1121,7 +1121,6 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             combo->hdr.tid = tid;
             combo->hdr.event_type = EVENT_SCHED_SWITCH;
             combo->hdr.client_type = ct;
-            __builtin_memset(combo->hdr.pad, 0, sizeof(combo->hdr.pad));
             combo->hdr.pad[0] = (ctx->prev_state == 0) ? 1 : 0;
             encode_u32_le(&combo->hdr.pad[1], cpu_id);
             combo->hdr.pad[5] = next_info->client_type;
@@ -1144,8 +1143,9 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             rq->hdr.tid = next_tid;
             rq->hdr.event_type = EVENT_SCHED_RUNQUEUE;
             rq->hdr.client_type = next_info->client_type;
-            __builtin_memset(rq->hdr.pad, 0, sizeof(rq->hdr.pad));
             encode_u32_le(&rq->hdr.pad[0], cpu_id);
+            rq->hdr.pad[4] = 0;
+            rq->hdr.pad[5] = 0;
             rq->runqueue_ns = runqueue_ns;
             rq->off_cpu_ns = offcpu_ns;
             bpf_ringbuf_submit(rq, 0);
@@ -1164,9 +1164,9 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     e->hdr.tid = tid;
     e->hdr.event_type = EVENT_SCHED_SWITCH;
     e->hdr.client_type = ct;
-    __builtin_memset(e->hdr.pad, 0, sizeof(e->hdr.pad));
     e->hdr.pad[0] = (ctx->prev_state == 0) ? 1 : 0;
     encode_u32_le(&e->hdr.pad[1], cpu_id);
+    e->hdr.pad[5] = 0;
 
     // Compute on-CPU duration from sched_on_ts entry.
     __u64 *on_ts = bpf_map_lookup_elem(&sched_on_ts, &tid);
