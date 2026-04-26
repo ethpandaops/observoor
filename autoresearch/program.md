@@ -1228,6 +1228,21 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `6724734`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 108: Skip failed UDP recv cleanup (2026-04-26) — REVERTED (correctness regression)
+- **Hypothesis**: Skip `pid_tgid` derivation + key build + map delete on
+  failed `udp_recvmsg` returns to save BPF helper work.
+- **Change**: Remove `if (ret <= 0) { delete; return }` cleanup; gate by
+  `is_tracked` instead. (commits `2875668`, `8344867`)
+- **Result (new methodology)**: 15.12s vs 16.93s master, CV 1.0%/0.4% —
+  **-10.69% vs master** at master=16.93s. Slow HWM -9.75% → 0.94pp better,
+  just below noise floor.
+- **Verdict**: REVERTED. **Correctness regression**: removing the EAGAIN-path
+  delete leaves stale `net_recv_udp_start` entries that accumulate per
+  failed recvmsg, eventually overflowing the map. The marginal perf gain
+  (~0.94pp, below noise floor) doesn't justify the correctness cost.
+  Branch reset to `8feeb4f`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
