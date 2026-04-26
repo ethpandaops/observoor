@@ -1584,6 +1584,18 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `7869dbb`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 134: HTTP gzip Compression::fast() (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP exporter uses `Compression::default()` (level 6) for
+  gzip, which trades CPU for compression ratio. `Compression::fast()` (level
+  1) cuts compression CPU at the cost of slightly larger payloads.
+- **Change**: One-line: `Compression::fast()`. (commits `e439e55`, `8119c0b`)
+- **Result (post-recalibration)**: 8.85s vs 10.23s master, CV 0.4%/0.3% —
+  **-13.49% vs master** at master=10.23s (fast runner). Fast HWM (iter 127)
+  extrapolated ≈ -14.12%; iter 134 is 0.63pp WORSE. mock-sink doesn't
+  read the body so compression cost wasn't a real bottleneck either way.
+- **Verdict**: REVERTED. Branch reset to `9b615d9`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
