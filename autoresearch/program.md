@@ -1714,6 +1714,16 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `d4eb812`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 144: Inline AggregatedMetricJson in queue items (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP queue items wrap `AggregatedMetricJson` in `Box`,
+  forcing per-metric heap allocation. Storing inline removes the alloc.
+- **Change**: Drop the `Box` wrapper. (commits `aa554fa`, `3a4e8ef`)
+- **Result (post-recalibration)**: 15.38s vs 16.85s master, CV 0.9%/0.6% —
+  **-8.72% vs master** at master=16.85s. Below slow band -9% to -10%.
+  Inlining grew the mpsc item, increasing memory traffic per send.
+- **Verdict**: REVERTED. Branch reset to `69f50cf`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
