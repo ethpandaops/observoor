@@ -1925,6 +1925,17 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `08e84f6`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 161: Merge sched_switch next_info branches (2026-04-27) — REVERTED
+- **Hypothesis**: `trace_sched_switch` does the `if (next_info)` check
+  twice in a row; merging into one block trims a branch.
+- **Change**: Combine the two consecutive `if (next_info)` blocks in
+  `trace_sched_switch`. (commits `823aa88`, `ada6807`)
+- **Result (post-recalibration)**: 15.00s vs 16.44s master, CV 0.6%/0.6% —
+  **-8.76% vs master** at master=16.44s (slow runner). Below slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `649031a`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
