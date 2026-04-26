@@ -1673,6 +1673,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `c95af5f`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 140: Direct fixed-array HTTP histogram conversion (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP histogram-to-JSON takes a slice and does a length
+  check + bucket Option lookups. Histogram is always `[u32; 10]` from the
+  aggregate, so a fixed-array path skips slice bounds checks.
+- **Change**: `histogram_to_json(hist: &[u32; 10])`. (commits `6f6cb67`,
+  `5881e86`)
+- **Result (post-recalibration)**: 14.72s vs 16.11s master, CV 1.0%/0.5% —
+  **-8.63% vs master** at master=16.11s. Slow band -9% to -10%; iter 140
+  is BELOW band — actively slower than typical.
+- **Verdict**: REVERTED. Branch reset to `0da6ea6`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
