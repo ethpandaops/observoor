@@ -1819,6 +1819,21 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `5934c41`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 153: Drop redundant TCP transport zero stores (2026-04-27) — REVERTED
+- **Hypothesis**: `net_recv_val`/`net_send_val` start-map values are already
+  zero-initialized, and `NET_TRANSPORT_TCP` is encoded as 0. The TCP send/recv
+  probes still explicitly store that zero into `transport` on every TCP entry.
+  Removing the redundant stores should shave a small amount of BPF work on the
+  network portion of stress-bench without changing emitted records.
+- **Change**: Remove explicit `val.transport = NET_TRANSPORT_TCP` stores from
+  the TCP sendmsg/recvmsg entry probes; UDP paths still write UDP explicitly.
+  (commits `7cf54d1`, `2eeba56`)
+- **Result (post-recalibration)**: 14.40s vs 15.96s master, CV 0.5%/0.3% —
+  **-9.77% vs master** at master=15.96s (slow runner). Inside slow band
+  -9% to -10%; doesn't beat upper bound by 0.5pp.
+- **Verdict**: REVERTED. Branch reset to `00a7973`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
