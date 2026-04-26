@@ -1205,6 +1205,17 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `6628f09`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 106: Drop redundant pad memset in BPF combined sched event (2026-04-26) — REVERTED
+- **Hypothesis**: Combined sched_switch event path memsets `hdr.pad` then
+  immediately overwrites all 6 bytes. The memset is dead.
+- **Change**: Remove the memset. (commits `880055d`, `ec696ec`)
+- **Result (abnormal runner, wall 71-80s ≈ 2x normal)**: 10.89s vs 12.29s
+  master, CV 0.5%/0.2% — **-11.39% vs master** at master=12.29s.
+  Interpolated neutral ≈ -11.16%; iter 106 is 0.23pp better but on an
+  abnormal runner (same pattern as iter 81/89 which didn't replicate).
+- **Verdict**: REVERTED. Branch reset to `60c9536`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
