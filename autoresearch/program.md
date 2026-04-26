@@ -1694,6 +1694,17 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `a0a1c1e`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 142: Unchecked sched TID cache slot access (2026-04-27) — REVERTED
+- **Hypothesis**: `tid_to_cpu_cache` indexing uses bounds-checked
+  `[cache_set_idx]`; the masked index is provably in range, so unchecked
+  `get_unchecked_mut` skips the bounds check.
+- **Change**: `sched_tid_cache_set_mut` helper using unchecked index.
+  (commits `071a123`, `8be2166`)
+- **Result (post-recalibration)**: 14.80s vs 16.36s master, CV 0.2%/0.2% —
+  **-9.54% vs master** at master=16.36s. Inside slow band -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `4203b56`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
