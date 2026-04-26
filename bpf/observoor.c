@@ -1047,14 +1047,29 @@ int trace_sched_wakeup_new(struct trace_event_raw_sched_wakeup_local *ctx)
 SEC("tracepoint/sched/sched_switch")
 int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
 {
-    __u64 now = bpf_ktime_get_ns();
     __u8 ct = 0;
-    __u32 cpu_id = bpf_get_smp_processor_id();
+
+    // Path B: Emit event for outgoing (prev) thread.
+    // The tracepoint's prev_pid is a TID (thread ID), not the TGID
+    // (thread group ID) we store in tracked_pids. Use the current
+    // task's TGID for the PID filter check.
+    __u64 pid_tgid = bpf_get_current_pid_tgid();
+    __u32 pid = pid_tgid >> 32;
+    __u32 tid = (__u32)pid_tgid;
+
+    int prev_tracked = is_tracked(pid, &ct);
+    int emit_switch = 0;
+    int emit_runqueue = 0;
 
     __u32 next_tid = ctx->next_pid;
     __u64 runqueue_ns = 0;
     __u64 offcpu_ns = 0;
     struct tracked_tid_val *next_info = lookup_tracked_tid(next_tid);
+
+    if (!prev_tracked && !next_info)
+        return 0;
+
+    __u64 now = bpf_ktime_get_ns();
 
     // Only tracked incoming threads need sched-on timestamps for later
     // on-CPU accounting. Skipping the global write for unrelated tasks avoids
@@ -1076,18 +1091,6 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
             bpf_map_delete_elem(&offcpu_ts, &next_tid);
     }
 
-    // Path B: Emit event for outgoing (prev) thread.
-    // The tracepoint's prev_pid is a TID (thread ID), not the TGID
-    // (thread group ID) we store in tracked_pids. Use the current
-    // task's TGID for the PID filter check.
-    __u64 pid_tgid = bpf_get_current_pid_tgid();
-    __u32 pid = pid_tgid >> 32;
-    __u32 tid = (__u32)pid_tgid;
-
-    int prev_tracked = is_tracked(pid, &ct);
-    int emit_switch = 0;
-    int emit_runqueue = 0;
-
     if (prev_tracked) {
         // Record off-CPU timestamp unconditionally for all threads in tracked
         // processes. The is_tracked(pid) check above already filters by TGID.
@@ -1097,6 +1100,11 @@ int trace_sched_switch(struct trace_event_raw_sched_switch *ctx)
     }
     if (next_info)
         emit_runqueue = should_emit_event(EVENT_SCHED_RUNQUEUE);
+
+    if (!emit_switch && !emit_runqueue)
+        return 0;
+
+    __u32 cpu_id = bpf_get_smp_processor_id();
 
     if (prev_tracked && next_info && emit_switch && emit_runqueue) {
         struct sched_switch_runqueue_event *combo =
