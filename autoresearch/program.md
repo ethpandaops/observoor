@@ -1466,6 +1466,21 @@ happened to land on a runner where the small extra branch cost showed up.
   this and the bench measures the full pipeline.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 125: Negative cache for sched TID lookup misses (2026-04-26) — REVERTED
+- **Hypothesis**: Most TIDs in stress-bench aren't tracked, so the sched
+  TID hashbrown lookup misses dominate. A direct-mapped negative cache
+  (small array, hash to slot, store last-seen-not-running TID) skips the
+  hash lookup on repeated misses for the same TID.
+- **Change**: `is_known_not_running` direct-mapped cache; invalidate on
+  state changes. (commits `c535b42`, `ce8c19f`)
+- **Result (post-recalibration)**: 15.06s vs 16.59s master, CV 0.8%/0.5% —
+  **-9.22% vs master** at master=16.59s. Post-recalibration sanity was
+  -9.87% at 15.81s; extrapolated to 16.59s ≈ -9.73%; iter 125 is 0.51pp
+  worse. The negative cache adds an array probe per miss; on stress-bench
+  the hashbrown miss is already cheap.
+- **Verdict**: REVERTED. Branch reset to `abf482d`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
