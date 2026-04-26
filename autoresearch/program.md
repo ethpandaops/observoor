@@ -1663,6 +1663,16 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `52d8c92`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 139: Widen sched TID cache 32→64 slots (2026-04-27) — REVERTED
+- **Hypothesis**: Larger cache → fewer collisions → fewer fallback hashmap
+  lookups on sched events.
+- **Change**: `SCHED_TID_CACHE_SIZE = 64`. (commits `97d147e`, `960263a`)
+- **Result (post-recalibration)**: 14.77s vs 16.37s master, CV 0.9%/1.3% —
+  **-9.77% vs master** at master=16.37s. Slow band -9% to -10%; iter 139
+  sits inside band — doesn't clear noise floor.
+- **Verdict**: REVERTED. Branch reset to `c95af5f`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
