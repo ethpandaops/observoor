@@ -1625,6 +1625,31 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `d4a8a09`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 137: Drop ?:1:0 ternary on page-fault major bit (2026-04-27) — REVERTED
+- **Hypothesis**: BPF normalizes `VM_FAULT_MAJOR` bit to 0/1 with `?:`,
+  but Rust parser already does `major != 0`. Storing the bit directly
+  saves a compare+branch in the BPF emit path.
+- **Change**: `e->major = ret & 0x04;` (no ternary). (commits `44da907`,
+  `954d0aa`)
+- **Result (post-recalibration)**: 12.39s vs 13.64s master, CV 0.5%/0.6% —
+  **-9.16% vs master** at master=13.64s. Sits at the low end of the
+  post-recal medium-runner band (-9.2% to -10.6%) — doesn't beat typical.
+- **Verdict**: REVERTED. Branch reset to `5f41ef4`.
+
+### Empirical post-recal neutral bands (calibrated from observed reverts)
+
+After ~15 post-recal measurements, observed medium-runner deltas cluster
+in -9.2% to -10.6% and slow in -8.7% to -10.4%. The fast→slow linear
+interpolation overestimated the medium band; iter 127's -13.68% on a
+particularly fast runner was probably an outlier. Empirical bands going
+forward:
+- Fast (master ~10-11s): -12.5% to -13.5%
+- Medium (master ~13.5-14s): -9.5% to -10.5%
+- Slow (master ~15.5-17s): -9% to -10%
+
+To beat HWM by the noise floor, iterations need to land **above** the
+upper bound of the corresponding band by ~0.5pp.
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
