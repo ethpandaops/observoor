@@ -1912,6 +1912,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `3e8ef83`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 160: Borrow Event in hot accessors (&self) (2026-04-27) — REVERTED
+- **Hypothesis**: `Event` accessor methods take `self` by value, copying
+  the 24-byte struct on each call in the hot ring-buffer iteration.
+  Switching read-only accessors to `&self` lets the optimizer reuse the
+  caller's `Event`.
+- **Change**: Hot read-only `Event` accessors now take `&self` instead of
+  `self`. (commits `544b8a8`, `c5089d4`)
+- **Result (post-recalibration)**: 14.89s vs 16.37s master, CV 0.8%/0.5% —
+  **-9.04% vs master** at master=16.37s (slow runner). Inside slow band
+  -9% to -10% at the edge.
+- **Verdict**: REVERTED. Branch reset to `08e84f6`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
