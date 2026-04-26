@@ -1724,6 +1724,20 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `69f50cf`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 145: NonZeroU64 niche-optimized hot-inline keys (2026-04-27) — REVERTED
+- **Hypothesis**: Hot inline maps store the dominant-key entry as
+  `Option<(BasicDimension, ...)>`, paying an Option tag check on every
+  hit. Storing the encoded key as `Option<NonZeroU64>` lets the niche
+  optimization fold the tag into the key value.
+- **Change**: `inline_key: Option<NonZeroU64>` + flat aggregate fields.
+  (commits `87ffb3f`, `4a9fcc5`)
+- **Result (post-recalibration)**: 9.27s vs 10.76s master, CV 0.5%/0.1% —
+  **-13.85% vs master** at master=10.76s (fast runner). Head/master ratio
+  0.861 vs iter 127 HWM ratio 0.863 — essentially tied with fast HWM.
+  Compiler likely already does niche optimization for tuple Options.
+- **Verdict**: REVERTED. Branch reset to `7cd9115`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
