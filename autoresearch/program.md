@@ -1381,6 +1381,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `ce56ff6`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 119: Keep syscall latency parsed as u32 (2026-04-26) — REVERTED
+- **Hypothesis**: Parser widens syscall latency u32→u64 immediately. Keeping
+  it u32 through the parse → batch → sink chain and only widening at the
+  aggregate-record call avoids spurious 64-bit ops in the hot path.
+- **Change**: `SyscallEvent.latency_ns: u32`; widen at `add_syscall`/etc.
+  (commits `e7b72b4`, `7795621`)
+- **Result (new methodology)**: 12.33s vs 13.72s master, CV 0.4%/0.6% —
+  **-10.13% vs master** at master=13.72s. Medium HWM -11.30% → 1.17pp
+  WORSE. The widening is essentially free on x86; this just increases
+  field-copy ops in tests/types without the expected codegen win.
+- **Verdict**: REVERTED. Branch reset to `41d2bf4`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
