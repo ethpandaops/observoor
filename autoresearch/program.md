@@ -1613,6 +1613,18 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `ae8011b`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 136: inline(always) on add_page_fault/add_fd_open/add_fd_close (2026-04-27) — REVERTED
+- **Hypothesis**: These three buffer methods are called from hot dispatch
+  paths; an explicit `#[inline(always)]` ensures cross-crate inlining.
+- **Change**: Add `#[inline(always)]` to the three methods. (commits
+  `2ebd853`, `f66ee2d`)
+- **Result (post-recalibration)**: 12.43s vs 13.90s master, CV 0.7%/0.5% —
+  **-10.58% vs master** at master=13.90s. Interpolated post-recal medium
+  neutral ≈ -11.39%; iter 136 is 0.81pp WORSE. Compiler likely already
+  inlines these.
+- **Verdict**: REVERTED. Branch reset to `d4a8a09`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
