@@ -1273,6 +1273,20 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `80687b0`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 111: Single-PID fast filter via BPF global data (2026-04-26) — REVERTED
+- **Hypothesis**: The single-PID fast filter currently uses a one-entry BPF
+  array map. Migrating to mutable BPF global data avoids the
+  `bpf_map_lookup_elem` helper call on every event.
+- **Change**: Mutable global `tracked_pid_fast_data` accessed directly by
+  `is_tracked()`. (commits `cc3c313`, `db8e4b0`)
+- **Result (new methodology)**: 14.81s vs 16.35s master, CV 0.3%/0.3% —
+  **-9.42% vs master** at master=16.35s. Slow HWM -10.81% → 1.39pp WORSE.
+  Clear regression. The existing array_map fast path is likely already
+  inlined to a direct memory access by clang/verifier; switching to
+  global-data may add bounds checks or PER_CPU contention.
+- **Verdict**: REVERTED. Branch reset to `ca54f23`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
