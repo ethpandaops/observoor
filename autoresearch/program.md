@@ -1562,6 +1562,18 @@ happened to land on a runner where the small extra branch cost showed up.
 - **Verdict**: REVERTED. Branch reset to `ac5f207`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 132: Cache last hot inline syscall histogram bucket (2026-04-26) — REVERTED
+- **Hypothesis**: Hot inline syscall LatencyAggregate keeps recording into
+  the histogram via the compare chain. Caching last bucket and checking
+  it first skips the chain when consecutive latencies hit same bucket.
+- **Change**: Add `last_bucket: u8` to `LatencyAggregate`; check before
+  the compare chain. (commits `860de7c`, `0763c8a`)
+- **Result (post-recalibration)**: 15.23s vs 16.73s master, CV 0.4%/0.7% —
+  **-8.97% vs master** at master=16.73s. Slow post-recal extrapolated
+  ≈ -9.84%; iter 132 is 0.87pp WORSE.
+- **Verdict**: REVERTED. Branch reset to `448db06`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
