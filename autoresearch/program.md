@@ -1888,6 +1888,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `0280a5f`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 158: Key UDP recv start map by raw pid_tgid (2026-04-27) — REVERTED
+- **Hypothesis**: `net_recv_udp_start` keys on the `struct syscall_key`
+  wrapper. Using a raw `__u64 pid_tgid` key avoids the wrapper struct on
+  every UDP recv entry/return.
+- **Change**: `net_recv_udp_start` map keyed by `__u64`; UDP recv entry
+  /return paths use `&pid_tgid` directly. (commits `a937576`, `22adf9f`)
+- **Result (post-recalibration)**: 12.20s vs 13.47s master, CV 0.2%/0.3% —
+  **-9.43% vs master** at master=13.47s (medium runner). Below medium band
+  -9.5% to -10.5%.
+- **Verdict**: REVERTED. Branch reset to `a09e245`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
