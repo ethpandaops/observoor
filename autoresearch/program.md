@@ -1685,6 +1685,15 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `0da6ea6`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 141: Drop redundant capacity check before HTTP try_send (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP export loops do `tx.capacity() == 0` checks before
+  `try_send()`. `try_send` already fails fast on full; pre-check is dead.
+- **Change**: Remove `capacity() == 0` checks. (commits `061c37d`, `e620121`)
+- **Result (post-recalibration)**: 15.27s vs 16.81s master, CV 0.4%/0.3% —
+  **-9.16% vs master** at master=16.81s. Inside slow band -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `a0a1c1e`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
