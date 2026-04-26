@@ -1368,6 +1368,19 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `1da9d4d`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 118: Skip BPF socket port reads when port labels inactive (2026-04-26) — REVERTED
+- **Hypothesis**: Aggregation collapses ports away when no port-label map
+  is configured (stress-bench case). Skipping `sport`/`dport` BPF_CORE_READs
+  in network probes saves kernel-struct accesses on every net event.
+- **Change**: Userspace sets `network_port_labels_enabled` BPF global; net
+  probes gate port reads on it. (commits `ce8d2f3`, `ff0ba17`)
+- **Result (new methodology)**: 14.76s vs 16.29s master, CV 0.4%/0.5% —
+  **-9.39% vs master** at master=16.29s. Slow HWM -10.81% → 1.42pp WORSE.
+  Clear regression. The added global-data load on every event likely costs
+  more than the saved port reads (net events aren't dominant in bench).
+- **Verdict**: REVERTED. Branch reset to `ce56ff6`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
