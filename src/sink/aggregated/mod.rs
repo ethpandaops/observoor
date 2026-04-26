@@ -338,7 +338,6 @@ impl SchedulerWindowState {
         }
 
         let Some(cpu_id) = self.running_by_cpu.find_cpu_for_tid(tid) else {
-            self.clear_cached_tid_cpu(tid);
             return None;
         };
 
