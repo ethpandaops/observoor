@@ -1780,6 +1780,17 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `80b1e9d`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 150: Fast-path <1us histogram bucket (2026-04-27) — REVERTED
+- **Hypothesis**: Low-latency syscalls dominate; fast-pathing the `<1us`
+  bucket before the paired compare tree saves comparisons.
+- **Change**: `if value_ns < BOUNDARIES[0] return 0;` early. (commits
+  `e5e4254`, `29b67bc`)
+- **Result**: 8.69s vs 10.01s master, CV 0.5%/0.5% — **-13.19% vs master**
+  at master=10.01s (fast runner). Inside fast band -12.5% to -13.5%; head/
+  master ratio 0.868 vs iter 127 HWM ratio 0.863 (slightly worse).
+- **Verdict**: REVERTED. Branch reset to `3d7eadf`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
