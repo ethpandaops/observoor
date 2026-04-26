@@ -1804,6 +1804,21 @@ upper bound of the corresponding band by ~0.5pp.
   strict rule, 0.48pp doesn't clearly clear the 0.5pp noise floor.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 152: Single-pass proc status snapshot parsing (2026-04-27) — REVERTED
+- **Hypothesis**: With the recalibrated benchmark's HTTP exporter enabled,
+  process snapshot metrics are collected every 100ms. `parse_proc_status_snapshot`
+  currently scans the same `/proc/<pid>/status` text once per memory/scheduler
+  field. Parsing all needed fields in a single pass should reduce aggregation
+  flush CPU without changing metric semantics.
+- **Change**: Replace repeated `/proc/status` line scans with one shared
+  status-field parser used by memory and scheduler process snapshots.
+  (commits `967384d`, `f014bb8`)
+- **Result (post-recalibration)**: 8.93s vs 10.26s master, CV ~0.5%/0.5% —
+  **-12.96% vs master** at master=10.26s (fast runner). Inside fast band
+  -12.5% to -13.5%; doesn't beat the upper bound by 0.5pp.
+- **Verdict**: REVERTED. Branch reset to `5934c41`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
