@@ -1169,10 +1169,15 @@ Key cost centers (from Criterion benchmarks):
   unrelated switches without changing which events are emitted.
 - **Change**: In `trace_sched_switch`, compute timestamp and CPU id only after
   `prev_tracked || next_info` is true.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (new methodology)**: 14.62s vs 16.20s master, CV 0.2%/0.4% —
+  **-9.75% vs master** at master=16.20s (essentially same runner as slow
+  HWM's 16.17s). Slow HWM -9.03% → 0.72pp better on matching runner class
+  with very clean CVs. sched_switch fires per kernel context switch
+  (tens of thousands per bench), so skipping helpers on untracked switches
+  is a meaningful BPF win.
+- **Verdict**: KEPT. New slow-runner HWM: -9.75%.
 - **Commit**: f9ee135
-- **Author**: Codex / GPT-5
+- **Author**: gpt-5.5 / xhigh reasoning
 
 ---
 
@@ -1189,7 +1194,7 @@ until we get multi-runner medians.
 
 **High-water mark: -13.23%** vs master (iter 98, commit `0e67162`, fast runner).
 **Medium-runner HWM: -9.73%** (iter 80, commit `8ea5db9`, master=13.67s).
-**Slow-runner HWM: -9.03%** (iter 69, commit `f29a9ba`, master=16.17s).
+**Slow-runner HWM: -9.75%** (iter 103, commit `f9ee135`, master=16.20s).
 **47 kept iterations.**
 
 ## Rules
