@@ -1161,6 +1161,19 @@ Key cost centers (from Criterion benchmarks):
   or constant-bound check that the BPF verifier accepts.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 103: Defer sched_switch helper calls until tracked (2026-04-26)
+- **Hypothesis**: `trace_sched_switch` runs on system-wide scheduler events and
+  currently calls `bpf_ktime_get_ns()` and `bpf_get_smp_processor_id()` before
+  checking whether either the outgoing process or incoming TID is tracked.
+  Moving those helper calls after the tracking filters avoids helper work on
+  unrelated switches without changing which events are emitted.
+- **Change**: In `trace_sched_switch`, compute timestamp and CPU id only after
+  `prev_tracked || next_info` is true.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: f9ee135
+- **Author**: Codex / GPT-5
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
