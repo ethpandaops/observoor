@@ -1834,6 +1834,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `00a7973`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 154: Pack TCPMetricsDimension via NetworkDimension bitmask (2026-04-27) — REVERTED
+- **Hypothesis**: Constructing a `TCPMetricsDimension` from a
+  `NetworkDimension` repeats the field-by-field pack. Masking the already-
+  packed `NetworkDimension` u64 to drop the direction bits avoids the rebuild.
+- **Change**: Add `TCPMetricsDimension::from_network` that masks the packed
+  `NetworkDimension`, used by buffer key conversion. (commits `9e39dd4`,
+  `dff95c9`)
+- **Result (post-recalibration)**: 15.28s vs 16.69s master, CV 0.5%/0.5% —
+  **-8.45% vs master** at master=16.69s (slow runner). Below slow band
+  -9% to -10%; clearly worse than band.
+- **Verdict**: REVERTED. Branch reset to `bb30a86`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
