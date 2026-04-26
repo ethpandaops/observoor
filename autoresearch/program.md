@@ -1311,6 +1311,21 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `8f5fd89`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 114: Pack single-PID fast filter value (2026-04-26)
+- **Hypothesis**: The single-PID fast filter from iter 98 runs on every
+  PID-filtered BPF probe. Its map value currently carries `pid`,
+  `client_type`, and `enabled` as separate fields, so the hot path loads and
+  branches on `enabled` before loading the PID and client. Packing PID and
+  client into one `u64` and using `pid == 0` as the disabled sentinel should
+  remove one hot byte load/branch while preserving the same array-map fast
+  path.
+- **Change**: Store the single-PID fast filter as one packed `u64`
+  (`pid | client_type << 32`) and decode it in `is_tracked()`.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: b60d8d2
+- **Author**: gpt-5.5 / medium reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
