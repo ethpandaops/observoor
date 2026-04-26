@@ -1749,6 +1749,26 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `008f6a0`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 147: Stream gzip/zlib NDJSON encoding (2026-04-27) — REVERTED
+- **Hypothesis**: Buffer full uncompressed batch then compress; streaming
+  compression avoids the intermediate buffer.
+- **Change**: GzEncoder/ZlibEncoder write progressively. (commits `d11699f`,
+  `c757f83`)
+- **Result**: 12.50s vs 13.78s master, CV 0.6%/0.4% — **-9.29% vs master**
+  at master=13.78s. Below medium band -9.5% to -10.5%.
+- **Verdict**: REVERTED. Branch reset to `82e2cf1`.
+
+### Iteration 148: u16-direct ClientStats batch flush (2026-04-27) — REVERTED
+- **Hypothesis**: Tracer stats currently stage parsed batch counters via
+  u64 temp buffers. Flushing the precomputed `u16` per-batch counts
+  directly skips the staging.
+- **Change**: `record_batch_u16` direct path. (commits `5b5ed4c`, `cbc8931`)
+- **Result**: 15.66s vs 17.14s master, CV 0.7%/0.6% — **-8.63% vs master**
+  at master=17.14s. Below slow band -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `82e2cf1` (also reverted iter 147
+  revert commit on the way; both code commits restored to clean state).
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
