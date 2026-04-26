@@ -14,11 +14,9 @@ struct {
 } tracked_pids SEC(".maps");
 
 // tracked_pid_fast: single-PID fast filter for benchmark/common one-process runs.
+// packed: pid in low 32 bits, client_type in bits 32..39. pid==0 disables it.
 struct tracked_pid_fast_val {
-    __u32 pid;
-    __u8  client_type;
-    __u8  enabled;
-    __u8  pad[2];
+    __u64 packed;
 };
 
 struct {
@@ -205,12 +203,16 @@ static __always_inline int is_tracked(__u32 pid, __u8 *client_type) {
     __u32 fast_key = 0;
     struct tracked_pid_fast_val *fast =
         bpf_map_lookup_elem(&tracked_pid_fast, &fast_key);
-    if (fast && fast->enabled) {
-        if (fast->pid == pid) {
-            *client_type = fast->client_type;
-            return 1;
+    if (fast) {
+        __u64 packed = fast->packed;
+        __u32 fast_pid = (__u32)packed;
+        if (fast_pid != 0) {
+            if (fast_pid == pid) {
+                *client_type = (__u8)(packed >> 32);
+                return 1;
+            }
+            return 0;
         }
-        return 0;
     }
 
     __u8 *ct = bpf_map_lookup_elem(&tracked_pids, &pid);

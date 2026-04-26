@@ -49,10 +49,7 @@ unsafe impl aya::Pod for BpfTrackedTidVal {}
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
 struct BpfTrackedPidFastVal {
-    pid: u32,
-    client_type: u8,
-    enabled: u8,
-    _pad: [u8; 2],
+    packed: u64,
 }
 
 // SAFETY: BpfTrackedPidFastVal is a plain C struct with no padding concerns.
@@ -362,14 +359,13 @@ fn update_fast_tracked_pid(
     )?;
 
     let value = if let [pid] = pids {
+        let client_type = client_types
+            .get(pid)
+            .copied()
+            .unwrap_or(ClientType::Unknown) as u8;
+
         BpfTrackedPidFastVal {
-            pid: *pid,
-            client_type: client_types
-                .get(pid)
-                .copied()
-                .unwrap_or(ClientType::Unknown) as u8,
-            enabled: 1,
-            _pad: [0; 2],
+            packed: u64::from(*pid) | (u64::from(client_type) << 32),
         }
     } else {
         BpfTrackedPidFastVal::default()
