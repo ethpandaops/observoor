@@ -1136,6 +1136,18 @@ Key cost centers (from Criterion benchmarks):
 - **Verdict**: REVERTED. Branch reset to `0c0f904`.
 - **Author**: gpt-5.5 / xhigh reasoning
 
+### Iteration 101: Coalesce same-client batch totals (2026-04-26) — REVERTED
+- **Hypothesis**: stress-bench has one client; the per-event client_totals
+  array write is hot. Run-length-encoding consecutive same-client events
+  defers writes to a single increment per client run.
+- **Change**: `pending_client_type`/`pending_client_count` accumulator in
+  `ParsedEventBatch`. (commits `a0f422e`, `f79c591`)
+- **Result (new methodology)**: 14.82s vs 16.29s master, CV 0.6%/0.6% —
+  **-9.02% vs master** at master=16.29s. Slow HWM -9.03% → 0.01pp worse,
+  dead tied.
+- **Verdict**: REVERTED. Branch reset to `33dc7d4`.
+- **Author**: gpt-5.5 / xhigh reasoning
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
