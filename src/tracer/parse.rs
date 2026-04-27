@@ -308,26 +308,15 @@ fn parse_event_with_sink<S: ParsedEventSink>(
     data: &[u8],
     sink: &mut S,
 ) -> Result<S::Output, ParseError> {
-    if data.len() == COMPACT_PAGE_FAULT_EVENT_SIZE {
-        return parse_compact_page_fault_event(data, sink);
-    }
-    if data.len() == COMPACT_BASIC_MARKER_EVENT_SIZE {
-        return parse_compact_basic_marker_event(data, sink);
-    }
-    if data.len() == COMPACT_SYSCALL_EVENT_SIZE {
-        return parse_compact_syscall_event(data, sink);
-    }
-    if data.len() == COMPACT_BLOCK_MERGE_EVENT_SIZE {
-        return parse_compact_block_merge_event(data, sink);
-    }
-    if data.len() == COMPACT_NET_IO_EVENT_SIZE {
-        return parse_compact_net_io_event(data, sink);
-    }
-    if data.len() == COMPACT_NET_IO_METRICS_EVENT_SIZE {
-        return parse_compact_net_io_metrics_event(data, sink);
-    }
-    if data.len() == COMPACT_DISK_IO_EVENT_SIZE {
-        return parse_compact_disk_io_event(data, sink);
+    match data.len() {
+        COMPACT_PAGE_FAULT_EVENT_SIZE => return parse_compact_page_fault_event(data, sink),
+        COMPACT_BASIC_MARKER_EVENT_SIZE => return parse_compact_basic_marker_event(data, sink),
+        COMPACT_SYSCALL_EVENT_SIZE => return parse_compact_syscall_event(data, sink),
+        COMPACT_BLOCK_MERGE_EVENT_SIZE => return parse_compact_block_merge_event(data, sink),
+        COMPACT_NET_IO_EVENT_SIZE => return parse_compact_net_io_event(data, sink),
+        COMPACT_NET_IO_METRICS_EVENT_SIZE => return parse_compact_net_io_metrics_event(data, sink),
+        COMPACT_DISK_IO_EVENT_SIZE => return parse_compact_disk_io_event(data, sink),
+        _ => {}
     }
 
     if data.len() < HEADER_SIZE {
