@@ -2013,6 +2013,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `0f9dec8`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 168: HTTP compress: take Vec<u8> to skip none-copy (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP NDJSON `compression: none` allocates and memcpys
+  the serialized `Vec<u8>` into a new buffer. Moving the `Vec<u8>` into
+  `compress` lets the none branch return the original buffer.
+- **Change**: `compress(Vec<u8>, ...)` returns the moved buffer for
+  `none`. (commits `d206ca0`, `8c22912`)
+- **Result (post-recalibration)**: 14.48s vs 15.86s master, CV 0.6%/0.4% —
+  **-8.70% vs master** at master=15.86s (slow runner). Below slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `8222f52`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
