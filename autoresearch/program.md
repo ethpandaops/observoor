@@ -1950,6 +1950,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `e0f260e`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 163: Preallocate gzip/zlib encoder buffers (2026-04-27) — REVERTED
+- **Hypothesis**: gzip/zlib HTTP encoders reallocate while compressing.
+  Preallocating `Vec::with_capacity(data.len())` should reduce growth.
+- **Change**: `GzEncoder`/`ZlibEncoder` start from `Vec::with_capacity`.
+  (commits `d758c66`, `6a9f4ff`)
+- **Result (post-recalibration)**: 14.38s vs 15.89s master, CV 0.4%/0.1% —
+  **-9.50% vs master** at master=15.89s (slow runner). Inside slow band
+  -9% to -10%. Bench config doesn't enable compression, so this code path
+  is unreachable — measurement reflects pure noise.
+- **Verdict**: REVERTED. Branch reset to `b833bf5`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
