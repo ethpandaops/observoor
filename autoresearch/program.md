@@ -1974,6 +1974,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `b07d17e`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 165: Direct ctx-> reads in block tracepoints (2026-04-27) — REVERTED
+- **Hypothesis**: Block tracepoints use `bpf_probe_read_kernel` to extract
+  fields from a directly-readable tracepoint context. Using `ctx->field`
+  drops the helper calls.
+- **Change**: Block completion/merge tracepoints read `ctx->dev`,
+  `ctx->sector`, `ctx->nr_sector`, `ctx->rwbs[0]` directly. (commits
+  `74d6848`, `82e1de5`)
+- **Result (post-recalibration)**: 14.72s vs 16.26s master, CV 0.3%/0.5% —
+  **-9.47% vs master** at master=16.26s (slow runner). Inside slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `2956c2d`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
