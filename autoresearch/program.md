@@ -2000,6 +2000,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `7650a3d`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 167: Run-length client totals in parsed batch (2026-04-27) — REVERTED
+- **Hypothesis**: Per-event indexed writes into `client_totals` accumulate
+  one client at a time. Run-length buffering same-client runs and writing
+  the count once per run reduces hot-loop indexed array stores.
+- **Change**: `ParsedEventBatch` buffers `pending_client_type` /
+  `pending_client_count`, flushes to `client_totals` on switch and at end.
+  (commits `1384c51`, `8f42aa5`)
+- **Result (post-recalibration)**: 14.51s vs 15.95s master, CV 0.3%/0.4% —
+  **-9.03% vs master** at master=15.95s (slow runner). Inside slow band
+  -9% to -10% at lower edge.
+- **Verdict**: REVERTED. Branch reset to `0f9dec8`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
