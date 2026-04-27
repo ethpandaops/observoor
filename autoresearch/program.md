@@ -2025,6 +2025,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `8222f52`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 169: Cache HTTP queue capacity per batch (2026-04-27) — REVERTED
+- **Hypothesis**: HTTP exporter calls `mpsc::Sender::capacity()` before
+  every metric item to check whether the queue is full. Caching remaining
+  capacity once per `MetricBatch` and decrementing locally avoids the
+  per-item atomic load.
+- **Change**: Cache `remaining_capacity` per batch; refresh only when zero.
+  (commits `6a7d152`, `e6c64d8`)
+- **Result (post-recalibration)**: 12.10s vs 13.44s master, CV 0.4%/0.4% —
+  **-9.97% vs master** at master=13.44s (medium runner). Inside medium
+  band -9.5% to -10.5%; doesn't clear 0.5pp threshold.
+- **Verdict**: REVERTED. Branch reset to `d1ce221`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
