@@ -1962,6 +1962,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `b833bf5`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 164: Skip sched_on_ts delete on miss (2026-04-27) — REVERTED
+- **Hypothesis**: `trace_sched_switch` always deletes `sched_on_ts` for the
+  switching-out tid even when the prior lookup missed; gating the delete
+  on a successful lookup avoids an unnecessary BPF hash op.
+- **Change**: `bpf_map_delete_elem(&sched_on_ts, ...)` now only fires when
+  `bpf_map_lookup_elem` returned a value. (commits `3dfc2e1`, `b7dcae6`)
+- **Result (post-recalibration)**: 15.06s vs 16.62s master, CV 0.7%/0.4% —
+  **-9.39% vs master** at master=16.62s (slow runner). Inside slow band
+  -9% to -10%.
+- **Verdict**: REVERTED. Branch reset to `b07d17e`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
