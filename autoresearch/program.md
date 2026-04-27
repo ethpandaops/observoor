@@ -1987,6 +1987,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `2956c2d`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 166: Compact fsync to 9-byte implicit-tag record (2026-04-27) — REVERTED
+- **Hypothesis**: `EVENT_SYSCALL_FSYNC` records still use the long
+  syscall form. A 9-byte implicit-tag compact record cuts ring bandwidth
+  for fsync.
+- **Change**: BPF emits a 9-byte fsync compact record; parser handles new
+  tag. (commit `c308ce2`)
+- **Result (post-recalibration)**: 14.56s vs 16.01s master, CV 0.4%/0.4% —
+  **-9.06% vs master** at master=16.01s (slow runner). Inside slow band
+  -9% to -10% at the edge. fsync isn't exercised by stress-bench so this
+  is effectively a no-op on this benchmark.
+- **Verdict**: REVERTED. Branch reset to `7650a3d`.
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
