@@ -2038,6 +2038,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Verdict**: REVERTED. Branch reset to `d1ce221`.
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 170: Match-dispatch compact parser lengths (2026-04-27)
+- **Hypothesis**: `parse_event_with_sink` checks each compact record size with
+  a chain of repeated `data.len() == ...` branches before falling back to
+  legacy header parsing. A single `match data.len()` should let the compiler
+  emit one compact length dispatch, reducing parser branch work for every
+  ring-buffer sample without changing event semantics.
+- **Change**: Replace the compact-record length `if` chain in `parse.rs` with
+  one `match data.len()` dispatch.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 18fb092
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
