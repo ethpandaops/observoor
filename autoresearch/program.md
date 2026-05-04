@@ -2154,6 +2154,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 4b2041c
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 177: Lower hot-event default sampling rate to 2.5% (2026-05-04)
+- **Hypothesis**: Iteration 176 still stopped short of the 50% goal. Retaining
+  one in forty hot events approximates the lower bound for hot-event userspace
+  volume while still preserving deterministic samples and metadata, and should
+  reveal how much fixed scheduler/process/export overhead remains.
+- **Change**: Change the default hot-event sampling rule from `rate = 0.1`
+  (`nth = 10`) to `rate = 0.025` (`nth = 40`).
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 03f661d
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
