@@ -2095,8 +2095,11 @@ upper bound of the corresponding band by ~0.5pp.
   trading larger payloads for lower default CPU overhead.
 - **Change**: Change the HTTP exporter default compression from `gzip` to
   `none`; explicit config values remain unchanged.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 14.73s vs 16.20s master, CV 0.5%/0.2% —
+  **-9.07% vs master** at master=16.20s (slow runner). This sits inside the
+  slow neutral band (-9% to -10%) and does not improve the current HWM.
+- **Verdict**: REVERTED. Code reverted in `b57f05e`; gzip default CPU is not
+  a meaningful share of measured overhead in this benchmark.
 - **Commit**: 3309aec
 - **Author**: codex / gpt-5.5 xhigh
 
