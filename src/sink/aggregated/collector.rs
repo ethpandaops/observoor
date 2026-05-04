@@ -1471,35 +1471,15 @@ fn read_proc_io_snapshot(pid: u32) -> Option<ProcIOSnapshot> {
 
 #[cfg(feature = "bpf")]
 fn parse_proc_io_snapshot(io: &str) -> Option<ProcIOSnapshot> {
-    let mut snapshot = ProcIOSnapshot {
-        rchar_bytes: 0,
-        wchar_bytes: 0,
-        syscr: 0,
-        syscw: 0,
-        read_bytes: 0,
-        write_bytes: 0,
-        cancelled_write_bytes: 0,
+    let snapshot = ProcIOSnapshot {
+        rchar_bytes: parse_proc_io_u64(io, "rchar:").unwrap_or(0),
+        wchar_bytes: parse_proc_io_u64(io, "wchar:").unwrap_or(0),
+        syscr: parse_proc_io_u64(io, "syscr:").unwrap_or(0),
+        syscw: parse_proc_io_u64(io, "syscw:").unwrap_or(0),
+        read_bytes: parse_proc_io_u64(io, "read_bytes:").unwrap_or(0),
+        write_bytes: parse_proc_io_u64(io, "write_bytes:").unwrap_or(0),
+        cancelled_write_bytes: parse_proc_io_i64(io, "cancelled_write_bytes:").unwrap_or(0),
     };
-
-    for line in io.lines() {
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim();
-
-        match key {
-            "rchar" => snapshot.rchar_bytes = value.parse::<u64>().unwrap_or(0),
-            "wchar" => snapshot.wchar_bytes = value.parse::<u64>().unwrap_or(0),
-            "syscr" => snapshot.syscr = value.parse::<u64>().unwrap_or(0),
-            "syscw" => snapshot.syscw = value.parse::<u64>().unwrap_or(0),
-            "read_bytes" => snapshot.read_bytes = value.parse::<u64>().unwrap_or(0),
-            "write_bytes" => snapshot.write_bytes = value.parse::<u64>().unwrap_or(0),
-            "cancelled_write_bytes" => {
-                snapshot.cancelled_write_bytes = value.parse::<i64>().unwrap_or(0);
-            }
-            _ => {}
-        }
-    }
 
     if snapshot.rchar_bytes == 0
         && snapshot.wchar_bytes == 0
@@ -1577,6 +1557,28 @@ fn parse_proc_status_u64(status: &str, key: &str) -> Option<u64> {
         if let Some(rest) = line.strip_prefix(key) {
             let mut parts = rest.split_whitespace();
             return parts.next()?.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_io_u64(io: &str, key: &str) -> Option<u64> {
+    for line in io.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.split_whitespace();
+            return parts.next()?.parse::<u64>().ok();
+        }
+    }
+    None
+}
+
+#[cfg(feature = "bpf")]
+fn parse_proc_io_i64(io: &str, key: &str) -> Option<i64> {
+    for line in io.lines() {
+        if let Some(rest) = line.strip_prefix(key) {
+            let mut parts = rest.split_whitespace();
+            return parts.next()?.parse::<i64>().ok();
         }
     }
     None
