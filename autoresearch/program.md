@@ -2054,6 +2054,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 18fb092
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 171: Queue HTTP metric batches as NDJSON chunks (2026-05-04)
+- **Hypothesis**: With the recalibrated benchmark exercising the HTTP exporter
+  every 100ms, `export()` boxes and enqueues one `HttpExportItem` per metric,
+  then the worker serializes those items back into NDJSON. Serializing the
+  whole `MetricBatch` to one NDJSON buffer before enqueueing preserves the wire
+  format while removing per-metric boxes and most mpsc operations.
+- **Change**: Replace per-metric HTTP queue items with one serialized
+  `AggregatedMetrics(Vec<u8>)` NDJSON chunk per collected `MetricBatch`.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: d678af5
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
