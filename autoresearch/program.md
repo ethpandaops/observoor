@@ -2130,8 +2130,11 @@ upper bound of the corresponding band by ~0.5pp.
   metadata.
 - **Change**: Change the default hot-event sampling rule from `rate = 0.5`
   (`nth = 2`) to `rate = 0.25` (`nth = 4`).
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 10.30s vs 13.74s master, CV 0.5%/0.6% —
+  **-25.04% vs master** at master=13.74s (medium runner). This extends the
+  sampling HWM by ~6.5pp and is far outside the runner noise band.
+- **Verdict**: KEPT. The event-volume savings continue to scale when retaining
+  one in four hot events, with scheduler metrics still unsampled/exact.
 - **Commit**: 86ff9d2
 - **Author**: codex / gpt-5.5 xhigh
 
@@ -2168,8 +2171,8 @@ both sides — clean.
 **Post-recalibration baseline (HTTP exporter active):**
 - Fast: -13.68% (iter 127, master=11.04s)
 - Slow: -18.59% (iter 174, master=16.78s)
-- Medium HWM still to be re-established post-recalibration.
-**48 kept iterations.**
+- Medium: -25.04% (iter 175, master=13.74s)
+**49 kept iterations.**
 
 ## Rules
 
