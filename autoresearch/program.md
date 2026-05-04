@@ -2087,6 +2087,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 9e307b6
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 173: Default HTTP export compression to none (2026-05-04)
+- **Hypothesis**: The recalibrated benchmark enables the HTTP exporter but does
+  not set `sinks.aggregated.http.compression`, so both master and head use the
+  code default. Gzip compression is CPU work inside observoor's measured
+  process; making the default `none` preserves exported NDJSON content while
+  trading larger payloads for lower default CPU overhead.
+- **Change**: Change the HTTP exporter default compression from `gzip` to
+  `none`; explicit config values remain unchanged.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 3309aec
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
