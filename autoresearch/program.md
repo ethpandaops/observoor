@@ -2046,8 +2046,11 @@ upper bound of the corresponding band by ~0.5pp.
   ring-buffer sample without changing event semantics.
 - **Change**: Replace the compact-record length `if` chain in `parse.rs` with
   one `match data.len()` dispatch.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 11.19s vs 12.59s master, CV 0.8%/1.4% —
+  **-11.12% vs master** at master=12.59s (between fast/medium runner). This
+  clears the empirical medium upper band by ~0.6pp and is a real improvement
+  over the parser branch chain.
+- **Verdict**: KEPT.
 - **Commit**: 18fb092
 - **Author**: codex / gpt-5.5 xhigh
 
