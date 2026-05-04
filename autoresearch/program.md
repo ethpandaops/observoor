@@ -2177,8 +2177,12 @@ upper bound of the corresponding band by ~0.5pp.
   cost of sampled CPU-utilization metrics.
 - **Change**: Add `sched_switch` and `sched_runqueue` to the default nth
   sampling event rules, using the existing `rate = 0.1` profile.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 4.70s vs 13.43s master, CV 1.2%/0.6% —
+  **-65.00% vs master** at master=13.43s (medium runner). This clears the
+  50% goal by a wide margin and is far beyond the current HWM/noise floor.
+- **Verdict**: KEPT. Sampling scheduler events is the decisive lever, but it
+  changes CPU-utilization metrics from exact to sampled-by-default; exported
+  sampling metadata is required for downstream interpretation.
 - **Commit**: 9f91098
 - **Author**: codex / gpt-5.5 xhigh
 
@@ -2215,8 +2219,8 @@ both sides — clean.
 **Post-recalibration baseline (HTTP exporter active):**
 - Fast: -13.68% (iter 127, master=11.04s)
 - Slow: -18.59% (iter 174, master=16.78s)
-- Medium: -37.95% (iter 176, master=12.49s)
-**50 kept iterations.**
+- Medium: -65.00% (iter 178, master=13.43s)
+**51 kept iterations.**
 
 ## Rules
 
