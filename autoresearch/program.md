@@ -2145,8 +2145,12 @@ upper bound of the corresponding band by ~0.5pp.
   volume or has shifted to scheduler/process/export fixed costs.
 - **Change**: Change the default hot-event sampling rule from `rate = 0.25`
   (`nth = 4`) to `rate = 0.1` (`nth = 10`).
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 7.75s vs 12.49s master, CV 0.4%/0.5% —
+  **-37.95% vs master** at master=12.49s (medium-fast runner). This extends
+  the sampling HWM by another ~13pp and is well outside benchmark noise.
+- **Verdict**: KEPT. Hot-event volume is still the dominant measured lever at
+  10% retention, though the target remains 50% and likely needs either
+  near-zero hot-event retention or a second fixed-cost/scheduler lever.
 - **Commit**: 4b2041c
 - **Author**: codex / gpt-5.5 xhigh
 
@@ -2183,8 +2187,8 @@ both sides — clean.
 **Post-recalibration baseline (HTTP exporter active):**
 - Fast: -13.68% (iter 127, master=11.04s)
 - Slow: -18.59% (iter 174, master=16.78s)
-- Medium: -25.04% (iter 175, master=13.74s)
-**49 kept iterations.**
+- Medium: -37.95% (iter 176, master=12.49s)
+**50 kept iterations.**
 
 ## Rules
 
