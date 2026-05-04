@@ -2138,6 +2138,18 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 86ff9d2
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 176: Lower hot-event default sampling rate to 10% (2026-05-04)
+- **Hypothesis**: The 25% hot-event profile still leaves the benchmark at
+  roughly 75% of master CPU. Retaining one in ten hot events should show
+  whether the remaining measured overhead is still dominated by sampled event
+  volume or has shifted to scheduler/process/export fixed costs.
+- **Change**: Change the default hot-event sampling rule from `rate = 0.25`
+  (`nth = 4`) to `rate = 0.1` (`nth = 10`).
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 4b2041c
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
