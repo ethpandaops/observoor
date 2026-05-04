@@ -2079,8 +2079,11 @@ upper bound of the corresponding band by ~0.5pp.
   metrics.
 - **Change**: Parse `/proc/io` key/value lines once and assign all
   `ProcIOSnapshot` fields from one match.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 15.21s vs 16.77s master, CV 0.4%/0.4% —
+  **-9.30% vs master** at master=16.77s (slow runner). This lands inside
+  the slow neutral band (-9% to -10%) and is well below the current HWM.
+- **Verdict**: REVERTED. Code reverted in `e958a93`; `/proc/io` parsing is
+  not a meaningful share of the benchmark CPU.
 - **Commit**: 9e307b6
 - **Author**: codex / gpt-5.5 xhigh
 
