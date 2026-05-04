@@ -2062,8 +2062,12 @@ upper bound of the corresponding band by ~0.5pp.
   format while removing per-metric boxes and most mpsc operations.
 - **Change**: Replace per-metric HTTP queue items with one serialized
   `AggregatedMetrics(Vec<u8>)` NDJSON chunk per collected `MetricBatch`.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 12.49s vs 14.09s master, CV 1.3%/0.9% —
+  **-11.36% vs master** at master=14.09s (medium runner). This is only
+  0.24pp better than iter 170's -11.12%, well inside the benchmark noise
+  floor despite clearing the medium neutral band.
+- **Verdict**: REVERTED. Code reverted in `b2c0b9e`; not enough signal to
+  keep the HTTP queue shape change.
 - **Commit**: d678af5
 - **Author**: codex / gpt-5.5 xhigh
 
