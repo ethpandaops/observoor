@@ -215,7 +215,7 @@ pub struct HostSpecsJson {
 
 #[derive(Debug, Clone)]
 enum HttpExportItem {
-    AggregatedMetric(Box<AggregatedMetricJson>),
+    AggregatedMetrics(Vec<u8>),
     SyncState(SyncStateJson),
     HostSpecs(Box<HostSpecsJson>),
 }
@@ -856,6 +856,68 @@ impl HttpExporter {
             0
         }
     }
+
+    fn metric_item_count(batch: &MetricBatch) -> usize {
+        batch.latency.len()
+            + batch.counter.len()
+            + batch.gauge.len()
+            + batch.cpu_util.len()
+            + Self::memory_usage_len(batch)
+            + Self::process_io_usage_len(batch)
+            + Self::process_fd_usage_len(batch)
+            + Self::process_sched_usage_len(batch)
+    }
+
+    fn write_metric_json_line(buf: &mut Vec<u8>, metric: AggregatedMetricJson) -> Result<()> {
+        serde_json::to_writer(&mut *buf, &metric).context("serializing metric to JSON")?;
+        buf.push(b'\n');
+        Ok(())
+    }
+
+    fn batch_to_ndjson(batch: &MetricBatch, shared: &SharedBatchStrings) -> Result<Vec<u8>> {
+        let metric_count = Self::metric_item_count(batch);
+        let mut buf = Vec::with_capacity(metric_count.saturating_mul(256));
+
+        for m in &batch.latency {
+            Self::write_metric_json_line(&mut buf, Self::latency_to_json(m, shared))?;
+        }
+
+        for m in &batch.counter {
+            Self::write_metric_json_line(&mut buf, Self::counter_to_json(m, shared))?;
+        }
+
+        for m in &batch.gauge {
+            Self::write_metric_json_line(&mut buf, Self::gauge_to_json(m, shared))?;
+        }
+
+        for m in &batch.cpu_util {
+            Self::write_metric_json_line(&mut buf, Self::cpu_util_to_json(m, shared))?;
+        }
+
+        #[cfg(feature = "bpf")]
+        {
+            for m in &batch.memory_usage {
+                Self::write_metric_json_line(&mut buf, Self::memory_usage_to_json(m, shared))?;
+            }
+
+            for m in &batch.process_io_usage {
+                Self::write_metric_json_line(&mut buf, Self::process_io_usage_to_json(m, shared))?;
+            }
+
+            for m in &batch.process_fd_usage {
+                Self::write_metric_json_line(&mut buf, Self::process_fd_usage_to_json(m, shared))?;
+            }
+
+            for m in &batch.process_sched_usage {
+                Self::write_metric_json_line(
+                    &mut buf,
+                    Self::process_sched_usage_to_json(m, shared),
+                )?;
+            }
+        }
+
+        Ok(buf)
+    }
 }
 
 // --- Exporter interface (called by Exporter enum dispatch) ---
@@ -1048,173 +1110,28 @@ impl HttpExporter {
             return Ok(());
         };
 
-        let mut dropped = 0usize;
-        let memory_usage_len = Self::memory_usage_len(batch);
-        let process_io_usage_len = Self::process_io_usage_len(batch);
-        let process_fd_usage_len = Self::process_fd_usage_len(batch);
-        let process_sched_usage_len = Self::process_sched_usage_len(batch);
-        let snapshot_tail_len = memory_usage_len
-            + process_io_usage_len
-            + process_fd_usage_len
-            + process_sched_usage_len;
-
-        // Convert all metrics to JSON items and enqueue.
-        for (i, m) in batch.latency.iter().enumerate() {
-            if tx.capacity() == 0 {
-                dropped += batch.latency.len() - i
-                    + batch.counter.len()
-                    + batch.gauge.len()
-                    + batch.cpu_util.len()
-                    + snapshot_tail_len;
-                break;
-            }
-
-            let json = Self::latency_to_json(m, &shared);
-            let item = HttpExportItem::AggregatedMetric(Box::new(json));
-            if tx.try_send(item).is_err() {
-                dropped += batch.latency.len() - i
-                    + batch.counter.len()
-                    + batch.gauge.len()
-                    + batch.cpu_util.len()
-                    + snapshot_tail_len;
-                break;
-            }
+        let metric_count = Self::metric_item_count(batch);
+        if metric_count == 0 {
+            return Ok(());
         }
 
-        if dropped == 0 {
-            for (i, m) in batch.counter.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.counter.len() - i
-                        + batch.gauge.len()
-                        + batch.cpu_util.len()
-                        + snapshot_tail_len;
-                    break;
-                }
-
-                let json = Self::counter_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.counter.len() - i
-                        + batch.gauge.len()
-                        + batch.cpu_util.len()
-                        + snapshot_tail_len;
-                    break;
-                }
-            }
+        if tx.capacity() == 0 {
+            tracing::warn!(
+                dropped = metric_count,
+                "HTTP export queue full, dropping items"
+            );
+            return Ok(());
         }
 
-        if dropped == 0 {
-            for (i, m) in batch.gauge.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
-                    break;
-                }
-
-                let json = Self::gauge_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.gauge.len() - i + batch.cpu_util.len() + snapshot_tail_len;
-                    break;
-                }
-            }
-        }
-
-        if dropped == 0 {
-            for (i, m) in batch.cpu_util.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.cpu_util.len() - i + snapshot_tail_len;
-                    break;
-                }
-
-                let json = Self::cpu_util_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.cpu_util.len() - i + snapshot_tail_len;
-                    break;
-                }
-            }
-        }
-
-        #[cfg(feature = "bpf")]
-        if dropped == 0 {
-            for (i, m) in batch.memory_usage.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.memory_usage.len() - i
-                        + process_io_usage_len
-                        + process_fd_usage_len
-                        + process_sched_usage_len;
-                    break;
-                }
-
-                let json = Self::memory_usage_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.memory_usage.len() - i
-                        + process_io_usage_len
-                        + process_fd_usage_len
-                        + process_sched_usage_len;
-                    break;
-                }
-            }
-        }
-
-        #[cfg(feature = "bpf")]
-        if dropped == 0 {
-            for (i, m) in batch.process_io_usage.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.process_io_usage.len() - i
-                        + process_fd_usage_len
-                        + process_sched_usage_len;
-                    break;
-                }
-
-                let json = Self::process_io_usage_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.process_io_usage.len() - i
-                        + process_fd_usage_len
-                        + process_sched_usage_len;
-                    break;
-                }
-            }
-        }
-
-        #[cfg(feature = "bpf")]
-        if dropped == 0 {
-            for (i, m) in batch.process_fd_usage.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
-                    break;
-                }
-
-                let json = Self::process_fd_usage_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.process_fd_usage.len() - i + process_sched_usage_len;
-                    break;
-                }
-            }
-        }
-
-        #[cfg(feature = "bpf")]
-        if dropped == 0 {
-            for (i, m) in batch.process_sched_usage.iter().enumerate() {
-                if tx.capacity() == 0 {
-                    dropped += batch.process_sched_usage.len() - i;
-                    break;
-                }
-
-                let json = Self::process_sched_usage_to_json(m, &shared);
-                let item = HttpExportItem::AggregatedMetric(Box::new(json));
-                if tx.try_send(item).is_err() {
-                    dropped += batch.process_sched_usage.len() - i;
-                    break;
-                }
-            }
-        }
-
-        if dropped > 0 {
-            tracing::warn!(dropped, "HTTP export queue full, dropping items");
+        let ndjson = Self::batch_to_ndjson(batch, &shared)?;
+        if tx
+            .try_send(HttpExportItem::AggregatedMetrics(ndjson))
+            .is_err()
+        {
+            tracing::warn!(
+                dropped = metric_count,
+                "HTTP export queue full, dropping items"
+            );
         }
 
         Ok(())
@@ -1315,19 +1232,20 @@ async fn send_batch(
     let mut buf = Vec::with_capacity(items.len() * 256);
     for item in &items {
         match item {
-            HttpExportItem::AggregatedMetric(metric) => {
-                serde_json::to_writer(&mut buf, metric).context("serializing metric to JSON")?;
+            HttpExportItem::AggregatedMetrics(metrics) => {
+                buf.extend_from_slice(metrics);
             }
             HttpExportItem::SyncState(sync_state) => {
                 serde_json::to_writer(&mut buf, sync_state)
                     .context("serializing sync-state to JSON")?;
+                buf.push(b'\n');
             }
             HttpExportItem::HostSpecs(host_specs) => {
                 serde_json::to_writer(&mut buf, host_specs)
                     .context("serializing host-specs to JSON")?;
+                buf.push(b'\n');
             }
         }
-        buf.push(b'\n');
     }
 
     let raw_len = buf.len();
