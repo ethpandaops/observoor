@@ -2103,6 +2103,20 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 3309aec
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 174: Default hot-event nth sampling at 50% (2026-05-04)
+- **Hypothesis**: High-volume syscall, network, disk, page-fault, and FD events
+  dominate the ring-buffer and userspace aggregation path. The code already
+  records sampling metadata, so defaulting these hot families to deterministic
+  nth sampling at 50% should reduce kernel-to-userspace volume while leaving
+  scheduler events exact for CPU accounting.
+- **Change**: Add default per-event sampling rules for hot event families with
+  `mode = nth` and `rate = 0.5`; scheduler and cold event families remain
+  unsampled unless configured.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 6f9a124
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
