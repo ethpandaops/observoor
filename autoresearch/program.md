@@ -2161,8 +2161,11 @@ upper bound of the corresponding band by ~0.5pp.
   reveal how much fixed scheduler/process/export overhead remains.
 - **Change**: Change the default hot-event sampling rule from `rate = 0.1`
   (`nth = 10`) to `rate = 0.025` (`nth = 40`).
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 9.38s vs 13.76s master, CV 0.8%/0.7% —
+  **-31.83% vs master** at master=13.76s (medium runner). This regresses
+  against iter 176's -37.95% HWM despite low variance.
+- **Verdict**: REVERTED. At 2.5% retention, extra nth-counter work appears to
+  outweigh the remaining retained-event savings; code reverted in `6e752e2`.
 - **Commit**: 03f661d
 - **Author**: codex / gpt-5.5 xhigh
 
