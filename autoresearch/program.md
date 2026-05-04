@@ -2169,6 +2169,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 03f661d
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 178: Add scheduler events to the 10% default sampling profile (2026-05-04)
+- **Hypothesis**: Hot-event-only sampling topped out below the 50% target.
+  The scheduler stream is the next high-volume userspace path in the benchmark.
+  Sampling `sched_switch` and `sched_runqueue` at the same deterministic 10%
+  rate should reduce scheduler aggregation and export work, at the explicit
+  cost of sampled CPU-utilization metrics.
+- **Change**: Add `sched_switch` and `sched_runqueue` to the default nth
+  sampling event rules, using the existing `rate = 0.1` profile.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 9f91098
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
