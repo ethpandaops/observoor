@@ -611,6 +611,8 @@ fn default_sampling_event_rules() -> HashMap<String, EventSamplingRule> {
         "disk_io",
         "net_tx",
         "net_rx",
+        "sched_switch",
+        "sched_runqueue",
         "page_fault",
         "fd_open",
         "fd_close",
@@ -1465,6 +1467,26 @@ mod tests {
         assert_eq!(disk.mode, EventSamplingMode::Nth);
         assert_eq!(disk.nth, 10);
         assert!((disk.rate - 0.1).abs() < 0.0001);
+
+        let sched_switch = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::SchedSwitch)
+            .expect("sampling should resolve");
+        assert_eq!(sched_switch.mode, EventSamplingMode::Nth);
+        assert_eq!(sched_switch.nth, 10);
+        assert!((sched_switch.rate - 0.1).abs() < 0.0001);
+
+        let sched_runqueue = cfg
+            .sinks
+            .aggregated
+            .sampling
+            .resolved_rule_for_event(EventType::SchedRunqueue)
+            .expect("sampling should resolve");
+        assert_eq!(sched_runqueue.mode, EventSamplingMode::Nth);
+        assert_eq!(sched_runqueue.nth, 10);
+        assert!((sched_runqueue.rate - 0.1).abs() < 0.0001);
     }
 
     #[test]
