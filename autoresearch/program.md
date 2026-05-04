@@ -2112,8 +2112,13 @@ upper bound of the corresponding band by ~0.5pp.
 - **Change**: Add default per-event sampling rules for hot event families with
   `mode = nth` and `rate = 0.5`; scheduler and cold event families remain
   unsampled unless configured.
-- **Result**: TBD (CI pending)
-- **Verdict**: TBD
+- **Result (post-recalibration)**: 13.66s vs 16.78s master, CV 0.4%/1.0% —
+  **-18.59% vs master** at master=16.78s (slow runner). This clears the
+  previous slow-runner HWM by a wide margin and is well outside benchmark
+  noise.
+- **Verdict**: KEPT. This is an explicit fidelity/CPU tradeoff: hot event
+  counts are deterministically sampled by default and sampling metadata is
+  exported so downstream consumers can scale/interpret sampled metrics.
 - **Commit**: 6f9a124
 - **Author**: codex / gpt-5.5 xhigh
 
@@ -2149,9 +2154,9 @@ both sides — clean.
 
 **Post-recalibration baseline (HTTP exporter active):**
 - Fast: -13.68% (iter 127, master=11.04s)
-- Slow: -9.87% (sanity at master=15.81s)
+- Slow: -18.59% (iter 174, master=16.78s)
 - Medium HWM still to be re-established post-recalibration.
-**47 kept iterations.**
+**48 kept iterations.**
 
 ## Rules
 
