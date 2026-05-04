@@ -602,7 +602,30 @@ fn default_sampling_rate() -> f32 {
 }
 
 fn default_sampling_event_rules() -> HashMap<String, EventSamplingRule> {
-    HashMap::new()
+    [
+        "syscall_read",
+        "syscall_write",
+        "syscall_futex",
+        "syscall_mmap",
+        "syscall_fsync",
+        "disk_io",
+        "net_tx",
+        "net_rx",
+        "page_fault",
+        "fd_open",
+        "fd_close",
+    ]
+    .into_iter()
+    .map(|event| {
+        (
+            event.to_string(),
+            EventSamplingRule {
+                mode: EventSamplingMode::Nth,
+                rate: 0.5,
+            },
+        )
+    })
+    .collect()
 }
 
 fn default_resolution_interval() -> Duration {
@@ -1419,7 +1442,9 @@ mod tests {
             .sampling
             .resolved_rule_for_event(EventType::SyscallFutex)
             .expect("sampling should resolve");
-        assert_eq!(futex, ResolvedSamplingRule::none());
+        assert_eq!(futex.mode, EventSamplingMode::Nth);
+        assert_eq!(futex.nth, 2);
+        assert!((futex.rate - 0.5).abs() < 0.0001);
 
         let net_tx = cfg
             .sinks
@@ -1427,7 +1452,9 @@ mod tests {
             .sampling
             .resolved_rule_for_event(EventType::NetTX)
             .expect("sampling should resolve");
-        assert_eq!(net_tx, ResolvedSamplingRule::none());
+        assert_eq!(net_tx.mode, EventSamplingMode::Nth);
+        assert_eq!(net_tx.nth, 2);
+        assert!((net_tx.rate - 0.5).abs() < 0.0001);
 
         let disk = cfg
             .sinks
@@ -1435,7 +1462,9 @@ mod tests {
             .sampling
             .resolved_rule_for_event(EventType::DiskIO)
             .expect("sampling should resolve");
-        assert_eq!(disk, ResolvedSamplingRule::none());
+        assert_eq!(disk.mode, EventSamplingMode::Nth);
+        assert_eq!(disk.nth, 2);
+        assert!((disk.rate - 0.5).abs() < 0.0001);
     }
 
     #[test]
