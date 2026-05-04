@@ -2071,6 +2071,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: d678af5
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 172: Single-pass `/proc/io` snapshot parsing (2026-05-04)
+- **Hypothesis**: Process I/O snapshots are collected on each 100ms export
+  window when the HTTP exporter is enabled. `parse_proc_io_snapshot` scans the
+  same `/proc/<pid>/io` text once per field; filling the snapshot in one pass
+  removes repeated line iteration on the flush path without changing exported
+  metrics.
+- **Change**: Parse `/proc/io` key/value lines once and assign all
+  `ProcIOSnapshot` fields from one match.
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 9e307b6
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
