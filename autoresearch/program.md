@@ -2122,6 +2122,19 @@ upper bound of the corresponding band by ~0.5pp.
 - **Commit**: 6f9a124
 - **Author**: codex / gpt-5.5 xhigh
 
+### Iteration 175: Lower hot-event default sampling rate to 25% (2026-05-04)
+- **Hypothesis**: Iteration 174 showed that dropping hot event families before
+  ring-buffer emission is the strongest lever so far. Lowering the same
+  deterministic nth sampling profile from 50% to 25% should reduce hot event
+  volume further while preserving scheduler exactness and explicit sampling
+  metadata.
+- **Change**: Change the default hot-event sampling rule from `rate = 0.5`
+  (`nth = 2`) to `rate = 0.25` (`nth = 4`).
+- **Result**: TBD (CI pending)
+- **Verdict**: TBD
+- **Commit**: 86ff9d2
+- **Author**: codex / gpt-5.5 xhigh
+
 ---
 
 **NOTE**: Per-iteration deltas above were measured on different CI runners with
