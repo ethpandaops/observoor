@@ -634,7 +634,7 @@ fn default_flush_interval() -> Duration {
 }
 
 fn default_compression() -> String {
-    "gzip".to_string()
+    "none".to_string()
 }
 
 fn default_http_batch_size() -> usize {
