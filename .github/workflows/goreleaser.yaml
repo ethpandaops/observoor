@@ -6,65 +6,22 @@ on:
       - '*'
 
 jobs:
-  build:
-    runs-on:
-      - self-hosted-ghr
-      - size-l-x64
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-          - target: aarch64-unknown-linux-gnu
-    steps:
-      - name: Checkout
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.88.0"
-          targets: ${{ matrix.target }}
-
-      - name: Install cross
-        run: cargo install cross --git https://github.com/cross-rs/cross
-
-      - name: Build
-        run: cross build --release --target ${{ matrix.target }}
-        env:
-          GIT_COMMIT: ${{ github.sha }}
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.target }}
-          path: target/${{ matrix.target }}/release/observoor
-
   release:
-    needs: build
     permissions:
-      contents: write
-    runs-on:
-      - self-hosted-ghr
-      - size-l-x64
+      contents: write      # GitHub release
+      packages: write      # push to ghcr.io/ethpandaops
+      id-token: write      # attest, and authenticate to the image mirror
+      attestations: write
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.attest.outputs.image }}
+      digests: ${{ steps.attest.outputs.digests }}
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           fetch-depth: 0
           ref: ${{ github.ref }}
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: artifacts
-
-      - name: Stage binaries for goreleaser
-        run: |
-          mkdir -p target/x86_64-unknown-linux-gnu/release
-          mkdir -p target/aarch64-unknown-linux-gnu/release
-          cp artifacts/binary-x86_64-unknown-linux-gnu/observoor target/x86_64-unknown-linux-gnu/release/observoor
-          cp artifacts/binary-aarch64-unknown-linux-gnu/observoor target/aarch64-unknown-linux-gnu/release/observoor
-          chmod +x target/*/release/observoor
 
       - name: Derive release suffix from tag (if it exists)
         run: |
@@ -88,6 +45,22 @@ jobs:
         with:
           toolchain: "1.88.0"
 
+      # Goreleaser's rust builder cross-compiles both targets here with
+      # cargo-zigbuild. build.rs compiles the BPF programs with clang and
+      # llvm-strip.
+      - name: Install BPF build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get -y install clang llvm
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: 0.14.1
+
+      - name: Install cargo-zigbuild
+        run: cargo install --locked cargo-zigbuild --version 0.24.1
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
 
@@ -102,11 +75,12 @@ jobs:
         with:
           endpoint: builders
 
-      - name: Login to DockerHub
+      - name: Login to GHCR
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Update GoReleaser config
         run: |
@@ -129,3 +103,28 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_SUFFIX: ${{ env.RELEASE_SUFFIX }}
+
+      - name: Attest images
+        id: attest
+        uses: ethpandaops/actions/mirror-image@738aeadbcdc54f1c9af659d35f8ef29dd5c0fae6
+        with:
+          goreleaser-artifacts: dist/artifacts.json
+          mirror: "false"
+
+  # Separate job, so "Re-run failed jobs" retries only the mirror and never
+  # rebuilds the images.
+  mirror:
+    needs: release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write      # authenticate to the image mirror
+    steps:
+      - name: Mirror to Docker Hub
+        uses: ethpandaops/actions/mirror-image@738aeadbcdc54f1c9af659d35f8ef29dd5c0fae6
+        with:
+          image: ${{ needs.release.outputs.image }}
+          tags: ${{ needs.release.outputs.digests }}
+          attest: "false"
+          mirror-url: ${{ secrets.IMAGE_MIRROR_URL }}

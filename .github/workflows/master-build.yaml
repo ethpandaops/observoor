@@ -5,8 +5,14 @@ on:
     branches:
       - master
 
+# Pushes the moving `master` tag, so runs queue rather than overlap: an older
+# run can't fail at the mirror after a newer one moved it.
+concurrency:
+  group: docker-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
-  DOCKER_REPO: ethpandaops/observoor
+  DOCKER_REPO: ghcr.io/ethpandaops/observoor
 
 jobs:
   build-and-push:
@@ -14,6 +20,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write      # attest, and authenticate to the image mirror
+      attestations: write
     steps:
       - name: Checkout
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -24,11 +32,12 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
 
-      - name: Login to DockerHub
+      - name: Login to GHCR
         uses: docker/login-action@184bdaa0721073962dff0199f1fb9940f07167d1 # v3.5.0
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
 
       - name: Generate Docker metadata
         id: meta
@@ -40,6 +49,7 @@ jobs:
             type=sha,prefix=master-
 
       - name: Build and push Docker image
+        id: build
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
@@ -51,3 +61,10 @@ jobs:
             GIT_COMMIT=${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Attest and mirror to Docker Hub
+        uses: ethpandaops/actions/mirror-image@738aeadbcdc54f1c9af659d35f8ef29dd5c0fae6
+        with:
+          tags: ${{ steps.meta.outputs.tags }}
+          digest: ${{ steps.build.outputs.digest }}
+          mirror-url: ${{ secrets.IMAGE_MIRROR_URL }}

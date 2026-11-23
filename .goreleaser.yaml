@@ -7,25 +7,16 @@ before:
     - cargo --version
 
 builds:
-  - id: linux-amd64
-    builder: prebuilt
-    prebuilt:
-      path: target/x86_64-unknown-linux-gnu/release/observoor
-    binary: observoor-{{.Version}}
-    goos:
-      - linux
-    goarch:
-      - amd64
-
-  - id: linux-arm64
-    builder: prebuilt
-    prebuilt:
-      path: target/aarch64-unknown-linux-gnu/release/observoor
-    binary: observoor-{{.Version}}
-    goos:
-      - linux
-    goarch:
-      - arm64
+  - id: observoor
+    builder: rust
+    binary: observoor
+    # The glibc suffix sets the minimum glibc the binaries need, independent of
+    # the build host.
+    targets:
+      - x86_64-unknown-linux-gnu.2.28
+      - aarch64-unknown-linux-gnu.2.28
+    env:
+      - GIT_COMMIT={{ .FullCommit }}
 
 checksum:
   name_template: 'checksums.txt'
@@ -47,8 +38,8 @@ dockers:
     goarch: amd64
     dockerfile: goreleaser-debian.Dockerfile
     image_templates:
-      - "ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64"
-      - "ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64"
+      - "ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64"
+      - "ghcr.io/ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64"
     build_flag_templates:
       - "--platform=linux/amd64"
       - "--provenance=false"
@@ -63,8 +54,8 @@ dockers:
     goarch: arm64
     dockerfile: goreleaser-debian.Dockerfile
     image_templates:
-      - "ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8"
-      - "ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8"
+      - "ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8"
+      - "ghcr.io/ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8"
     build_flag_templates:
       - "--platform=linux/arm64/v8"
       - "--provenance=false"
@@ -75,16 +66,16 @@ dockers:
       - "--label=org.opencontainers.image.version={{.Version}}"
 
 docker_manifests:
-  - name_template: ethpandaops/{{ .ProjectName }}:{{ .Version }}
+  - name_template: ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}
     image_templates:
-      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64
-      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
+      - ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-amd64
+      - ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
 
-  - name_template: ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64
+  - name_template: ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64
     image_templates:
-      - ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
+      - ghcr.io/ethpandaops/{{ .ProjectName }}:{{ .Version }}-arm64v8
 
-  - name_template: ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest
+  - name_template: ghcr.io/ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest
     image_templates:
-      - ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64
-      - ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8
+      - ghcr.io/ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-amd64
+      - ghcr.io/ethpandaops/{{ .ProjectName }}:{{ if .Env.RELEASE_SUFFIX }}{{ .Env.RELEASE_SUFFIX }}-{{ end }}latest-arm64v8
