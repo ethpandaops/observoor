@@ -1,10 +1,14 @@
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
+use regex::{Captures, Regex};
 use serde::Deserialize;
+use serde_yaml::Value;
 
 use crate::sink::aggregated::collector::ALL_METRIC_NAMES;
 use crate::tracer::event::EventType;
@@ -778,8 +782,12 @@ impl Config {
         let data = std::fs::read_to_string(path)
             .with_context(|| format!("reading config file {}", path.display()))?;
 
-        let cfg: Config = serde_yaml::from_str(&data)
-            .with_context(|| format!("parsing config file {}", path.display()))?;
+        let parsed: Result<Config> = if data.contains("${") {
+            expand_env_vars(&data).and_then(|value| Ok(serde_yaml::from_value(value)?))
+        } else {
+            serde_yaml::from_str(&data).map_err(Into::into)
+        };
+        let cfg = parsed.with_context(|| format!("parsing config file {}", path.display()))?;
 
         cfg.validate()?;
 
@@ -1123,6 +1131,131 @@ impl ClickHouseConfig {
 
         dsn
     }
+}
+
+static ENV_VAR_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$\{([^}:]+)(?::-([^}]*))?\}").expect("valid regex"));
+
+const PROBE_TOKEN_BASE: u64 = 7_000_000_000_000_000_000;
+
+/// Parse `data` and expand `${VAR}` and `${VAR:-default}` placeholders in its
+/// scalar values (not mapping keys). A `${VAR}` without a default whose `VAR`
+/// is unset or empty is an error. A `${VAR:-default}` uses the default when
+/// `VAR` is unset or empty. An unquoted value takes the type of its result,
+/// so `port: ${PORT}` can fill a number; a quoted value stays a string.
+fn expand_env_vars(data: &str) -> Result<Value> {
+    let mut value: Value = serde_yaml::from_str(data)?;
+
+    // serde_yaml does not record whether a scalar was quoted. Parsing the file
+    // again with each placeholder replaced by a number shows which values were
+    // unquoted: only those parse as numbers.
+    let probe = serde_yaml::from_str::<Value>(&number_placeholders(data)).ok();
+
+    let mut missing = Vec::new();
+    expand_value(&mut value, probe.as_ref(), &mut missing);
+
+    if !missing.is_empty() {
+        bail!(
+            "config references unset or empty environment variables: {}",
+            missing.join(", ")
+        );
+    }
+
+    Ok(value)
+}
+
+/// Replace each placeholder whose text cannot change the YAML structure with
+/// a distinct number.
+fn number_placeholders(data: &str) -> Cow<'_, str> {
+    let mut count = 0;
+
+    ENV_VAR_PATTERN.replace_all(data, |caps: &Captures<'_>| {
+        let structural = ['\n', '#', ',', '[', ']', '{', '"', '\''];
+        if caps[1].contains(structural)
+            || caps.get(2).is_some_and(|d| d.as_str().contains(structural))
+        {
+            return caps[0].to_string();
+        }
+
+        count += 1;
+        (PROBE_TOKEN_BASE + count).to_string()
+    })
+}
+
+fn expand_value(value: &mut Value, probe: Option<&Value>, missing: &mut Vec<String>) {
+    match value {
+        Value::String(s) => {
+            let expanded = expand_str(s, missing);
+            if expanded != *s {
+                *value = match probe {
+                    Some(Value::Number(_)) => resolve_plain(expanded),
+                    _ => Value::String(expanded),
+                };
+            }
+        }
+        Value::Sequence(items) => {
+            let mut probes = match probe {
+                Some(Value::Sequence(p)) if p.len() == items.len() => Some(p.iter()),
+                _ => None,
+            };
+            for item in items {
+                let p = probes.as_mut().and_then(Iterator::next);
+                expand_value(item, p, missing);
+            }
+        }
+        Value::Mapping(map) => {
+            let mut probes = match probe {
+                Some(Value::Mapping(p)) if p.len() == map.len() => Some(p.values()),
+                _ => None,
+            };
+            for item in map.values_mut() {
+                let p = probes.as_mut().and_then(Iterator::next);
+                expand_value(item, p, missing);
+            }
+        }
+        Value::Tagged(tagged) => expand_value(&mut tagged.value, None, missing),
+        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+    }
+}
+
+fn expand_str(value: &str, missing: &mut Vec<String>) -> String {
+    ENV_VAR_PATTERN
+        .replace_all(value, |caps: &Captures<'_>| {
+            let name = &caps[1];
+
+            if let Some(v) = std::env::var(name).ok().filter(|v| !v.is_empty()) {
+                return v;
+            }
+
+            if let Some(default) = caps.get(2) {
+                return default.as_str().to_string();
+            }
+
+            if !missing.iter().any(|m| m == name) {
+                missing.push(name.to_string());
+            }
+
+            String::new()
+        })
+        .into_owned()
+}
+
+/// Type an unquoted value as YAML would type it if written in the file.
+fn resolve_plain(value: String) -> Value {
+    if matches!(value.as_str(), "" | "~" | "null" | "Null" | "NULL") {
+        return Value::Null;
+    }
+
+    if value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
+    {
+        if let Ok(typed @ (Value::Bool(_) | Value::Number(_))) = serde_yaml::from_str(&value) {
+            return typed;
+        }
+    }
+
+    Value::String(value)
 }
 
 #[cfg(test)]
@@ -1772,5 +1905,220 @@ mod tests {
             .entries
             .insert("scheduler".to_string(), ProbeConfig { enabled: false });
         assert!(cfg.validate().is_ok());
+    }
+
+    const AWKWARD_VALUE: &str = "a\tb #c\nd: e\"f'g\\h";
+
+    fn yaml(content: &str) -> Value {
+        serde_yaml::from_str(content).expect("valid YAML")
+    }
+
+    fn decode(content: &str, set: &[(&str, &str)], unset: &[&str]) -> Result<Value> {
+        for (name, value) in set {
+            std::env::set_var(name, value);
+        }
+        for name in unset {
+            std::env::remove_var(name);
+        }
+
+        let result = expand_env_vars(content);
+
+        for (name, _) in set {
+            std::env::remove_var(name);
+        }
+
+        result
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_env_vars() {
+        let cases: &[(&str, &str, &[(&str, &str)], &[&str], &str)] = &[
+            (
+                "variable is replaced",
+                "password: pre-${OBS_PASS}-post",
+                &[("OBS_PASS", "s3cret")],
+                &[],
+                "password: pre-s3cret-post",
+            ),
+            (
+                "multiple variables in one value",
+                "addr: ${OBS_HOST}:${OBS_PORT}",
+                &[("OBS_HOST", "example.com"), ("OBS_PORT", "8080")],
+                &[],
+                "addr: example.com:8080",
+            ),
+            (
+                "default used when variable unset",
+                "addr: ${OBS_HOST:-localhost}",
+                &[],
+                &["OBS_HOST"],
+                "addr: localhost",
+            ),
+            (
+                "default used when variable empty",
+                "addr: ${OBS_HOST:-localhost}",
+                &[("OBS_HOST", "")],
+                &[],
+                "addr: localhost",
+            ),
+            (
+                "default ignored when variable set",
+                "addr: ${OBS_HOST:-localhost}",
+                &[("OBS_HOST", "example.com")],
+                &[],
+                "addr: example.com",
+            ),
+            (
+                "empty default allows unset variable",
+                "token: \"${OBS_TOKEN:-}\"",
+                &[],
+                &["OBS_TOKEN"],
+                "token: ''",
+            ),
+            (
+                "comments are not expanded",
+                "# password: ${OBS_PASS}\naddr: ${OBS_HOST} # ${OBS_PASS}",
+                &[("OBS_HOST", "example.com")],
+                &["OBS_PASS"],
+                "addr: example.com",
+            ),
+            (
+                "keys are not expanded",
+                "${OBS_HOST}: value",
+                &[("OBS_HOST", "example.com")],
+                &[],
+                "'${OBS_HOST}': value",
+            ),
+            (
+                "literal dollar signs are left unchanged",
+                "password: pa$$word $OBS_HOST $5 ${OBS_HOST",
+                &[("OBS_HOST", "example.com")],
+                &[],
+                "password: pa$$word $OBS_HOST $5 ${OBS_HOST",
+            ),
+            (
+                "unquoted value resolves its type, quoted value stays a string",
+                "port: ${OBS_PORT}\nquoted: \"${OBS_PORT}\"\nsingle: '${OBS_PORT}'\nenabled: ${OBS_ENABLED}\nlist:\n  - ${OBS_PORT}\n  - \"${OBS_ENABLED}\"\nflow: {a: \"${OBS_PORT}\", b: '${OBS_ENABLED}'}",
+                &[("OBS_PORT", "8080"), ("OBS_ENABLED", "true")],
+                &[],
+                "port: 8080\nquoted: '8080'\nsingle: '8080'\nenabled: true\nlist: [8080, 'true']\nflow: {a: '8080', b: 'true'}",
+            ),
+        ];
+
+        for (name, content, set, unset, want) in cases {
+            let got = decode(content, set, unset).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert_eq!(got, yaml(want), "{name}");
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_env_vars_unset_or_empty_is_error() {
+        let err = decode(
+            "user: ${OBS_USER}\nnested:\n  - pass: ${OBS_PASS}\nempty: ${OBS_EMPTY}\nagain: ${OBS_USER}",
+            &[("OBS_EMPTY", "")],
+            &["OBS_USER", "OBS_PASS"],
+        )
+        .expect_err("expected error");
+        assert_eq!(
+            err.to_string(),
+            "config references unset or empty environment variables: OBS_USER, OBS_PASS, OBS_EMPTY"
+        );
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_env_vars_value_with_yaml_syntax_arrives_unchanged() {
+        let got = decode(
+            "plain: ${OBS_P}\ndouble: \"${OBS_P}\"\nsingle: '${OBS_P}'\nlist:\n  - ${OBS_P}\nanchored: &a ${OBS_P}\naliased: *a",
+            &[("OBS_P", AWKWARD_VALUE)],
+            &[],
+        )
+        .expect("expansion should succeed");
+
+        let mut want = serde_yaml::Mapping::new();
+        for key in ["plain", "double", "single", "anchored", "aliased"] {
+            want.insert(key.into(), AWKWARD_VALUE.into());
+        }
+        want.insert("list".into(), Value::Sequence(vec![AWKWARD_VALUE.into()]));
+        assert_eq!(got, Value::Mapping(want));
+    }
+
+    #[test]
+    fn test_load_without_placeholders_is_unchanged() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example.config.yaml");
+        let data = std::fs::read_to_string(&path).expect("read example config");
+        assert!(!data.contains("${"));
+
+        let want: Config = serde_yaml::from_str(&data).expect("parse example config");
+        let got = Config::load(&path).expect("load example config");
+        assert_eq!(format!("{got:?}"), format!("{want:?}"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_expands_env_vars() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("example.config.yaml");
+        let data = std::fs::read_to_string(&path).expect("read example config");
+        let want: Config = serde_yaml::from_str(&data).expect("parse example config");
+
+        let with_placeholders = data
+            .replace(
+                "meta_client_name: \"my-observoor-instance\"",
+                "meta_client_name: \"${OBS_TEST_CLIENT_NAME}\"",
+            )
+            .replace(
+                "ring_buffer_size: 4194304",
+                "ring_buffer_size: ${OBS_TEST_RING_BUFFER_SIZE}",
+            )
+            .lines()
+            .map(|line| {
+                if line.starts_with("      # password:") {
+                    "      password: ${OBS_TEST_CH_PASSWORD}"
+                } else {
+                    line
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(with_placeholders.matches("${").count(), 3);
+
+        let config_path =
+            std::env::temp_dir().join(format!("observoor-env-config-{}.yaml", std::process::id()));
+        std::fs::write(&config_path, with_placeholders).expect("write config");
+
+        std::env::set_var("OBS_TEST_CLIENT_NAME", "my-observoor-instance");
+        std::env::set_var("OBS_TEST_RING_BUFFER_SIZE", "4194304");
+        std::env::set_var("OBS_TEST_CH_PASSWORD", AWKWARD_VALUE);
+        let got = Config::load(&config_path);
+        std::fs::remove_file(&config_path).expect("remove config");
+        let got = got.expect("load config");
+
+        assert_eq!(got.sinks.aggregated.clickhouse.password, AWKWARD_VALUE);
+        let mut got = got;
+        got.sinks.aggregated.clickhouse.password = String::new();
+        assert_eq!(format!("{got:?}"), format!("{want:?}"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_fails_on_unset_env_var() {
+        let path = std::env::temp_dir().join(format!(
+            "observoor-env-config-unset-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            "beacon:\n  endpoint: \"http://${OBS_TEST_UNSET_HOST}:5052\"\n",
+        )
+        .expect("write config");
+        std::env::remove_var("OBS_TEST_UNSET_HOST");
+
+        let err = Config::load(&path);
+        std::fs::remove_file(&path).expect("remove config");
+        let err = err.expect_err("expected error");
+
+        assert!(format!("{err:#}").contains("OBS_TEST_UNSET_HOST"));
     }
 }
