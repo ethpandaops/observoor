@@ -67,7 +67,7 @@ sinks:
 - `${VAR:-default}` uses `default` when `VAR` is unset or empty. `${VAR:-}` makes the variable optional.
 - Only the `${...}` form is expanded: `$VAR` and any other `$` are kept as written.
 - Placeholders are expanded in values only, after the YAML is parsed. Keys and comments are never expanded, and a value containing quotes, `#`, tabs or newlines arrives exactly as set.
-- An unquoted placeholder takes the type of its value, so `batch_size: ${CLICKHOUSE_BATCH_SIZE:-10000}` can fill a number. A quoted placeholder, or a value such as `null` that would otherwise decode as empty, is always a string.
+- An unquoted placeholder can fill a number or boolean field, so `batch_size: ${CLICKHOUSE_BATCH_SIZE:-10000}` sets a number. A string field always receives the value exactly as set, even when it looks like another type, such as `true`, `0x1F` or `null`. A quoted placeholder is always a string.
 
 Tiered per-metric aggregation intervals can be configured with
 `sinks.aggregated.resolution.overrides`:

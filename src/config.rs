@@ -783,7 +783,7 @@ impl Config {
             .with_context(|| format!("reading config file {}", path.display()))?;
 
         let parsed: Result<Config> = if data.contains("${") {
-            expand_env_vars(&data).and_then(|value| Ok(serde_yaml::from_value(value)?))
+            expand_env_vars(&data).and_then(|data| Ok(serde_yaml::from_str(&data)?))
         } else {
             serde_yaml::from_str(&data).map_err(Into::into)
         };
@@ -1138,12 +1138,19 @@ static ENV_VAR_PATTERN: LazyLock<Regex> =
 
 const PROBE_TOKEN_BASE: u64 = 7_000_000_000_000_000_000;
 
-/// Parse `data` and expand `${VAR}` and `${VAR:-default}` placeholders in its
-/// scalar values (not mapping keys). A `${VAR}` without a default whose `VAR`
-/// is unset or empty is an error. A `${VAR:-default}` uses the default when
-/// `VAR` is unset or empty. An unquoted value takes the type of its result,
-/// so `port: ${PORT}` can fill a number; a quoted value stays a string.
-fn expand_env_vars(data: &str) -> Result<Value> {
+const PLAIN_TOKEN_PREFIX: &str = "OBSERVOORENVPLAINVALUE";
+
+/// Parse `data`, expand `${VAR}` and `${VAR:-default}` placeholders in its
+/// scalar values (not mapping keys) and return the document re-encoded. A
+/// `${VAR}` without a default whose `VAR` is unset or empty is an error. A
+/// `${VAR:-default}` uses the default when `VAR` is unset or empty.
+///
+/// An unquoted placeholder whose value is a single plain word is written back
+/// unquoted, so it decodes like the same word written in the file: a number
+/// field reads `port: ${PORT}` as a number and a string field gets the exact
+/// text, even for values such as `true` or `0x1F`. Any other value, and every
+/// quoted placeholder, is written back as a quoted string.
+fn expand_env_vars(data: &str) -> Result<String> {
     let mut value: Value = serde_yaml::from_str(data)?;
 
     // serde_yaml does not record whether a scalar was quoted. Parsing the file
@@ -1152,7 +1159,8 @@ fn expand_env_vars(data: &str) -> Result<Value> {
     let probe = serde_yaml::from_str::<Value>(&number_placeholders(data)).ok();
 
     let mut missing = Vec::new();
-    expand_value(&mut value, probe.as_ref(), &mut missing);
+    let mut plain = Vec::new();
+    expand_value(&mut value, probe.as_ref(), &mut missing, &mut plain);
 
     if !missing.is_empty() {
         bail!(
@@ -1161,7 +1169,33 @@ fn expand_env_vars(data: &str) -> Result<Value> {
         );
     }
 
-    Ok(value)
+    let mut encoded = serde_yaml::to_string(&value)?;
+    for (i, raw) in plain.iter().enumerate() {
+        encoded = encoded.replacen(&plain_token(i), raw, 1);
+    }
+
+    Ok(encoded)
+}
+
+fn plain_token(index: usize) -> String {
+    format!("{PLAIN_TOKEN_PREFIX}{index}END")
+}
+
+/// Whether `value` reads back as the same text when written as a plain YAML
+/// scalar, and as something other than null.
+fn is_plain_word(value: &str) -> bool {
+    let mut chars = value.chars();
+    let starts_safe = chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        && !(value.starts_with('-') && value.len() == 1);
+
+    starts_safe
+        && value
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
+        && !matches!(value, "null" | "Null" | "NULL")
+        && !value.contains(PLAIN_TOKEN_PREFIX)
 }
 
 /// Replace each placeholder whose text cannot change the YAML structure with
@@ -1182,15 +1216,24 @@ fn number_placeholders(data: &str) -> Cow<'_, str> {
     })
 }
 
-fn expand_value(value: &mut Value, probe: Option<&Value>, missing: &mut Vec<String>) {
+fn expand_value(
+    value: &mut Value,
+    probe: Option<&Value>,
+    missing: &mut Vec<String>,
+    plain: &mut Vec<String>,
+) {
     match value {
         Value::String(s) => {
             let expanded = expand_str(s, missing);
-            if expanded != *s {
-                *value = match probe {
-                    Some(Value::Number(_)) => resolve_plain(expanded),
-                    _ => Value::String(expanded),
-                };
+            if expanded == *s {
+                return;
+            }
+
+            if matches!(probe, Some(Value::Number(_))) && is_plain_word(&expanded) {
+                *s = plain_token(plain.len());
+                plain.push(expanded);
+            } else {
+                *s = expanded;
             }
         }
         Value::Sequence(items) => {
@@ -1200,7 +1243,7 @@ fn expand_value(value: &mut Value, probe: Option<&Value>, missing: &mut Vec<Stri
             };
             for item in items {
                 let p = probes.as_mut().and_then(Iterator::next);
-                expand_value(item, p, missing);
+                expand_value(item, p, missing, plain);
             }
         }
         Value::Mapping(map) => {
@@ -1210,11 +1253,17 @@ fn expand_value(value: &mut Value, probe: Option<&Value>, missing: &mut Vec<Stri
             };
             for item in map.values_mut() {
                 let p = probes.as_mut().and_then(Iterator::next);
-                expand_value(item, p, missing);
+                expand_value(item, p, missing, plain);
             }
         }
-        Value::Tagged(tagged) => expand_value(&mut tagged.value, None, missing),
-        Value::Null | Value::Bool(_) | Value::Number(_) => {}
+        Value::Tagged(tagged) => expand_value(&mut tagged.value, None, missing, plain),
+        // serde_yaml writes null as `null`, which a struct field rejects, but
+        // accepts an empty value, so a null is written back empty.
+        Value::Null => {
+            *value = Value::String(plain_token(plain.len()));
+            plain.push(String::new());
+        }
+        Value::Bool(_) | Value::Number(_) => {}
     }
 }
 
@@ -1238,22 +1287,6 @@ fn expand_str(value: &str, missing: &mut Vec<String>) -> String {
             String::new()
         })
         .into_owned()
-}
-
-/// Type an unquoted value as YAML would type it if written in the file. A
-/// value that would resolve to null stays a string instead of silently
-/// decoding as empty.
-fn resolve_plain(value: String) -> Value {
-    if value
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
-    {
-        if let Ok(typed @ (Value::Bool(_) | Value::Number(_))) = serde_yaml::from_str(&value) {
-            return typed;
-        }
-    }
-
-    Value::String(value)
 }
 
 #[cfg(test)]
@@ -1919,7 +1952,7 @@ mod tests {
             std::env::remove_var(name);
         }
 
-        let result = expand_env_vars(content);
+        let result = expand_env_vars(content).and_then(|data| Ok(serde_yaml::from_str(&data)?));
 
         for (name, _) in set {
             std::env::remove_var(name);
@@ -2104,6 +2137,67 @@ mod tests {
         let mut got = got;
         got.sinks.aggregated.clickhouse.password = String::new();
         assert_eq!(format!("{got:?}"), format!("{want:?}"));
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_unquoted_placeholders_keep_string_values_exact() {
+        let path = std::env::temp_dir().join(format!(
+            "observoor-env-config-exact-{}.yaml",
+            std::process::id()
+        ));
+        std::fs::write(
+            &path,
+            r#"
+meta_client_name: ${OBS_TEST_VALUE}
+meta_network_name: testnet
+beacon:
+  endpoint: ${OBS_TEST_VALUE}
+sinks:
+  aggregated:
+    enabled: true
+    clickhouse:
+      enabled: true
+      endpoint: ${OBS_TEST_VALUE}
+      username: ${OBS_TEST_VALUE}
+      password: ${OBS_TEST_VALUE}
+      batch_size: ${OBS_TEST_BATCH_SIZE}
+    http:
+      address: ${OBS_TEST_VALUE}
+      headers:
+        Authorization: ${OBS_TEST_VALUE}
+"#,
+        )
+        .expect("write config");
+        std::env::set_var("OBS_TEST_BATCH_SIZE", "0x10");
+
+        let mut results = Vec::new();
+        for value in [
+            "true", "yes", "0x1F", "1e3", "007", ".inf", "-0", "+1", "null", "~", "a: b", "- x",
+            "#x", "-",
+        ] {
+            std::env::set_var("OBS_TEST_VALUE", value);
+            results.push((value, Config::load(&path)));
+        }
+        std::fs::remove_file(&path).expect("remove config");
+
+        for (value, cfg) in results {
+            let cfg = cfg.unwrap_or_else(|e| panic!("{value}: {e:#}"));
+            let ch = &cfg.sinks.aggregated.clickhouse;
+            let http = &cfg.sinks.aggregated.http;
+            for got in [
+                &cfg.meta_client_name,
+                &cfg.beacon.endpoint,
+                &ch.endpoint,
+                &ch.username,
+                &ch.password,
+                &http.address,
+                &http.headers["Authorization"],
+            ] {
+                assert_eq!(got, value);
+            }
+            assert_eq!(ch.batch_size, 16, "{value}");
+        }
     }
 
     #[test]
