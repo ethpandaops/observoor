@@ -1240,12 +1240,10 @@ fn expand_str(value: &str, missing: &mut Vec<String>) -> String {
         .into_owned()
 }
 
-/// Type an unquoted value as YAML would type it if written in the file.
+/// Type an unquoted value as YAML would type it if written in the file. A
+/// value that would resolve to null stays a string instead of silently
+/// decoding as empty.
 fn resolve_plain(value: String) -> Value {
-    if matches!(value.as_str(), "" | "~" | "null" | "Null" | "NULL") {
-        return Value::Null;
-    }
-
     if value
         .chars()
         .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.' | '_'))
@@ -2003,6 +2001,13 @@ mod tests {
                 &[("OBS_PORT", "8080"), ("OBS_ENABLED", "true")],
                 &[],
                 "port: 8080\nquoted: '8080'\nsingle: '8080'\nenabled: true\nlist: [8080, 'true']\nflow: {a: '8080', b: 'true'}",
+            ),
+            (
+                "unquoted value that resolves to null stays a string",
+                "name: ${OBS_NULL}\ntilde: ${OBS_TILDE}\nempty: ${OBS_UNSET_EMPTY:-}",
+                &[("OBS_NULL", "null"), ("OBS_TILDE", "~")],
+                &["OBS_UNSET_EMPTY"],
+                "name: 'null'\ntilde: '~'\nempty: ''",
             ),
         ];
 
